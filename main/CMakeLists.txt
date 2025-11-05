@@ -1,8 +1,24 @@
 idf_component_register(SRCS "DA2_esp_LAN.c"
-                            "../rbg_led_ws_handler/rbg_handler.c" 
+                            "../rbg_led_ws_handler/rbg_handler.c"
+                            "../Application/FOTA_LAN/src/fota_lan_handler.c"
                     PRIV_REQUIRES 
+                                esp_wifi
+                                nvs_flash
+                                mqtt
+                                esp_adc
+                                esp_driver_i2c
                                 esp_driver_uart
                                 esp_driver_gpio 
                                 esp_driver_rmt
+                                esp_driver_spi
+                                usb
+                                mbedtls
+                                esp_driver_usb_serial_jtag
+                                esp_http_client
+                                app_update
+                                esp_https_ota
+                                esp_netif
+                                esp_psram
                     INCLUDE_DIRS "."
+                                "../Application/FOTA_LAN/include"
                                 "../rbg_led_ws_handler")

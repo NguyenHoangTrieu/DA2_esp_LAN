@@ -3778,6 +3778,23 @@ CONFIG_WIFI_PROV_STA_ALL_CHANNEL_SCAN=y
 # default:
 # CONFIG_WIFI_PROV_STA_FAST_SCAN is not set
 # end of Wi-Fi Provisioning Manager
+
+#
+# eppp_link
+#
+# default:
+# CONFIG_EPPP_LINK_USES_PPP is not set
+# default:
+CONFIG_EPPP_LINK_DEVICE_UART=y
+# default:
+# CONFIG_EPPP_LINK_DEVICE_SPI is not set
+# default:
+# CONFIG_EPPP_LINK_DEVICE_SDIO is not set
+# default:
+CONFIG_EPPP_LINK_CONN_MAX_RETRY=6
+# default:
+# CONFIG_EPPP_LINK_CHANNELS_SUPPORT is not set
+# end of eppp_link
 # end of Component config
 
 # default:
