@@ -37,13 +37,13 @@
  * Initializes the UART and starts the task/mechanism to listen
  * for the OTA trigger command from the WAN MCU via eppp_link.
  */
-void fota_lan_init(void);
+void fota_lan_handler_task_start(void);
 
 /**
  * @brief Deinitialize the FOTA LAN handler
  * 
  * Stops all tasks and cleans up resources.
  */
-void fota_lan_deinit(void);
+void fota_lan_handler_task_stop(void);
 
 #endif /* FOTA_LAN_HANDLER_H */
