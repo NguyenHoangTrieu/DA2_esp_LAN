@@ -1,0 +1,43 @@
+# ESP-IDF specific
+build/
+.vscode/
+.devcontainer/
+
+# IDE and editor files
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Dependencies
+dependencies.lock
+
+# Flash download tool
+flash_project_args
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+
+# Logs
+*.log
+
+# ESP32 specific
+# *.bin
+*.elf
+*.map
