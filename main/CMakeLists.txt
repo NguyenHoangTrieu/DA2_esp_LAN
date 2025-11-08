@@ -1,6 +1,7 @@
 idf_component_register(SRCS "DA2_esp_LAN.c"
                             "../rbg_led_ws_handler/rbg_handler.c"
                             "../Application/FOTA_LAN/src/fota_lan_handler.c"
+                            "../BSP/MCU_WAN_Communication/src/wan_comm.c"
                     PRIV_REQUIRES 
                                 esp_wifi
                                 nvs_flash
@@ -8,7 +9,8 @@ idf_component_register(SRCS "DA2_esp_LAN.c"
                                 esp_adc
                                 esp_driver_i2c
                                 esp_driver_uart
-                                esp_driver_gpio 
+                                esp_driver_gpio
+                                esp_driver_spi
                                 esp_driver_rmt
                                 esp_driver_spi
                                 usb
@@ -21,4 +23,5 @@ idf_component_register(SRCS "DA2_esp_LAN.c"
                                 esp_psram
                     INCLUDE_DIRS "."
                                 "../Application/FOTA_LAN/include"
+                                "../BSP/MCU_WAN_Communication/include"
                                 "../rbg_led_ws_handler")
