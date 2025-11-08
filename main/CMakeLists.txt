@@ -1,6 +1,8 @@
 idf_component_register(SRCS "DA2_esp_LAN.c"
                             "../rbg_led_ws_handler/rbg_handler.c"
                             "../Application/FOTA_LAN/src/fota_lan_handler.c"
+                            "../Application/MCU_WAN_Handler/src/mcu_wan_handler.c"
+                            "../Application/Config_Handler/src/config_handler.c"
                             "../BSP/MCU_WAN_Communication/src/wan_comm.c"
                     PRIV_REQUIRES 
                                 esp_wifi
@@ -23,5 +25,7 @@ idf_component_register(SRCS "DA2_esp_LAN.c"
                                 esp_psram
                     INCLUDE_DIRS "."
                                 "../Application/FOTA_LAN/include"
+                                "../Application/MCU_WAN_Handler/include"
+                                "../Application/Config_Handler/include"
                                 "../BSP/MCU_WAN_Communication/include"
                                 "../rbg_led_ws_handler")
