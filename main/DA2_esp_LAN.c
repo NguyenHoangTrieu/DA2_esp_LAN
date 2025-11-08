@@ -3,6 +3,8 @@
 */
 
 #include "rbg_handler.h"
+#include "config_handler.h"
+#include "mcu_wan_handler.h"
 
 static const char *TAG = "MAIN APP";
 
@@ -23,11 +25,12 @@ void app_main(void)
     init_led_strip();
     led_on();
     main_task_handle = xTaskGetCurrentTaskHandle();
+    mcu_wan_handler_start();
+    config_handler_task_start();
 
     while (1) {
         led_on();
         vTaskDelay(pdMS_TO_TICKS(500));
-        ESP_LOGI(TAG, "Main loop heartbeat");
         led_show_green();
         vTaskDelay(pdMS_TO_TICKS(500));
     }

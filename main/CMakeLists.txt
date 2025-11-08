@@ -28,4 +28,6 @@ idf_component_register(SRCS "DA2_esp_LAN.c"
                                 "../Application/MCU_WAN_Handler/include"
                                 "../Application/Config_Handler/include"
                                 "../BSP/MCU_WAN_Communication/include"
-                                "../rbg_led_ws_handler")
+                                "../rbg_led_ws_handler"
+                    EMBED_TXTFILES ${project_dir}/server_certs/ca_cert.pem)
+
