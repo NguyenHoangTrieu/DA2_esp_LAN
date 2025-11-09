@@ -31,7 +31,6 @@ static bool g_initialized = false;
 #define MCU_WAN_SPI_MISO        GPIO_NUM_12
 #define MCU_WAN_SPI_WP          GPIO_NUM_13  // For Quad mode
 #define MCU_WAN_SPI_HD          GPIO_NUM_14  // For Quad mode
-#define MCU_WAN_SPI_HANDSHAKE   GPIO_NUM_15  // Handshake GPIO
 
 /**
  * @brief Command received callback (from LAN MCU)
@@ -128,7 +127,6 @@ static esp_err_t mcu_wan_handler_init(void) {
         .gpio_io1 = MCU_WAN_SPI_MISO,
         .gpio_io2 = MCU_WAN_SPI_WP,
         .gpio_io3 = MCU_WAN_SPI_HD,
-        // .gpio_handshake = MCU_WAN_SPI_HANDSHAKE,
         
         .mode = 0,  // SPI Mode 0
         .host_id = SPI2_HOST,
