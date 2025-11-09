@@ -184,6 +184,8 @@ wan_comm_status_t wan_comm_init(const wan_comm_config_t* config, wan_comm_handle
     // Set global handle for callbacks
     g_wan_handle = h;
     
+    h->is_running = true;
+
     // Create processing task
     BaseType_t task_ret = xTaskCreate(
         wan_comm_processing_task,
@@ -204,8 +206,6 @@ wan_comm_status_t wan_comm_init(const wan_comm_config_t* config, wan_comm_handle
         g_wan_handle = NULL;
         return WAN_COMM_ERR_INVALID_STATE;
     }
-    
-    h->is_running = true;
     
     *handle = h;
     
