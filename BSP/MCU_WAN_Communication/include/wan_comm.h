@@ -1,4 +1,4 @@
-/**LAN_COMM_MAX_TRANSF
+/**
  * @file wan_comm.h
  * @brief WAN MCU Communication Library (QSPI Slave)
  * 
@@ -39,7 +39,6 @@ extern "C" {
 #define WAN_COMM_PROCESSING_TASK_STACK_SIZE 4096
 #define WAN_COMM_PROCESSING_TASK_PRIORITY 5
 #define WAN_COMM_TRANS_QUEUE_SIZE 10
-#define WAN_COMM_FIXED_TRANSFER_SIZE 128
 
 /**
  * @brief Status codes
@@ -95,7 +94,6 @@ typedef struct {
     int gpio_io1;           // MISO / IO1
     int gpio_io2;           // WP / IO2 (for Quad mode)
     int gpio_io3;           // HD / IO3 (for Quad mode)
-    gpio_num_t gpio_handshake; // Handshake pin
     
     // SPI configuration
     uint8_t mode;               // SPI mode (0-3)

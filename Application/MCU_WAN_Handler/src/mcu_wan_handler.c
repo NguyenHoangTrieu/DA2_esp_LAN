@@ -128,7 +128,7 @@ static esp_err_t mcu_wan_handler_init(void) {
         .gpio_io1 = MCU_WAN_SPI_MISO,
         .gpio_io2 = MCU_WAN_SPI_WP,
         .gpio_io3 = MCU_WAN_SPI_HD,
-        .gpio_handshake = MCU_WAN_SPI_HANDSHAKE,
+        // .gpio_handshake = MCU_WAN_SPI_HANDSHAKE,
         
         .mode = 0,  // SPI Mode 0
         .host_id = SPI2_HOST,
