@@ -50,9 +50,12 @@
 
 /* eppp_link UART Configuration (client side - connects to WAN MCU server) */
 /* Pins are cross-wired with WAN MCU server side */
+#define FOTA_LAN_UART_PORT UART_NUM_0
 #define FOTA_LAN_UART_TX_PIN GPIO_NUM_44       /* TX → WAN RX (GPIO 18) */
 #define FOTA_LAN_UART_RX_PIN GPIO_NUM_43       /* RX ← WAN TX (GPIO 17) */
-#define FOTA_LAN_UART_BAUD_RATE 115200
+#define FOTA_LAN_UART_BAUD_RATE      115200
+#define FOTA_LAN_UART_BUF_SIZE       2048
+#define FOTA_LAN_PPP_UART_QUEUE_SIZE 20 
 
 /* eppp_link Client Connection Timeout (ms) */
 #define FOTA_LAN_EPPP_CONNECT_TIMEOUT_MS 30000 /* 30 seconds */

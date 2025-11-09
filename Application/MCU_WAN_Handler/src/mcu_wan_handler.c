@@ -152,10 +152,6 @@ static esp_err_t mcu_wan_handler_init(void) {
         return ESP_FAIL;
     }
     
-    // Prepare initial TX data (ready for master to read)
-    uint8_t initial_data[] = "WAN_MCU_READY";
-    wan_comm_load_tx_data(g_wan_comm_handle, initial_data, strlen((char*)initial_data));
-    
     // Mark as initialized (will never initialize again)
     g_initialized = true;
     

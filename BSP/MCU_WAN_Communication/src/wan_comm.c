@@ -52,6 +52,7 @@ struct wan_comm_handle_s {
     // State
     bool is_initialized;
     bool is_running;
+    bool is_tx_only;
     wan_comm_status_t last_error;
     
     // Statistics
@@ -169,6 +170,7 @@ wan_comm_status_t wan_comm_init(const wan_comm_config_t* config, wan_comm_handle
     // Initialize state
     h->is_initialized = true;
     h->is_running = true;
+    h->is_tx_only = false;
     h->last_error = WAN_COMM_OK;
     h->commands_received = 0;
     h->data_packets_received = 0;
@@ -273,8 +275,9 @@ wan_comm_status_t wan_comm_load_tx_data(wan_comm_handle_t handle,
     handle->tx_buffer_len = length;
     
     xSemaphoreGive(handle->tx_buffer_mutex);
-    
-    ESP_LOGD(TAG, "TX data loaded: %d bytes", length);
+    // Set TX only flag
+    handle->is_tx_only = true;
+    ESP_LOGI(TAG, "TX data loaded: %d bytes", length);
     
     return WAN_COMM_OK;
 }
@@ -400,6 +403,14 @@ static void wan_comm_processing_task(void* arg) {
             ESP_LOGE(TAG, "Failed to get transaction result: %s", esp_err_to_name(ret));
             continue;
         }
+
+        // Check if this was a TX-only transaction
+        if (handle->is_tx_only) {
+            ESP_LOGI(TAG, "TX transaction complete, skipping parse");
+            handle->is_tx_only = false;  // Reset flag
+            wan_comm_start_receive_transaction(handle);  // Back to RX
+            continue;
+        }
         
         if (trans->trans_len == 0) {
             // Empty transaction, restart
@@ -410,7 +421,7 @@ static void wan_comm_processing_task(void* arg) {
         // Convert trans_len from bits to bytes
         size_t received_bytes = trans->trans_len / 8;
         
-        ESP_LOGD(TAG, "Transaction complete: %d bytes received", received_bytes);
+        ESP_LOGI(TAG, "Transaction complete: %d bytes received", received_bytes);
         
         // Swap buffers to allow next transaction to start immediately
         uint8_t* processing_buffer = wan_comm_swap_rx_buffers(handle);
@@ -487,7 +498,7 @@ static wan_comm_status_t wan_comm_parse_packet(uint8_t* buffer, size_t length,
     *payload = &buffer[WAN_COMM_HEADER_SIZE];
     *payload_length = length - WAN_COMM_HEADER_SIZE;
     
-    ESP_LOGD(TAG, "Packet parsed: Header=0x%04X, Payload=%d bytes", *header_type, *payload_length);
+    ESP_LOGI(TAG, "Packet parsed: Header=0x%04X, Payload=%d bytes", *header_type, *payload_length);
     
     return WAN_COMM_OK;
 }

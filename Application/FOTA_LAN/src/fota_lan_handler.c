@@ -234,9 +234,12 @@ static esp_err_t fota_lan_connect_ppp(void)
     
 #if CONFIG_EPPP_LINK_DEVICE_UART
     config.transport = EPPP_TRANSPORT_UART;
+    config.uart.port = FOTA_LAN_UART_PORT;
     config.uart.tx_io = FOTA_LAN_UART_TX_PIN;
     config.uart.rx_io = FOTA_LAN_UART_RX_PIN;
     config.uart.baud = FOTA_LAN_UART_BAUD_RATE;
+    config.uart.rx_buffer_size = FOTA_LAN_UART_BUF_SIZE;
+    config.uart.queue_size = FOTA_LAN_PPP_UART_QUEUE_SIZE;
 #else
     #error "UART transport must be enabled in menuconfig"
 #endif

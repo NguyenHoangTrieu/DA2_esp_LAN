@@ -26,6 +26,15 @@ void app_main(void)
     init_led_strip();
     led_on();
     main_task_handle = xTaskGetCurrentTaskHandle();
+    // CREATE DEFAULT EVENT LOOP FIRST (if not already created)
+    esp_err_t ret = esp_event_loop_create_default();
+    if (ret == ESP_ERR_INVALID_STATE) {
+        // Event loop already created, this is OK
+        ESP_LOGW(TAG, "Default event loop already exists");
+    } else if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to create default event loop: %s", esp_err_to_name(ret));
+        return;
+    }
     config_handler_task_start();
     mcu_wan_handler_start();
     // fota_lan_handler_task_start();

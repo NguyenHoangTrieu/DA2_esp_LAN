@@ -20,12 +20,12 @@ static TaskHandle_t config_handler_task_handle = NULL;
  * @brief Parse command type from 2-character prefix
  */
 config_type_t config_parse_type(const char *cmd, uint16_t len) {
-  if (len < 2) {
+  if (len < 4 && (cmd[0] != 'C' || cmd[1] != 'F')) {
     return CONFIG_TYPE_UNKNOWN;
   }
 
   // Check first 2 characters
-  if (cmd[0] == 'F' && cmd[1] == 'W') {
+  if (cmd[2] == 'F' && cmd[3] == 'W') {
     return CONFIG_UPDATE_FIRMWARE;
   }
 
@@ -52,13 +52,13 @@ esp_err_t config_parse_fota(const char *data, uint16_t len,
   cfg->force_update = false;
 
   // Check if just "FW" command (use defaults)
-  if (len == 2) {
+  if (len == 4) {
     ESP_LOGI(TAG, "FOTA command: use default URL");
     return ESP_OK;
   }
 
   // Parse format: "FW:url" or "FW:url:FORCE"
-  const char *ptr = data + 2; // Skip "FW"
+  const char *ptr = data + 4; // Skip "CF" and "FW"
 
   if (*ptr != ':') {
     ESP_LOGE(TAG, "Invalid FOTA format: missing ':'");
