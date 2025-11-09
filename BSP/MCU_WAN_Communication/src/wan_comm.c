@@ -1,34 +1,15 @@
 /**
  * @file wan_comm.c
- * @brief WAN MCU Communication Library Implementation
+ * @brief WAN MCU Communication Library Implementation (SPI Slave)
  */
 
 #include "wan_comm.h"
 #include <string.h>
-#include <stdlib.h>
+#include <stdio.h>
 #include "esp_log.h"
 #include "esp_attr.h"
 
 static const char* TAG = "WAN_COMM";
-
-/**
- * @brief Transaction completion event
- */
-typedef struct {
-    size_t trans_len;           // Transaction length
-    uint8_t* buffer;            // Buffer pointer
-} wan_comm_trans_event_t;
-
-/**
- * @brief Double buffer pool structure
- */
-typedef struct {
-    uint8_t* buffer_a;              // First buffer
-    uint8_t* buffer_b;              // Second buffer
-    uint16_t buffer_size;           // Size of each buffer
-    uint8_t active_buffer;          // 0 for A, 1 for B
-    SemaphoreHandle_t swap_mutex;   // Mutex for buffer swapping
-} wan_comm_buffer_pool_t;
 
 /**
  * @brief Internal handle structure
@@ -37,13 +18,10 @@ struct wan_comm_handle_s {
     // Configuration
     wan_comm_config_t config;
     
-    // SPI slave
-    spi_slave_transaction_t spi_trans;
-    
-    // Buffers
-    wan_comm_buffer_pool_t rx_buffer_pool;
+    // Buffers (DMA-capable)
+    uint8_t* rx_buffer;
     uint8_t* tx_buffer;
-    size_t tx_buffer_len;
+    size_t buffer_size;
     SemaphoreHandle_t tx_buffer_mutex;
     
     // Processing
@@ -60,16 +38,34 @@ struct wan_comm_handle_s {
     uint32_t error_count;
 };
 
+// Global handle for callbacks
+static wan_comm_handle_t g_wan_handle = NULL;
+
 // Forward declarations
 static void wan_comm_processing_task(void* arg);
-static wan_comm_status_t wan_comm_parse_packet(uint8_t* buffer, size_t length, 
-                                               uint16_t* header_type, 
-                                               uint8_t** payload, 
+static wan_comm_status_t wan_comm_parse_packet(uint8_t* buffer, size_t length,
+                                               uint16_t* header_type,
+                                               uint8_t** payload,
                                                uint16_t* payload_length);
-static wan_comm_status_t wan_comm_start_receive_transaction(wan_comm_handle_t handle);
-static uint8_t* wan_comm_get_active_rx_buffer(wan_comm_handle_t handle);
-static uint8_t* wan_comm_swap_rx_buffers(wan_comm_handle_t handle);
 static void wan_comm_report_error(wan_comm_handle_t handle, wan_comm_status_t error, const char* context);
+
+/**
+ * @brief Post-setup callback - signal slave is ready
+ */
+static void IRAM_ATTR wan_slave_post_setup_cb(spi_slave_transaction_t *trans) {
+    if (g_wan_handle != NULL && g_wan_handle->config.gpio_handshake != GPIO_NUM_NC) {
+        gpio_set_level(g_wan_handle->config.gpio_handshake, 1);  // Ready
+    }
+}
+
+/**
+ * @brief Post-transaction callback - signal slave is busy
+ */
+static void IRAM_ATTR wan_slave_post_trans_cb(spi_slave_transaction_t *trans) {
+    if (g_wan_handle != NULL && g_wan_handle->config.gpio_handshake != GPIO_NUM_NC) {
+        gpio_set_level(g_wan_handle->config.gpio_handshake, 0);  // Busy
+    }
+}
 
 /**
  * @brief Initialize WAN communication library
@@ -84,7 +80,7 @@ wan_comm_status_t wan_comm_init(const wan_comm_config_t* config, wan_comm_handle
         return WAN_COMM_ERR_INVALID_ARG;
     }
     
-    ESP_LOGI(TAG, "Initializing WAN communication library (Slave mode)");
+    ESP_LOGI(TAG, "Initializing WAN communication library (Slave mode with spi_slave_transmit)");
     
     // Allocate handle
     wan_comm_handle_t h = (wan_comm_handle_t)calloc(1, sizeof(struct wan_comm_handle_s));
@@ -98,38 +94,47 @@ wan_comm_status_t wan_comm_init(const wan_comm_config_t* config, wan_comm_handle
     
     // Set defaults
     if (h->config.rx_buffer_size == 0) {
-        h->config.rx_buffer_size = WAN_COMM_DEFAULT_RX_BUFFER_SIZE;
+        h->config.rx_buffer_size = WAN_COMM_FIXED_TRANSFER_SIZE;
     }
     if (h->config.tx_buffer_size == 0) {
-        h->config.tx_buffer_size = WAN_COMM_DEFAULT_TX_BUFFER_SIZE;
+        h->config.tx_buffer_size = WAN_COMM_FIXED_TRANSFER_SIZE;
     }
     if (h->config.dma_channel == 0) {
         h->config.dma_channel = SPI_DMA_CH_AUTO;
     }
     
-    // Allocate double RX buffers (DMA-capable memory)
-    h->rx_buffer_pool.buffer_size = h->config.rx_buffer_size;
-    h->rx_buffer_pool.buffer_a = (uint8_t*)heap_caps_malloc(h->config.rx_buffer_size, MALLOC_CAP_DMA);
-    h->rx_buffer_pool.buffer_b = (uint8_t*)heap_caps_malloc(h->config.rx_buffer_size, MALLOC_CAP_DMA);
-    h->rx_buffer_pool.active_buffer = 0;
-    h->rx_buffer_pool.swap_mutex = xSemaphoreCreateMutex();
+    h->buffer_size = WAN_COMM_FIXED_TRANSFER_SIZE;
     
-    // Allocate TX buffer (DMA-capable memory)
-    h->tx_buffer = (uint8_t*)heap_caps_malloc(h->config.tx_buffer_size, MALLOC_CAP_DMA);
+    // Allocate DMA-capable buffers
+    h->rx_buffer = (uint8_t*)heap_caps_malloc(h->buffer_size, MALLOC_CAP_DMA);
+    h->tx_buffer = (uint8_t*)heap_caps_malloc(h->buffer_size, MALLOC_CAP_DMA);
     h->tx_buffer_mutex = xSemaphoreCreateMutex();
-    h->tx_buffer_len = 0;
     
-    if (h->rx_buffer_pool.buffer_a == NULL || h->rx_buffer_pool.buffer_b == NULL || 
-        h->tx_buffer == NULL || h->rx_buffer_pool.swap_mutex == NULL || 
-        h->tx_buffer_mutex == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate buffers or synchronization primitives");
-        free(h->rx_buffer_pool.buffer_a);
-        free(h->rx_buffer_pool.buffer_b);
+    if (h->rx_buffer == NULL || h->tx_buffer == NULL || h->tx_buffer_mutex == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate buffers or mutex");
+        free(h->rx_buffer);
         free(h->tx_buffer);
-        if (h->rx_buffer_pool.swap_mutex) vSemaphoreDelete(h->rx_buffer_pool.swap_mutex);
         if (h->tx_buffer_mutex) vSemaphoreDelete(h->tx_buffer_mutex);
         free(h);
         return WAN_COMM_ERR_NO_MEM;
+    }
+    
+    // Initialize TX buffer with default pattern
+    memset(h->tx_buffer, 0xA5, h->buffer_size);
+    
+    // Configure handshake GPIO as output
+    if (config->gpio_handshake != GPIO_NUM_NC) {
+        gpio_config_t io_conf = {
+            .intr_type = GPIO_INTR_DISABLE,
+            .mode = GPIO_MODE_OUTPUT,
+            .pin_bit_mask = (1ULL << config->gpio_handshake),
+            .pull_down_en = 0,
+            .pull_up_en = 0
+        };
+        gpio_config(&io_conf);
+        gpio_set_level(config->gpio_handshake, 0);  // Start LOW (busy)
+        
+        ESP_LOGI(TAG, "Handshake GPIO %d configured as OUTPUT", config->gpio_handshake);
     }
     
     // Configure SPI bus
@@ -139,24 +144,34 @@ wan_comm_status_t wan_comm_init(const wan_comm_config_t* config, wan_comm_handle
         .sclk_io_num = config->gpio_sck,
         .quadwp_io_num = config->enable_quad_mode ? config->gpio_io2 : -1,
         .quadhd_io_num = config->enable_quad_mode ? config->gpio_io3 : -1,
-        .max_transfer_sz = h->config.rx_buffer_size,
+        .max_transfer_sz = h->buffer_size,
         .flags = 0
     };
     
-    esp_err_t ret = spi_slave_initialize(config->host_id, &bus_cfg, NULL, config->dma_channel);
+    // Enable pull-ups on SPI lines
+    gpio_set_pull_mode(config->gpio_io0, GPIO_PULLUP_ONLY);  // MOSI
+    gpio_set_pull_mode(config->gpio_sck, GPIO_PULLUP_ONLY);  // SCK
+    gpio_set_pull_mode(config->gpio_cs, GPIO_PULLUP_ONLY);   // CS
+    
+    // Configure SPI slave with callbacks
+    spi_slave_interface_config_t slave_cfg = {
+        .spics_io_num = config->gpio_cs,
+        .flags = 0,
+        .queue_size = 3,
+        .mode = config->mode,
+        .post_setup_cb = wan_slave_post_setup_cb,
+        .post_trans_cb = wan_slave_post_trans_cb
+    };
+    
+    esp_err_t ret = spi_slave_initialize(config->host_id, &bus_cfg, &slave_cfg, config->dma_channel);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize SPI slave: %s", esp_err_to_name(ret));
-        free(h->rx_buffer_pool.buffer_a);
-        free(h->rx_buffer_pool.buffer_b);
+        free(h->rx_buffer);
         free(h->tx_buffer);
-        vSemaphoreDelete(h->rx_buffer_pool.swap_mutex);
         vSemaphoreDelete(h->tx_buffer_mutex);
         free(h);
         return WAN_COMM_ERR_INVALID_STATE;
     }
-    
-    // Configure GPIO for CS
-    gpio_set_pull_mode(config->gpio_cs, GPIO_PULLUP_ONLY);
     
     // Initialize state
     h->is_initialized = true;
@@ -165,6 +180,9 @@ wan_comm_status_t wan_comm_init(const wan_comm_config_t* config, wan_comm_handle
     h->commands_received = 0;
     h->data_packets_received = 0;
     h->error_count = 0;
+    
+    // Set global handle for callbacks
+    g_wan_handle = h;
     
     // Create processing task
     BaseType_t task_ret = xTaskCreate(
@@ -179,25 +197,20 @@ wan_comm_status_t wan_comm_init(const wan_comm_config_t* config, wan_comm_handle
     if (task_ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create processing task");
         spi_slave_free(config->host_id);
-        free(h->rx_buffer_pool.buffer_a);
-        free(h->rx_buffer_pool.buffer_b);
+        free(h->rx_buffer);
         free(h->tx_buffer);
-        vSemaphoreDelete(h->rx_buffer_pool.swap_mutex);
         vSemaphoreDelete(h->tx_buffer_mutex);
         free(h);
+        g_wan_handle = NULL;
         return WAN_COMM_ERR_INVALID_STATE;
     }
     
     h->is_running = true;
     
-    // Start first receive transaction
-    wan_comm_start_receive_transaction(h);
-    
     *handle = h;
     
     ESP_LOGI(TAG, "WAN communication initialized successfully");
-    ESP_LOGI(TAG, "Mode: %d, RX Buffer: %d bytes (double), TX Buffer: %d bytes", 
-             config->mode, h->config.rx_buffer_size, h->config.tx_buffer_size);
+    ESP_LOGI(TAG, "Mode: %d, Buffer size: %d bytes", config->mode, h->buffer_size);
     
     return WAN_COMM_OK;
 }
@@ -223,26 +236,24 @@ wan_comm_status_t wan_comm_deinit(wan_comm_handle_t handle) {
     spi_slave_free(handle->config.host_id);
     
     // Free resources
-    free(handle->rx_buffer_pool.buffer_a);
-    free(handle->rx_buffer_pool.buffer_b);
+    free(handle->rx_buffer);
     free(handle->tx_buffer);
-    vSemaphoreDelete(handle->rx_buffer_pool.swap_mutex);
     vSemaphoreDelete(handle->tx_buffer_mutex);
     
     handle->is_initialized = false;
+    g_wan_handle = NULL;
     free(handle);
     
     ESP_LOGI(TAG, "WAN communication deinitialized");
-    
     return WAN_COMM_OK;
 }
 
 /**
  * @brief Load TX data
  */
-wan_comm_status_t wan_comm_load_tx_data(wan_comm_handle_t handle, 
-                                        const uint8_t* data_to_send, 
-                                        uint16_t length) {
+wan_comm_status_t wan_comm_load_tx_data(wan_comm_handle_t handle,
+                                       const uint8_t* data_to_send,
+                                       uint16_t length) {
     if (handle == NULL || !handle->is_initialized) {
         return WAN_COMM_ERR_NOT_INITIALIZED;
     }
@@ -251,8 +262,8 @@ wan_comm_status_t wan_comm_load_tx_data(wan_comm_handle_t handle,
         return WAN_COMM_ERR_INVALID_ARG;
     }
     
-    if (length > handle->config.tx_buffer_size) {
-        ESP_LOGE(TAG, "TX data length %d exceeds buffer size %d", length, handle->config.tx_buffer_size);
+    if (length > handle->buffer_size) {
+        ESP_LOGE(TAG, "TX data length %d exceeds buffer size %d", length, handle->buffer_size);
         return WAN_COMM_ERR_INVALID_ARG;
     }
     
@@ -262,14 +273,13 @@ wan_comm_status_t wan_comm_load_tx_data(wan_comm_handle_t handle,
         return WAN_COMM_ERR_TIMEOUT;
     }
     
-    // Copy data to TX buffer
+    // Copy data to TX buffer and pad with zeros
+    memset(handle->tx_buffer, 0, handle->buffer_size);
     memcpy(handle->tx_buffer, data_to_send, length);
-    handle->tx_buffer_len = length;
     
     xSemaphoreGive(handle->tx_buffer_mutex);
     
     ESP_LOGD(TAG, "TX data loaded: %d bytes", length);
-    
     return WAN_COMM_OK;
 }
 
@@ -280,7 +290,6 @@ wan_comm_status_t wan_comm_get_last_error(wan_comm_handle_t handle) {
     if (handle == NULL) {
         return WAN_COMM_ERR_INVALID_ARG;
     }
-    
     return handle->last_error;
 }
 
@@ -288,9 +297,9 @@ wan_comm_status_t wan_comm_get_last_error(wan_comm_handle_t handle) {
  * @brief Get statistics
  */
 wan_comm_status_t wan_comm_get_statistics(wan_comm_handle_t handle,
-                                          uint32_t* commands_received,
-                                          uint32_t* data_packets_received,
-                                          uint32_t* errors) {
+                                         uint32_t* commands_received,
+                                         uint32_t* data_packets_received,
+                                         uint32_t* errors) {
     if (handle == NULL || !handle->is_initialized) {
         return WAN_COMM_ERR_NOT_INITIALIZED;
     }
@@ -320,102 +329,44 @@ wan_comm_status_t wan_comm_clear_statistics(wan_comm_handle_t handle) {
 // ===== Internal Functions =====
 
 /**
- * @brief Start receive transaction
- */
-static wan_comm_status_t wan_comm_start_receive_transaction(wan_comm_handle_t handle) {
-    if (!handle->is_initialized) {
-        return WAN_COMM_ERR_NOT_INITIALIZED;
-    }
-    
-    // Get active RX buffer
-    uint8_t* rx_buf = wan_comm_get_active_rx_buffer(handle);
-    
-    // Setup transaction
-    memset(&handle->spi_trans, 0, sizeof(spi_slave_transaction_t));
-    handle->spi_trans.length = handle->config.rx_buffer_size * 8;  // in bits
-    handle->spi_trans.rx_buffer = rx_buf;
-    handle->spi_trans.tx_buffer = handle->tx_buffer;
-    handle->spi_trans.user = handle;
-    
-    // Queue transaction
-    esp_err_t ret = spi_slave_queue_trans(handle->config.host_id, &handle->spi_trans, 0);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to queue SPI transaction: %s", esp_err_to_name(ret));
-        return WAN_COMM_ERR_BUS_BUSY;
-    }
-    
-    return WAN_COMM_OK;
-}
-
-/**
- * @brief Get active RX buffer
- */
-static uint8_t* wan_comm_get_active_rx_buffer(wan_comm_handle_t handle) {
-    return (handle->rx_buffer_pool.active_buffer == 0) ? 
-           handle->rx_buffer_pool.buffer_a : 
-           handle->rx_buffer_pool.buffer_b;
-}
-
-/**
- * @brief Swap RX buffers
- */
-static uint8_t* wan_comm_swap_rx_buffers(wan_comm_handle_t handle) {
-    if (xSemaphoreTake(handle->rx_buffer_pool.swap_mutex, 0) != pdTRUE) {
-        return NULL;
-    }
-    
-    // Get current processing buffer before swap
-    uint8_t* processing_buffer = (handle->rx_buffer_pool.active_buffer == 0) ? 
-                                  handle->rx_buffer_pool.buffer_a : 
-                                  handle->rx_buffer_pool.buffer_b;
-    
-    // Swap active buffer
-    handle->rx_buffer_pool.active_buffer = (handle->rx_buffer_pool.active_buffer == 0) ? 1 : 0;
-    
-    xSemaphoreGive(handle->rx_buffer_pool.swap_mutex);
-    
-    return processing_buffer;
-}
-
-/**
  * @brief Processing task
  */
 static void wan_comm_processing_task(void* arg) {
     wan_comm_handle_t handle = (wan_comm_handle_t)arg;
-    spi_slave_transaction_t* trans;
     
-    ESP_LOGI(TAG, "Processing task started");
+    ESP_LOGI(TAG, "Processing task started (using spi_slave_transmit)");
     
     while (handle->is_running) {
-        // Wait for transaction completion
-        esp_err_t ret = spi_slave_get_trans_result(handle->config.host_id, &trans, portMAX_DELAY);
+        // Clear RX buffer with pattern
+        memset(handle->rx_buffer, 0xA5, handle->buffer_size);
+        
+        // Setup transaction structure
+        spi_slave_transaction_t trans = {
+            .length = handle->buffer_size * 8,    // in bits
+            .trans_len = 0,                        // will be filled after transaction
+            .tx_buffer = handle->tx_buffer,
+            .rx_buffer = handle->rx_buffer,
+            .user = handle
+        };
+
+        esp_err_t ret = spi_slave_transmit(handle->config.host_id, &trans, portMAX_DELAY);
         
         if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to get transaction result: %s", esp_err_to_name(ret));
+            ESP_LOGE(TAG, "spi_slave_transmit failed: %s", esp_err_to_name(ret));
+            wan_comm_report_error(handle, WAN_COMM_ERR_BUS_BUSY, "spi_slave_transmit error");
+            vTaskDelay(pdMS_TO_TICKS(10));  // Small delay before retry
             continue;
         }
         
-        if (trans->trans_len == 0) {
-            // Empty transaction, restart
-            wan_comm_start_receive_transaction(handle);
+        // Check if any data was received
+        if (trans.trans_len == 0) {
+            ESP_LOGW(TAG, "Empty transaction received");
             continue;
         }
         
         // Convert trans_len from bits to bytes
-        size_t received_bytes = trans->trans_len / 8;
-        
+        size_t received_bytes = trans.trans_len / 8;
         ESP_LOGD(TAG, "Transaction complete: %d bytes received", received_bytes);
-        
-        // Swap buffers to allow next transaction to start immediately
-        uint8_t* processing_buffer = wan_comm_swap_rx_buffers(handle);
-        
-        // Start next receive transaction immediately (double buffering)
-        wan_comm_start_receive_transaction(handle);
-        
-        if (processing_buffer == NULL) {
-            ESP_LOGE(TAG, "Failed to swap buffers");
-            continue;
-        }
         
         // Parse packet
         uint16_t header_type;
@@ -423,10 +374,10 @@ static void wan_comm_processing_task(void* arg) {
         uint16_t payload_length;
         
         wan_comm_status_t status = wan_comm_parse_packet(
-            processing_buffer, 
-            received_bytes, 
-            &header_type, 
-            &payload, 
+            handle->rx_buffer,
+            received_bytes,
+            &header_type,
+            &payload,
             &payload_length
         );
         
@@ -460,10 +411,10 @@ static void wan_comm_processing_task(void* arg) {
 /**
  * @brief Parse packet
  */
-static wan_comm_status_t wan_comm_parse_packet(uint8_t* buffer, size_t length, 
-                                               uint16_t* header_type, 
-                                               uint8_t** payload, 
-                                               uint16_t* payload_length) {
+static wan_comm_status_t wan_comm_parse_packet(uint8_t* buffer, size_t length,
+                                              uint16_t* header_type,
+                                              uint8_t** payload,
+                                              uint16_t* payload_length) {
     if (buffer == NULL || length < WAN_COMM_HEADER_SIZE) {
         return WAN_COMM_ERR_INVALID_ARG;
     }
@@ -489,8 +440,8 @@ static wan_comm_status_t wan_comm_parse_packet(uint8_t* buffer, size_t length,
 /**
  * @brief Report error
  */
-static void wan_comm_report_error(wan_comm_handle_t handle, 
-                                 wan_comm_status_t error, 
+static void wan_comm_report_error(wan_comm_handle_t handle,
+                                 wan_comm_status_t error,
                                  const char* context) {
     if (handle == NULL) {
         return;
@@ -499,7 +450,7 @@ static void wan_comm_report_error(wan_comm_handle_t handle,
     handle->last_error = error;
     handle->error_count++;
     
-    ESP_LOGE(TAG, "Error: %d, Context: %s", error, context);
+    ESP_LOGE(TAG, "Error #%lu: %d, Context: %s", handle->error_count, error, context);
     
     // Call user error callback if registered
     if (handle->config.error_callback != NULL) {

@@ -30,6 +30,8 @@
 /* Enable OTA resumption feature */
 #define FOTA_LAN_ENABLE_OTA_RESUMPTION 0
 
+#define CONFIG_EPPP_LINK_DEVICE_UART 1
+
 /* HTTP Client Configuration */
 #define FOTA_LAN_HTTP_BUFFER_SIZE (8 * 1024)
 #define FOTA_LAN_HTTP_BUFFER_SIZE_TX (8 * 1024)
@@ -48,8 +50,8 @@
 
 /* eppp_link UART Configuration (client side - connects to WAN MCU server) */
 /* Pins are cross-wired with WAN MCU server side */
-#define FOTA_LAN_UART_TX_PIN GPIO_NUM_18       /* TX → WAN RX (GPIO 18) */
-#define FOTA_LAN_UART_RX_PIN GPIO_NUM_17       /* RX ← WAN TX (GPIO 17) */
+#define FOTA_LAN_UART_TX_PIN GPIO_NUM_44       /* TX → WAN RX (GPIO 18) */
+#define FOTA_LAN_UART_RX_PIN GPIO_NUM_43       /* RX ← WAN TX (GPIO 17) */
 #define FOTA_LAN_UART_BAUD_RATE 115200
 
 /* eppp_link Client Connection Timeout (ms) */
