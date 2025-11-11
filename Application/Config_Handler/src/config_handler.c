@@ -48,7 +48,7 @@ esp_err_t config_parse_fota(const char *data, uint16_t len,
 
   // Initialize with defaults
   memset(cfg, 0, sizeof(fota_lan_command_t));
-  strncpy(cfg->url, FOTA_LAN_FIRMWARE_UPGRADE_URL, sizeof(cfg->url) - 1);
+  strncpy(cfg->url, FOTA_CONFIG_LAN_FIRMWARE_UPGRADE_URL, sizeof(cfg->url) - 1);
   cfg->force_update = false;
 
   // Check if just "FW" command (use defaults)
@@ -123,6 +123,7 @@ static void config_handler_task(void *arg) {
             ESP_OK) {
           ESP_LOGI(TAG, "Starting FOTA process...");
           // Start FOTA handler task
+          fota_lan_ppp_connect();
           fota_lan_handler_task_start();
         } else {
           ESP_LOGE(TAG, "Failed to parse FOTA command");

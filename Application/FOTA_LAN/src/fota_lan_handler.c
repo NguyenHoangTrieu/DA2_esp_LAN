@@ -1,21 +1,28 @@
 /*
  * Advanced OTA Update Handler for ESP32
+ * This module manages over-the-air firmware updates using HTTPS.
+ * It includes features such as image validation, event handling,
+ * and optional OTA resumption using NVS.
  */
-
 #include "fota_lan_handler.h"
-#include <net/if.h>
 
-// PPP connection for internet via eppp_link
-static esp_netif_t *s_eppp_netif = NULL;
+#if FOTA_CONFIG_LAN_FIRMWARE_UPGRADE_BIND_IF
+/* The interface name value can refer to if_desc in esp_netif_defaults.h */
+#if FOTA_CONFIG_LAN_FIRMWARE_UPGRADE_BIND_IF_ETH
+static const char *bind_interface_name = NETIF_DESC_ETH;
+#elif FOTA_CONFIG_LAN_FIRMWARE_UPGRADE_BIND_IF_STA
+static const char *bind_interface_name = NETIF_DESC_STA;
+#endif
+#endif
 
-static const char *TAG = "fota_lan_handler";
+static const char *TAG = "lan_advanced_ota";
 
 extern const uint8_t server_cert_pem_start[] asm("_binary_ca_cert_pem_start");
 extern const uint8_t server_cert_pem_end[] asm("_binary_ca_cert_pem_end");
 
 static bool ota_task_close = false;
 
-#if CONFIG_ENABLE_OTA_RESUMPTION
+#if FOTA_CONFIG_LAN_ENABLE_OTA_RESUMPTION
 #define NVS_NAMESPACE_OTA_RESUMPTION "ota_resumption"
 #define NVS_KEY_OTA_WR_LENGTH "nvs_ota_wr_len"
 #define NVS_KEY_SAVED_URL "nvs_ota_url"
@@ -160,7 +167,7 @@ static esp_err_t validate_image_header(esp_app_desc_t *new_app_info) {
     ESP_LOGI(TAG, "Running firmware version: %s", running_app_info.version);
   }
 
-#if !CONFIG_SKIP_VERSION_CHECK
+#if FOTA_CONFIG_LAN_SKIP_VERSION_CHECK
   if (memcmp(new_app_info->version, running_app_info.version,
              sizeof(new_app_info->version)) == 0) {
     ESP_LOGW(TAG,
@@ -169,7 +176,7 @@ static esp_err_t validate_image_header(esp_app_desc_t *new_app_info) {
   }
 #endif
 
-#if CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK
+#if FOTA_CONFIG_LAN_BOOTLOADER_APP_ANTI_ROLLBACK
   const uint32_t hw_sec_version = esp_efuse_read_secure_version();
   if (new_app_info->secure_version < hw_sec_version) {
     ESP_LOGW(
@@ -213,279 +220,222 @@ static void get_sha256_of_partitions(void) {
   print_sha256(sha_256, "SHA-256 for current firmware:");
 }
 
-// Connect to PPP server via eppp_link
-static esp_err_t fota_lan_connect_ppp(void)
-{
-    ESP_LOGI(TAG, "Initializing PPP client connection...");
-    
-    // Configure eppp client (HOST mode)
-    eppp_config_t config = EPPP_DEFAULT_CLIENT_CONFIG();
-    
-    // Setup UART transport
-    config.transport = EPPP_TRANSPORT_UART;
-    config.uart.port = FOTA_LAN_UART_PORT;
-    config.uart.tx_io = FOTA_LAN_UART_TX_PIN;
-    config.uart.rx_io = FOTA_LAN_UART_RX_PIN;
-    config.uart.baud = FOTA_LAN_UART_BAUD_RATE;
-    config.uart.rx_buffer_size = FOTA_LAN_UART_BUF_SIZE;
-    config.uart.queue_size = FOTA_LAN_PPP_UART_QUEUE_SIZE;
-    
-    // Use simplified blocking API - connects and waits for connection
-    ESP_LOGI(TAG, "Connecting to PPP server...");
-    s_eppp_netif = eppp_connect(&config);
-    
-    if (s_eppp_netif == NULL) {
-        ESP_LOGE(TAG, "Failed to connect to PPP server");
-        return ESP_FAIL;
-    }
-    
-    ESP_LOGI(TAG, "PPP client connected successfully");
-    
-    // Get and log IP info
-    esp_netif_ip_info_t ip_info;
-    if (esp_netif_get_ip_info(s_eppp_netif, &ip_info) == ESP_OK) {
-        ESP_LOGI(TAG, "PPP Client IP   : " IPSTR, IP2STR(&ip_info.ip));
-        ESP_LOGI(TAG, "PPP Netmask     : " IPSTR, IP2STR(&ip_info.netmask));
-        ESP_LOGI(TAG, "PPP Gateway     : " IPSTR, IP2STR(&ip_info.gw));
-    }
-    
-    // Optional: Set DNS servers
-    esp_netif_dns_info_t dns;
-    dns.ip.u_addr.ip4.addr = ESP_IP4TOADDR(8, 8, 8, 8);  // Google DNS
-    dns.ip.type = ESP_IPADDR_TYPE_V4;
-    esp_netif_set_dns_info(s_eppp_netif, ESP_NETIF_DNS_MAIN, &dns);
-    
-    return ESP_OK;
-}
+void advanced_ota_task(void *pvParameter) {
+  ESP_LOGI(TAG, "Starting Advanced OTA - V1.0.0");
 
-/**
- * @brief Disconnect from PPP server
- */
-static void fota_lan_disconnect_ppp(void)
-{
-    if (s_eppp_netif) {
-        ESP_LOGI(TAG, "Disconnecting PPP client...");
-        eppp_deinit(s_eppp_netif);
-        s_eppp_netif = NULL;
-        ESP_LOGI(TAG, "PPP client disconnected");
-    }
-}
+  esp_err_t err;
+  esp_err_t ota_finish_err = ESP_OK;
 
-/**
- * @brief Advanced OTA task using PPP interface
- */
-void fota_lan_handler_advanced_ota_task(void *pvParameter)
-{
-    ESP_LOGI(TAG, "Starting Advanced OTA - V1.0.0");
-    
-    esp_err_t err;
-    esp_err_t ota_finish_err = ESP_OK;
-    
-    // Get network interface name for binding
-    struct ifreq ifr;
-    memset(&ifr, 0, sizeof(ifr));
-    esp_netif_get_netif_impl_name(s_eppp_netif, ifr.ifr_name);
-    ESP_LOGI(TAG, "Binding HTTP client to interface: %s", ifr.ifr_name);
-    
-    // Configure HTTP client to use PPP interface
-    esp_http_client_config_t config = {
-        .url = FOTA_LAN_FIRMWARE_UPGRADE_URL,
-#if FOTA_LAN_USE_CERT_BUNDLE
-        .crt_bundle_attach = esp_crt_bundle_attach,
+#if FOTA_CONFIG_LAN_FIRMWARE_UPGRADE_BIND_IF
+  esp_netif_t *netif = get_netif_from_desc(bind_interface_name);
+  if (netif == NULL) {
+    ESP_LOGE(TAG, "Can't find netif from interface description");
+    fota_handler_task_stop();
+    vTaskDelete(NULL);
+  }
+
+  struct ifreq ifr;
+  esp_netif_get_netif_impl_name(netif, ifr.ifr_name);
+  ESP_LOGI(TAG, "Bind interface name is %s", ifr.ifr_name);
+#endif
+
+  esp_http_client_config_t config = {
+      .url = FOTA_CONFIG_LAN_FIRMWARE_UPGRADE_URL,
+#if FOTA_CONFIG_LAN_USE_CERT_BUNDLE
+      .crt_bundle_attach = esp_crt_bundle_attach,
 #else
-        .cert_pem = (char *)server_cert_pem_start,
+      .cert_pem = (char *)server_cert_pem_start,
 #endif
-        .timeout_ms = FOTA_LAN_OTA_RECV_TIMEOUT,
-        .keep_alive_enable = true,
-        .buffer_size = FOTA_LAN_HTTP_BUFFER_SIZE,
-        .buffer_size_tx = FOTA_LAN_HTTP_BUFFER_SIZE_TX,
-        .if_name = &ifr,  // Bind to PPP interface
-#if FOTA_LAN_ENABLE_PARTIAL_HTTP_DOWNLOAD
-        .save_client_session = true,
+      .timeout_ms = FOTA_CONFIG_LAN_OTA_RECV_TIMEOUT,
+      .keep_alive_enable = true,
+      .buffer_size = 8 * 1024,
+      .buffer_size_tx = 8 * 1024,
+#if FOTA_CONFIG_LAN_FIRMWARE_UPGRADE_BIND_IF
+      .if_name = &ifr,
 #endif
-#if FOTA_LAN_TLS_DYN_BUF_RX_STATIC
-        .tls_dyn_buf_strategy = HTTP_TLS_DYN_BUF_RX_STATIC,
+#if FOTA_CONFIG_LAN_ENABLE_PARTIAL_HTTP_DOWNLOAD
+      .save_client_session = true,
 #endif
-#if FOTA_LAN_SKIP_COMMON_NAME_CHECK
-        .skip_cert_common_name_check = true,
+#if FOTA_CONFIG_LAN_TLS_DYN_BUF_RX_STATIC
+      .tls_dyn_buf_strategy = HTTP_TLS_DYN_BUF_RX_STATIC,
 #endif
-    };
-    
-#if FOTA_LAN_ENABLE_OTA_RESUMPTION
-    nvs_handle_t nvs_ota_resumption_handle;
-    err = nvs_open(NVS_NAMESPACE_OTA_RESUMPTION, NVS_READWRITE, &nvs_ota_resumption_handle);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Error (%s) opening NVS handle!", esp_err_to_name(err));
-        goto cleanup;
-    }
-    
-    uint32_t ota_wr_len = 0;
-    err = ota_res_get_written_len_from_nvs(nvs_ota_resumption_handle, config.url, &ota_wr_len);
-    if (err != ESP_OK) {
-        ESP_LOGD(TAG, "Starting OTA from beginning");
-    } else {
-        ESP_LOGD(TAG, "OTA write length fetched: %d bytes", ota_wr_len);
-    }
-#endif
-    
-    // Configure HTTPS OTA
-    esp_https_ota_config_t ota_config = {
-        .http_config = &config,
-        .http_client_init_cb = _http_client_init_cb,
-#if FOTA_LAN_ENABLE_PARTIAL_HTTP_DOWNLOAD
-        .partial_http_download = true,
-        .max_http_request_size = FOTA_LAN_HTTP_REQUEST_SIZE,
-#endif
-#if FOTA_LAN_ENABLE_OTA_RESUMPTION
-        .ota_resumption = true,
-        .ota_image_bytes_written = ota_wr_len,
-#endif
-    };
-    
-    ESP_LOGI(TAG, "Attempting to download update from %s", config.url);
-    
-    esp_https_ota_handle_t https_ota_handle = NULL;
-    err = esp_https_ota_begin(&ota_config, &https_ota_handle);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "ESP HTTPS OTA Begin failed");
-        goto cleanup;
-    }
-    
-    // Get and validate image description
-    esp_app_desc_t app_desc;
-    err = esp_https_ota_get_img_desc(https_ota_handle, &app_desc);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_https_ota_get_img_desc failed");
-        goto ota_end;
-    }
-    
-    err = validate_image_header(&app_desc);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "image header verification failed");
-        goto ota_end;
-    }
-    
-    // Perform OTA update
-    while (1) {
-        err = esp_https_ota_perform(https_ota_handle);
-        if (err != ESP_ERR_HTTPS_OTA_IN_PROGRESS) {
-            break;
-        }
-        
-        // Log progress
-        const size_t len = esp_https_ota_get_image_len_read(https_ota_handle);
-        ESP_LOGD(TAG, "Image bytes read: %zu", len);
-        
-#if FOTA_LAN_ENABLE_OTA_RESUMPTION
-        err = ota_res_save_cfg_to_nvs(nvs_ota_resumption_handle, len, config.url);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to save OTA config to NVS");
-        }
-#endif
-    }
-    
-    // Check if complete data received
-    if (esp_https_ota_is_complete_data_received(https_ota_handle) != true) {
-        ESP_LOGE(TAG, "Complete data was not received");
-        goto ota_end;
-    }
-    
-#if FOTA_LAN_ENABLE_OTA_RESUMPTION
-    ota_res_cleanup_cfg_from_nvs(nvs_ota_resumption_handle);
-#endif
-    
-    // Finish OTA
-    ota_finish_err = esp_https_ota_finish(https_ota_handle);
-    if ((err == ESP_OK) && (ota_finish_err == ESP_OK)) {
-        ESP_LOGI(TAG, "ESP_HTTPS_OTA upgrade successful. Rebooting...");
-        vTaskDelay(pdMS_TO_TICKS(1000));
-        esp_restart();
-    } else {
-        if (ota_finish_err == ESP_ERR_OTA_VALIDATE_FAILED) {
-            ESP_LOGE(TAG, "Image validation failed, image is corrupted");
-        }
-        ESP_LOGE(TAG, "ESP_HTTPS_OTA upgrade failed: 0x%x", ota_finish_err);
-    }
-    goto cleanup;
+  };
 
-ota_end:
-    esp_https_ota_abort(https_ota_handle);
-    ESP_LOGE(TAG, "ESP_HTTPS_OTA upgrade failed");
+#if FOTA_CONFIG_LAN_FIRMWARE_UPGRADE_URL_FROM_STDIN
+  char url_buf[OTA_URL_SIZE];
+  if (strcmp(config.url, "FROM_STDIN") == 0) {
+    configure_stdin_stdout();
+    fgets(url_buf, OTA_URL_SIZE, stdin);
+    int len = strlen(url_buf);
+    url_buf[len - 1] = '\0';
+    config.url = url_buf;
+  } else {
+    ESP_LOGE(TAG, "Configuration mismatch: wrong firmware upgrade image url");
+    fota_handler_task_stop();
+    vTaskDelete(NULL);
+  }
+#endif
 
-cleanup:
+#if FOTA_CONFIG_LAN_SKIP_COMMON_NAME_CHECK
+  config.skip_cert_common_name_check = true;
+#endif
+
+#if FOTA_CONFIG_LAN_ENABLE_OTA_RESUMPTION
+  nvs_handle_t nvs_ota_resumption_handle;
+  err = nvs_open(NVS_NAMESPACE_OTA_RESUMPTION, NVS_READWRITE,
+                 &nvs_ota_resumption_handle);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Error (%s) opening NVS handle!", esp_err_to_name(err));
+    fota_handler_task_stop();
+    vTaskDelete(NULL);
+  }
+
+  uint32_t ota_wr_len = 0;
+  err = ota_res_get_written_len_from_nvs(nvs_ota_resumption_handle, config.url,
+                                         &ota_wr_len);
+  if (err != ESP_OK) {
+    ESP_LOGD(TAG, "Starting OTA from beginning");
+  } else {
+    ESP_LOGD(TAG, "OTA write length fetched successfully: %d bytes",
+             ota_wr_len);
+  }
+#endif
+
+  esp_https_ota_config_t ota_config = {
+      .http_config = &config,
+      .http_client_init_cb = _http_client_init_cb,
+#if FOTA_CONFIG_LAN_ENABLE_PARTIAL_HTTP_DOWNLOAD
+      .partial_http_download = true,
+      .max_http_request_size = FOTA_CONFIG_LAN_HTTP_REQUEST_SIZE,
+#endif
+#if FOTA_CONFIG_LAN_ENABLE_OTA_RESUMPTION
+      .ota_resumption = true,
+      .ota_image_bytes_written = ota_wr_len,
+#endif
+  };
+
+  ESP_LOGI(TAG, "Attempting to download update from %s", config.url);
+
+  esp_https_ota_handle_t https_ota_handle = NULL;
+  err = esp_https_ota_begin(&ota_config, &https_ota_handle);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "ESP HTTPS OTA Begin failed");
     fota_lan_handler_task_stop();
     vTaskDelete(NULL);
-}
+  }
 
-/**
- * @brief Start FOTA LAN handler
- * 
- * Initializes network stack, connects PPP client, and starts OTA task
- */
-void fota_lan_handler_task_start(void)
-{
-    ota_task_close = false;
-    
-    ESP_LOGI(TAG, "FOTA LAN Handler Starting");
-    get_sha256_of_partitions();
-    
-    // Initialize TCP/IP stack
-    esp_err_t ret = esp_netif_init();
-    if (ret == ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TAG, "Network interface already initialized");
-    } else if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize netif: %s", esp_err_to_name(ret));
-        return;
+  esp_app_desc_t app_desc = {};
+  err = esp_https_ota_get_img_desc(https_ota_handle, &app_desc);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "esp_https_ota_get_img_desc failed");
+    goto ota_end;
+  }
+
+  err = validate_image_header(&app_desc);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "image header verification failed");
+    goto ota_end;
+  }
+
+  while (1) {
+    err = esp_https_ota_perform(https_ota_handle);
+    if (err != ESP_ERR_HTTPS_OTA_IN_PROGRESS) {
+      break;
     }
-    
-    // Create default event loop
-    ret = esp_event_loop_create_default();
-    if (ret == ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TAG, "Default event loop already created");
-    } else if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to create event loop: %s", esp_err_to_name(ret));
-        return;
-    }
-    
-    // Register OTA event handler
-    ret = esp_event_handler_register(ESP_HTTPS_OTA_EVENT, ESP_EVENT_ANY_ID, 
-                                     &event_handler, NULL);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to register OTA event handler: %s", esp_err_to_name(ret));
-        return;
-    }
-    
-    ESP_LOGI(TAG, "OTA event handler registered");
-    
-    // Connect to PPP server
-    esp_err_t err = fota_lan_connect_ppp();
+
+    // Monitor OTA progress
+    const size_t len = esp_https_ota_get_image_len_read(https_ota_handle);
+    ESP_LOGD(TAG, "Image bytes read: %d", len);
+
+#if FOTA_CONFIG_LAN_ENABLE_OTA_RESUMPTION
+    err = ota_res_save_cfg_to_nvs(nvs_ota_resumption_handle, len, config.url);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to connect to PPP server");
-        esp_event_handler_unregister(ESP_HTTPS_OTA_EVENT, ESP_EVENT_ANY_ID, event_handler);
-        return;
+      ESP_LOGE(TAG, "Failed to save OTA config to NVS (%s)",
+               esp_err_to_name(err));
     }
-    
-    // Create OTA task
-    xTaskCreate(fota_lan_handler_advanced_ota_task, 
-                "fota_lan_ota", 
-                FOTA_LAN_TASK_STACK_SIZE, 
-                NULL, 
-                FOTA_LAN_TASK_PRIORITY, 
-                NULL);
+#endif
+  }
+
+  if (esp_https_ota_is_complete_data_received(https_ota_handle) != true) {
+    ESP_LOGE(TAG, "Complete data was not received.");
+  } else {
+#if FOTA_CONFIG_LAN_ENABLE_OTA_RESUMPTION
+    err = ota_res_cleanup_cfg_from_nvs(nvs_ota_resumption_handle);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "Failed to clean up OTA config from NVS (%s)",
+               esp_err_to_name(err));
+    }
+#endif
+    ota_finish_err = esp_https_ota_finish(https_ota_handle);
+    if ((err == ESP_OK) && (ota_finish_err == ESP_OK)) {
+      ESP_LOGI(TAG, "ESP_HTTPS_OTA upgrade successful. Rebooting ...");
+      vTaskDelay(1000 / portTICK_PERIOD_MS);
+      esp_restart();
+    } else {
+      if (ota_finish_err == ESP_ERR_OTA_VALIDATE_FAILED) {
+        ESP_LOGE(TAG, "Image validation failed, image is corrupted");
+      }
+      ESP_LOGE(TAG, "ESP_HTTPS_OTA upgrade failed 0x%x", ota_finish_err);
+      fota_lan_handler_task_stop();
+      vTaskDelete(NULL);
+    }
+  }
+
+ota_end:
+  esp_https_ota_abort(https_ota_handle);
+  ESP_LOGE(TAG, "ESP_HTTPS_OTA upgrade failed");
+  fota_lan_handler_task_stop();
+  vTaskDelete(NULL);
 }
 
-/**
- * @brief Stop FOTA LAN handler
- */
-void fota_lan_handler_task_stop(void)
-{
-    ota_task_close = true;
-    
-    // Disconnect PPP
-    fota_lan_disconnect_ppp();
-    
-    // Unregister event handler
-    esp_event_handler_unregister(ESP_HTTPS_OTA_EVENT, ESP_EVENT_ANY_ID, event_handler);
-    
-    ESP_LOGI(TAG, "FOTA LAN Handler stopped");
+void fota_lan_handler_task_start(void) {
+  ota_task_close = false;
+  get_sha256_of_partitions();
+
+  // Register event handler for OTA events
+  ESP_ERROR_CHECK(esp_event_handler_register(
+      ESP_HTTPS_OTA_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL));
+
+#if FOTA_CONFIG_LAN_CONNECT_WIFI
+  esp_wifi_set_ps(WIFI_PS_NONE);
+#endif
+
+  xTaskCreate(&advanced_ota_task, "advanced_ota_task", 32 * 1024, NULL, 5,
+              NULL);
+}
+
+void fota_lan_handler_task_stop(void) { ota_task_close = true; }
+
+void fota_lan_ppp_connect(void) {
+  // Initialize networking
+  ESP_ERROR_CHECK(esp_netif_init());
+  ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+  eppp_config_t config = EPPP_DEFAULT_CLIENT_CONFIG();
+  config.transport = EPPP_TRANSPORT_UART;
+  config.uart.port = PPP_UART_PORT;
+  config.uart.tx_io = PPP_UART_TX_PIN;
+  config.uart.rx_io = PPP_UART_RX_PIN;
+  config.uart.baud = PPP_UART_BAUDRATE;
+  config.uart.rx_buffer_size = PPP_UART_RX_BUFFER_SIZE;
+  config.uart.queue_size = PPP_UART_QUEUE_SIZE;
+
+  esp_netif_t *eppp_netif = eppp_connect(&config);
+
+  // Get IP info
+  esp_netif_ip_info_t ip_info;
+  if (esp_netif_get_ip_info(eppp_netif, &ip_info) == ESP_OK) {
+    ESP_LOGI(TAG, "IP:      " IPSTR, IP2STR(&ip_info.ip));
+    ESP_LOGI(TAG, "Netmask: " IPSTR, IP2STR(&ip_info.netmask));
+    ESP_LOGI(TAG, "Gateway: " IPSTR, IP2STR(&ip_info.gw));
+  }
+
+  // Setup DNS
+  esp_netif_dns_info_t dns;
+  dns.ip.u_addr.ip4.addr = esp_netif_htonl(PPP_GLOBAL_DNS);
+  dns.ip.type = ESP_IPADDR_TYPE_V4;
+  ESP_ERROR_CHECK(esp_netif_set_dns_info(eppp_netif, ESP_NETIF_DNS_MAIN, &dns));
+  ESP_LOGI(TAG, "DNS:     " IPSTR, IP2STR(&dns.ip.u_addr.ip4));
+
+  vTaskDelay(1000);
 }

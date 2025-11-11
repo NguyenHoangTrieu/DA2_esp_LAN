@@ -1,9 +1,8 @@
-#ifndef FOTA_LAN_HANDLER_H
-#define FOTA_LAN_HANDLER_H
+#ifndef FOTA_HANDLER_H
+#define FOTA_HANDLER_H
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/event_groups.h"
 #include "esp_system.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -11,39 +10,30 @@
 #include "esp_http_client.h"
 #include "esp_https_ota.h"
 #include "esp_check.h"
-#include "esp_netif.h"
-
-// eppp_link for PPP client connection
-#include "eppp_link.h"
-
-#include "driver/uart.h"
-#include <string.h>
-
+#include "string.h"
 #include "fota_lan_config.h"
 
-#ifdef FOTA_LAN_USE_CERT_BUNDLE
+#ifdef FOTA_CONFIG_LAN_USE_CERT_BUNDLE
 #include "esp_crt_bundle.h"
 #endif
 
-#if FOTA_LAN_ENABLE_ANTI_ROLLBACK
+#if FOTA_CONFIG_LAN_BOOTLOADER_APP_ANTI_ROLLBACK
 #include "esp_efuse.h"
 #endif
 
-#define FOTA_LAN_HASH_LEN 32
+#include "nvs.h"
+#include "nvs_flash.h"
+#include <sys/socket.h>
 
-/**
- * @brief Initialize the FOTA LAN handler
- * 
- * Initializes the UART and starts the task/mechanism to listen
- * for the OTA trigger command from the WAN MCU via eppp_link.
- */
+#if FOTA_CONFIG_LAN_CONNECT_WIFI
+#include "esp_wifi.h"
+#endif
+
+#define HASH_LEN 32
+#define OTA_URL_SIZE 256
+
 void fota_lan_handler_task_start(void);
-
-/**
- * @brief Deinitialize the FOTA LAN handler
- * 
- * Stops all tasks and cleans up resources.
- */
 void fota_lan_handler_task_stop(void);
+void fota_lan_ppp_connect(void);
 
-#endif /* FOTA_LAN_HANDLER_H */
+#endif /* FOTA_HANDLER_H */
