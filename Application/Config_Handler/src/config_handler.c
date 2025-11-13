@@ -4,6 +4,7 @@
  */
 
 #include "config_handler.h"
+#include "DA2_esp_LAN.h"
 #include "fota_lan_config.h"
 #include "fota_lan_handler.h"
 #include <string.h>
@@ -123,7 +124,7 @@ static void config_handler_task(void *arg) {
             ESP_OK) {
           ESP_LOGI(TAG, "Starting FOTA process...");
           // Start FOTA handler task
-          fota_lan_ppp_connect();
+          lan_ppp_connect();
           fota_lan_handler_task_start();
         } else {
           ESP_LOGE(TAG, "Failed to parse FOTA command");

@@ -405,37 +405,3 @@ void fota_lan_handler_task_start(void) {
 }
 
 void fota_lan_handler_task_stop(void) { ota_task_close = true; }
-
-void fota_lan_ppp_connect(void) {
-  // Initialize networking
-  ESP_ERROR_CHECK(esp_netif_init());
-  ESP_ERROR_CHECK(esp_event_loop_create_default());
-
-  eppp_config_t config = EPPP_DEFAULT_CLIENT_CONFIG();
-  config.transport = EPPP_TRANSPORT_UART;
-  config.uart.port = PPP_UART_PORT;
-  config.uart.tx_io = PPP_UART_TX_PIN;
-  config.uart.rx_io = PPP_UART_RX_PIN;
-  config.uart.baud = PPP_UART_BAUDRATE;
-  config.uart.rx_buffer_size = PPP_UART_RX_BUFFER_SIZE;
-  config.uart.queue_size = PPP_UART_QUEUE_SIZE;
-
-  esp_netif_t *eppp_netif = eppp_connect(&config);
-
-  // Get IP info
-  esp_netif_ip_info_t ip_info;
-  if (esp_netif_get_ip_info(eppp_netif, &ip_info) == ESP_OK) {
-    ESP_LOGI(TAG, "IP:      " IPSTR, IP2STR(&ip_info.ip));
-    ESP_LOGI(TAG, "Netmask: " IPSTR, IP2STR(&ip_info.netmask));
-    ESP_LOGI(TAG, "Gateway: " IPSTR, IP2STR(&ip_info.gw));
-  }
-
-  // Setup DNS
-  esp_netif_dns_info_t dns;
-  dns.ip.u_addr.ip4.addr = esp_netif_htonl(PPP_GLOBAL_DNS);
-  dns.ip.type = ESP_IPADDR_TYPE_V4;
-  ESP_ERROR_CHECK(esp_netif_set_dns_info(eppp_netif, ESP_NETIF_DNS_MAIN, &dns));
-  ESP_LOGI(TAG, "DNS:     " IPSTR, IP2STR(&dns.ip.u_addr.ip4));
-
-  vTaskDelay(1000);
-}

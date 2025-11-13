@@ -34,6 +34,5 @@
 
 void fota_lan_handler_task_start(void);
 void fota_lan_handler_task_stop(void);
-void fota_lan_ppp_connect(void);
 
 #endif /* FOTA_HANDLER_H */

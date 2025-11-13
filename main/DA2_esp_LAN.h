@@ -20,4 +20,6 @@
 #include "mcu_wan_handler.h"
 #include "fota_lan_handler.h"
 
+void lan_ppp_connect(void);
+
 #endif /* MAIN_DA2_ESP_LAN_H */

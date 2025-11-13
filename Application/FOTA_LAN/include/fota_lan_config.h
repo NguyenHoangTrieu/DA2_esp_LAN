@@ -58,17 +58,6 @@
 /* Enable dynamic buffer support in mbedTLS */
 #define MBEDTLS_DYNAMIC_BUFFER 1
 
-// Transport Selection
-#define PPP_USE_UART_TRANSPORT         1
-
-// UART Configuration
-#define PPP_UART_PORT                  UART_NUM_0
-#define PPP_UART_TX_PIN                GPIO_NUM_43
-#define PPP_UART_RX_PIN                GPIO_NUM_44
-#define PPP_UART_BAUDRATE              256000
-#define PPP_UART_QUEUE_SIZE            20
-#define PPP_UART_RX_BUFFER_SIZE        16*1024
-
 // Global DNS Server (8.8.8.8)
 #define PPP_GLOBAL_DNS                 0x08080808
 

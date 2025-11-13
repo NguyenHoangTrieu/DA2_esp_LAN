@@ -90,7 +90,7 @@ static void mcu_wan_on_command_received(uint8_t* cmd_payload, uint16_t length, v
  * Runs in the context of wan_comm processing task
  */
 static void mcu_wan_on_data_received(uint8_t* data_payload, uint16_t length, void* user_data) {
-    ESP_LOGI(TAG, "Data received from LAN MCU: %d bytes", length);
+    ESP_LOGI(TAG, "Data received from WAN MCU: %d bytes", length);
     ESP_LOG_BUFFER_HEXDUMP(TAG, data_payload, length, ESP_LOG_DEBUG);
     
     // Prepare acknowledgment
@@ -151,7 +151,7 @@ static esp_err_t mcu_wan_handler_init(void) {
         ESP_LOGE(TAG, "Failed to initialize WAN communication: %d", status);
         return ESP_FAIL;
     }
-    
+    wan_comm_load_tx_data(g_wan_comm_handle, (uint8_t *)"MCU_WAN_INIT_OK", strlen("MCU_WAN_INIT_OK"));
     // Mark as initialized (will never initialize again)
     g_initialized = true;
     
