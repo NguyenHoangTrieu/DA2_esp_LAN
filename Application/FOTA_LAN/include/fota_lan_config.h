@@ -33,7 +33,7 @@
 #define FOTA_CONFIG_LAN_CONNECT_ETHERNET 0
 
 /* OTA Receive Timeout in milliseconds */
-#define FOTA_CONFIG_LAN_OTA_RECV_TIMEOUT 5000
+#define FOTA_CONFIG_LAN_OTA_RECV_TIMEOUT 15000
 
 /* Enable partial HTTP download (for large firmware images) */
 #define FOTA_CONFIG_LAN_ENABLE_PARTIAL_HTTP_DOWNLOAD 0
