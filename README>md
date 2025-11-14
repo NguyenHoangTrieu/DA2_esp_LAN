@@ -1,0 +1,4 @@
+add this:
+thêm vào nếu lệnh khởi động cho mcu lan từ wan
+thêm cơ chế đồng bộ dữ liệu (kiểm soát data)
+thêm load data từ flash mem (sửa lại partition table)
