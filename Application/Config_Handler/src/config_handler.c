@@ -29,7 +29,9 @@ config_type_t config_parse_type(const char *cmd, uint16_t len) {
   if (cmd[2] == 'F' && cmd[3] == 'W') {
     return CONFIG_UPDATE_FIRMWARE;
   }
-
+  if (strncmp(cmd + 2, "START_MCU", 10) == 0) {
+    return CONFIG_SYNC_DATA;
+  }
   return CONFIG_TYPE_UNKNOWN;
 }
 

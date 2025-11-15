@@ -22,6 +22,7 @@
  */
 typedef enum {
   CONFIG_UPDATE_FIRMWARE = 0, // "FW" - Firmware update command
+  CONFIG_SYNC_DATA = 1,
   CONFIG_TYPE_UNKNOWN = 0xFF
 } config_type_t;
 
