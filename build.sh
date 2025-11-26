@@ -4,7 +4,7 @@
 source ~/esp-idf/export.sh
 
 # 2. (Optional) remove old build directory for clean build
-idf.py fullclean
+# idf.py fullclean
 
 # 3. Build project (includes configure, CMake, Ninja, dependencies...)
 idf.py build
