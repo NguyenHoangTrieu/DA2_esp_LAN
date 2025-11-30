@@ -42,14 +42,12 @@ void app_main(void)
 
     init_led_strip();
     led_on();
-    
+    config_init();
     config_handler_task_start();
     mcu_wan_handler_start();
+    can_handler_start();
     while (1) {
-        led_show_blue();
-        vTaskDelay(pdMS_TO_TICKS(500));
-        led_show_green();
-        vTaskDelay(pdMS_TO_TICKS(500));
+      vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
 

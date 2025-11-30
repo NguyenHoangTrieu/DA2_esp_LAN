@@ -19,6 +19,7 @@
 #include "config_handler.h"
 #include "mcu_wan_handler.h"
 #include "fota_lan_handler.h"
+#include "can_handler.h"
 
 void lan_ppp_connect(void);
 

@@ -10,6 +10,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#define MAX_WHITELISTED_IDS 500
 /* Return Status Codes */
 typedef enum {
   CAN_OK = 0,
@@ -51,8 +52,6 @@ typedef struct {
 
 /* CAN Hardware Configuration Structure (REQ-DAT-001) */
 typedef struct {
-  uint8_t tx_gpio;
-  uint8_t rx_gpio;
   uint32_t baud_rate;
   can_operating_mode_t operating_mode;
 } can_config_t;

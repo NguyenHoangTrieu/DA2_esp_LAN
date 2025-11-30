@@ -22,6 +22,14 @@ static QueueHandle_t rx_queue = NULL;
 #define CAN_TX_TIMEOUT_MS 10
 #define CAN_RX_TIMEOUT_MS 0 // Immediate return (0 ms)
 #define RX_QUEUE_SIZE 10
+#define CAN_TX_GPIO_DEFAULT GPIO_NUM_4
+#define CAN_RX_GPIO_DEFAULT GPIO_NUM_5
+
+static gpio_num_t s_tx_gpio = CAN_TX_GPIO_DEFAULT;
+static gpio_num_t s_rx_gpio = CAN_RX_GPIO_DEFAULT;
+
+uint16_t g_can_whitelist[MAX_WHITELISTED_IDS] = {0};
+uint8_t g_whitelist_count = 0;
 
 /**
  * @brief RX callback for receiving messages
@@ -52,16 +60,15 @@ twai_rx_done_callback(twai_node_handle_t handle,
 
 /**
  * @brief Configure hardware acceptance filter based on whitelist
- * @note REQ-INI-002, REQ-INI-003
  */
 static esp_err_t configure_acceptance_filter(void) {
   if (g_whitelist_count == 0) {
-    // Accept all frames (REQ-INI-003)
+    // Accept all frames
     ESP_LOGI(TAG, "Whitelist empty - accepting all frames");
     // No filter configuration needed - accepts all by default
     return ESP_OK;
   } else if (g_whitelist_count == 1) {
-    // Single ID - use hardware filter (REQ-INI-002)
+    // Single ID - use hardware filter
     uint16_t id = g_can_whitelist[0];
     twai_mask_filter_config_t mask_cfg = {
         .id = (uint32_t)id, // Standard 11-bit ID
@@ -78,7 +85,7 @@ static esp_err_t configure_acceptance_filter(void) {
     ESP_LOGI(TAG, "Hardware filter: ID=0x%03X", id);
     return ESP_OK;
   } else {
-    // Multiple IDs - accept all and filter in software (REQ-INI-003)
+    // Multiple IDs - accept all and filter in software
     ESP_LOGI(TAG, "Multiple whitelist IDs (%d) - using software filtering",
              g_whitelist_count);
     return ESP_OK;
@@ -96,8 +103,8 @@ can_status_t can_driver_init(void) {
   }
 
   // Validate configuration (REQ-DAT-001)
-  if (g_can_config.tx_gpio >= GPIO_NUM_MAX ||
-      g_can_config.rx_gpio >= GPIO_NUM_MAX) {
+  if (s_tx_gpio >= GPIO_NUM_MAX ||
+      s_rx_gpio >= GPIO_NUM_MAX) {
     ESP_LOGE(TAG, "Invalid GPIO configuration");
     return CAN_ERR_INVALID_CONFIG;
   }
@@ -113,8 +120,8 @@ can_status_t can_driver_init(void) {
   twai_onchip_node_config_t node_config = {
       .io_cfg =
           {
-              .tx = g_can_config.tx_gpio,
-              .rx = g_can_config.rx_gpio,
+              .tx = s_tx_gpio,
+              .rx = s_rx_gpio,
               .quanta_clk_out = -1,    // Not used
               .bus_off_indicator = -1, // Not used
           },
@@ -180,7 +187,7 @@ can_status_t can_driver_init(void) {
 
   driver_initialized = true;
   ESP_LOGI(TAG, "CAN driver initialized: TX=%d, RX=%d, Baud=%lu, Mode=%d",
-           g_can_config.tx_gpio, g_can_config.rx_gpio, g_can_config.baud_rate,
+           s_tx_gpio, s_rx_gpio, g_can_config.baud_rate,
            g_can_config.operating_mode);
   return CAN_OK;
 }

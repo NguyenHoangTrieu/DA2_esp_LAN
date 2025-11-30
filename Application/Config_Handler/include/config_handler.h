@@ -66,17 +66,8 @@ void config_handler_task_stop(void);
  */
 config_type_t config_parse_type(const char *cmd, uint16_t len);
 
-/**
- * @brief Parse firmware update command
- *
- * Format: "FW" or "FW:URL" or "FW:URL:FORCE"
- *
- * @param data Raw command data
- * @param len Command length
- * @param cfg Output FOTA config structure
- * @return esp_err_t ESP_OK on success
- */
-esp_err_t config_parse_fota(const char *data, uint16_t len,
-                                fota_lan_command_t *cfg);
+esp_err_t save_can_config_to_nvs(void);
+esp_err_t erase_all_configs_from_nvs(void);
+esp_err_t config_init(void);
 
 #endif // CONFIG_HANDLER_H

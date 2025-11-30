@@ -16,6 +16,8 @@ QueueHandle_t g_config_handler_queue = NULL;
 
 static bool config_handler_running = false;
 static TaskHandle_t config_handler_task_handle = NULL;
+static esp_err_t config_parse_fota(const char *data, uint16_t len,
+                                fota_lan_command_t *cfg);
 
 /**
  * @brief Parse command type from 2-character prefix
@@ -43,7 +45,7 @@ config_type_t config_parse_type(const char *cmd, uint16_t len) {
  *   "FW:https://example.com/firmware.bin" - Use custom URL
  *   "FW:https://example.com/firmware.bin:FORCE" - Force update
  */
-esp_err_t config_parse_fota(const char *data, uint16_t len,
+static esp_err_t config_parse_fota(const char *data, uint16_t len,
                                 fota_lan_command_t *cfg) {
   if (!data || !cfg || len < 2) {
     return ESP_FAIL;
