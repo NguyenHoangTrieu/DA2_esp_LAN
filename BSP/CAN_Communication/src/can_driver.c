@@ -1,378 +1,486 @@
 /**
  * @file can_driver.c
- * @brief ESP32-S3 TWAI CAN Driver Implementation (ESP-IDF v6.0)
- * @note Uses new esp_twai and esp_twai_onchip API
+ * @brief Enhanced ESP32-S3 TWAI CAN Driver Implementation (ESP-IDF v6.0)
+ * @note Rewritten based on esp-idf/examples/peripherals/twai patterns
  */
 
 #include "can_driver.h"
+#include "driver/gpio.h"
+#include "esp_check.h"
 #include "esp_log.h"
 #include "esp_twai.h"
 #include "esp_twai_onchip.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include <stdatomic.h>
 #include <string.h>
 
 static const char *TAG = "CAN_DRV";
-static bool driver_initialized = false;
-static twai_node_handle_t twai_handle = NULL;
-static QueueHandle_t rx_queue = NULL;
 
-/* Minimal timeout for non-blocking operation (ms) */
-#define CAN_TX_TIMEOUT_MS 10
-#define CAN_RX_TIMEOUT_MS 0 // Immediate return (0 ms)
-#define RX_QUEUE_SIZE 10
-#define CAN_TX_GPIO_DEFAULT GPIO_NUM_4
-#define CAN_RX_GPIO_DEFAULT GPIO_NUM_5
+// Debug GPIO for TX callback visualization
+#define DEBUG_TX_GPIO GPIO_NUM_8
 
-static gpio_num_t s_tx_gpio = CAN_TX_GPIO_DEFAULT;
-static gpio_num_t s_rx_gpio = CAN_RX_GPIO_DEFAULT;
+// Queue configuration
+#define RX_QUEUE_LEN 20
+#define TX_TIMEOUT_MS 100
 
+// Default GPIO pins
+#define CAN_TX_GPIO_DEFAULT GPIO_NUM_5
+#define CAN_RX_GPIO_DEFAULT GPIO_NUM_6
+
+// Queue item with embedded buffer (pattern from ESP-IDF example)
+typedef struct {
+  can_message_t msg;
+  uint8_t buffer[8];
+} rx_queue_item_t;
+
+// Driver context structure
+typedef struct {
+  twai_node_handle_t node_handle;
+  QueueHandle_t rx_queue;
+  atomic_bool is_initialized;
+  twai_onchip_node_config_t driver_config;
+  twai_event_callbacks_t callbacks;
+} can_driver_ctx_t;
+
+static can_driver_ctx_t g_can_ctx = {0};
+
+// Global configuration (defined externally)
 uint16_t g_can_whitelist[MAX_WHITELISTED_IDS] = {0};
 uint8_t g_whitelist_count = 0;
+volatile uint32_t g_counter = 0;
 
 /**
- * @brief RX callback for receiving messages
- * @note Called from ISR context when message is received
+ * @brief Error callback - logs TWAI bus errors
+ */
+static bool IRAM_ATTR can_error_callback(twai_node_handle_t handle,
+                                         const twai_error_event_data_t *edata,
+                                         void *user_ctx) {
+  ESP_EARLY_LOGW(TAG, "bus error: 0x%x", edata->err_flags.val);
+  return false;
+}
+
+/**
+ * @brief State change callback - detects Bus-Off and recovery
+ */
+static bool IRAM_ATTR can_state_change_callback(
+    twai_node_handle_t handle, const twai_state_change_event_data_t *edata,
+    void *user_ctx) {
+  const char *twai_state_name[] = {"error_active", "error_warning",
+                                   "error_passive", "bus_off"};
+  ESP_EARLY_LOGI(TAG, "state changed: %s -> %s",
+                 twai_state_name[edata->old_sta],
+                 twai_state_name[edata->new_sta]);
+  return false;
+}
+
+/**
+ * @brief TWAI receive callback - store data and signal task
+ * @note Pattern from ESP-IDF example: embedded buffer in queue item
  */
 static bool IRAM_ATTR
-twai_rx_done_callback(twai_node_handle_t handle,
-                      const twai_rx_done_event_data_t *edata, void *user_ctx) {
-  BaseType_t high_task_woken = pdFALSE;
+can_rx_done_callback(twai_node_handle_t handle,
+                     const twai_rx_done_event_data_t *edata, void *user_ctx) {
+  ESP_UNUSED(edata);
+  can_driver_ctx_t *ctx = (can_driver_ctx_t *)user_ctx;
+  BaseType_t woken = pdFALSE;
 
-  // Prepare buffer for receiving
-  uint8_t recv_buff[8];
+  // Validate context - early return to avoid ISR overhead
+  if (!ctx || !atomic_load(&ctx->is_initialized) || !ctx->rx_queue) {
+    return false;
+  }
+
+  // Prepare queue item with embedded buffer
+  rx_queue_item_t item = {0};
   twai_frame_t rx_frame = {
-      .buffer = recv_buff,
-      .buffer_len = sizeof(recv_buff),
+      .buffer = item.buffer,
+      .buffer_len = sizeof(item.buffer),
   };
 
-  // Receive message from ISR
-  if (ESP_OK == twai_node_receive_from_isr(handle, &rx_frame)) {
-    // Send frame to queue for processing
-    if (rx_queue != NULL) {
-      xQueueSendFromISR(rx_queue, &rx_frame, &high_task_woken);
+  // Receive frame from ISR
+  if (twai_node_receive_from_isr(handle, &rx_frame) == ESP_OK) {
+    // Filter: Only standard frames (ignore extended)
+    if (rx_frame.header.ide) {
+      return false;
     }
+
+    // Convert to user message format
+    item.msg.id = (uint16_t)rx_frame.header.id;
+    item.msg.len = rx_frame.buffer_len;
+    item.msg.rtr = rx_frame.header.rtr;
+
+    if (item.msg.len > 0 && item.msg.len <= 8) {
+      memcpy(item.msg.data, rx_frame.buffer, item.msg.len);
+    }
+
+    // Send to queue (non-blocking)
+    xQueueSendFromISR(ctx->rx_queue, &item, &woken);
   }
 
-  return high_task_woken == pdTRUE;
+  return (woken == pdTRUE);
 }
 
 /**
- * @brief Configure hardware acceptance filter based on whitelist
+ * @brief TX done callback - increment counter and toggle debug LED
  */
-static esp_err_t configure_acceptance_filter(void) {
-  if (g_whitelist_count == 0) {
-    // Accept all frames
-    ESP_LOGI(TAG, "Whitelist empty - accepting all frames");
-    // No filter configuration needed - accepts all by default
-    return ESP_OK;
-  } else if (g_whitelist_count == 1) {
-    // Single ID - use hardware filter
-    uint16_t id = g_can_whitelist[0];
-    twai_mask_filter_config_t mask_cfg = {
-        .id = (uint32_t)id, // Standard 11-bit ID
-        .mask = 0x7FF,      // Mask all 11 bits (exact match)
-        .is_ext = false,    // Standard ID (not extended)
-    };
+static bool IRAM_ATTR
+can_tx_done_callback(twai_node_handle_t handle,
+                     const twai_tx_done_event_data_t *edata, void *user_ctx) {
+  ESP_UNUSED(handle);
+  ESP_UNUSED(user_ctx);
 
-    esp_err_t ret = twai_node_config_mask_filter(twai_handle, 0, &mask_cfg);
-    if (ret != ESP_OK) {
-      ESP_LOGE(TAG, "Failed to configure mask filter: %s",
-               esp_err_to_name(ret));
-      return ret;
-    }
-    ESP_LOGI(TAG, "Hardware filter: ID=0x%03X", id);
-    return ESP_OK;
-  } else {
-    // Multiple IDs - accept all and filter in software
-    ESP_LOGI(TAG, "Multiple whitelist IDs (%d) - using software filtering",
-             g_whitelist_count);
-    return ESP_OK;
+  // Increment global counter
+  g_counter++;
+
+  // Toggle debug LED for visualization
+  static bool led_state = false;
+  led_state = !led_state;
+  gpio_set_level(DEBUG_TX_GPIO, led_state);
+
+  // Log failed transmissions
+  if (!edata->is_tx_success) {
+    ESP_EARLY_LOGW(TAG, "TX failed for ID: 0x%X",
+                   edata->done_tx_frame->header.id);
   }
+
+  return false;
 }
 
 /**
- * @brief Initialize TWAI driver (REQ-INI-001)
- * @note Updated for ESP-IDF v6.0 new esp_twai API
+ * @brief Initialize and configure the TWAI CAN driver
+ * @return can_status_t status code
  */
 can_status_t can_driver_init(void) {
-  if (driver_initialized) {
+  esp_err_t ret = ESP_OK;
+
+  // Configure debug GPIO for TX callback visualization
+  gpio_set_direction(DEBUG_TX_GPIO, GPIO_MODE_OUTPUT);
+  gpio_set_level(DEBUG_TX_GPIO, 0);
+
+  // Check if already initialized
+  if (atomic_load(&g_can_ctx.is_initialized)) {
     ESP_LOGW(TAG, "Driver already initialized");
     return CAN_OK;
   }
 
-  // Validate configuration (REQ-DAT-001)
-  if (s_tx_gpio >= GPIO_NUM_MAX ||
-      s_rx_gpio >= GPIO_NUM_MAX) {
-    ESP_LOGE(TAG, "Invalid GPIO configuration");
-    return CAN_ERR_INVALID_CONFIG;
-  }
-
-  // Create RX queue for callback
-  rx_queue = xQueueCreate(RX_QUEUE_SIZE, sizeof(twai_frame_t));
-  if (rx_queue == NULL) {
+  // Create RX queue for buffering received frames
+  g_can_ctx.rx_queue = xQueueCreate(RX_QUEUE_LEN, sizeof(rx_queue_item_t));
+  if (!g_can_ctx.rx_queue) {
     ESP_LOGE(TAG, "Failed to create RX queue");
     return CAN_ERR_DRIVER_INSTALL;
   }
+  ESP_LOGI(TAG, "Buffer initialized: %d slots for RX data", RX_QUEUE_LEN);
 
-  // Node configuration
-  twai_onchip_node_config_t node_config = {
+  // Configure TWAI node
+  g_can_ctx.driver_config = (twai_onchip_node_config_t){
       .io_cfg =
           {
-              .tx = s_tx_gpio,
-              .rx = s_rx_gpio,
-              .quanta_clk_out = -1,    // Not used
-              .bus_off_indicator = -1, // Not used
+              .tx = CAN_TX_GPIO_DEFAULT,
+              .rx = CAN_RX_GPIO_DEFAULT,
+              .quanta_clk_out = GPIO_NUM_NC,
+              .bus_off_indicator = GPIO_NUM_NC,
           },
+      .clk_src = 0, // Default clock source
       .bit_timing =
           {
               .bitrate = g_can_config.baud_rate,
+              .sp_permill = 0, // Auto calculate sample point
+              .ssp_permill = 0,
           },
+      .data_timing =
+          {
+              .bitrate = 0, // No TWAI-FD
+          },
+      .fail_retry_cnt = -1, // Infinite retry
       .tx_queue_depth = 10,
+      .intr_priority = 0,
       .flags =
           {
-              .enable_self_test =
-                  (g_can_config.operating_mode == CAN_MODE_NO_ACK) ? 1 : 0,
-              .enable_listen_only =
-                  (g_can_config.operating_mode == CAN_MODE_LOOPBACK) ? 1 : 0,
-              .enable_loopback = 0,
+              // Enable both self-test and loopback for GPIO physical loopback
+              .enable_self_test = 1,
+              .enable_loopback = 1, // CRITICAL: Must be 1 for GPIO loopback
+              .enable_listen_only = 0,
               .no_receive_rtr = 0,
           },
   };
 
   // Create TWAI node
-  esp_err_t ret = twai_new_node_onchip(&node_config, &twai_handle);
+  ret = twai_new_node_onchip(&g_can_ctx.driver_config, &g_can_ctx.node_handle);
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "Failed to create TWAI node: %s", esp_err_to_name(ret));
-    vQueueDelete(rx_queue);
-    rx_queue = NULL;
-    return CAN_ERR_DRIVER_INSTALL;
+    goto err_queue;
   }
+  ESP_LOGI(TAG, "TWAI node created");
 
-  // Register RX callback
-  twai_event_callbacks_t callbacks = {
-      .on_rx_done = twai_rx_done_callback,
-  };
-  ret = twai_node_register_event_callbacks(twai_handle, &callbacks, NULL);
+  // Register callbacks
+  g_can_ctx.callbacks.on_rx_done = can_rx_done_callback;
+  g_can_ctx.callbacks.on_tx_done = can_tx_done_callback;
+  g_can_ctx.callbacks.on_error = can_error_callback;
+  g_can_ctx.callbacks.on_state_change = can_state_change_callback;
+
+  ret = twai_node_register_event_callbacks(g_can_ctx.node_handle,
+                                           &g_can_ctx.callbacks, &g_can_ctx);
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "Failed to register callbacks: %s", esp_err_to_name(ret));
-    twai_node_delete(twai_handle);
-    vQueueDelete(rx_queue);
-    twai_handle = NULL;
-    rx_queue = NULL;
-    return CAN_ERR_DRIVER_INSTALL;
+    goto err_node;
   }
 
-  // Configure acceptance filter after node creation (REQ-INI-002, REQ-INI-003)
-  ret = configure_acceptance_filter();
+  // Configure acceptance filter if needed
+  if (g_whitelist_count == 1) {
+    twai_mask_filter_config_t data_filter = {
+        .id = (uint32_t)g_can_whitelist[0],
+        .mask = 0x7FF,   // Match all 11 bits
+        .is_ext = false, // Receive only standard ID
+    };
+    ret = twai_node_config_mask_filter(g_can_ctx.node_handle, 0, &data_filter);
+    if (ret == ESP_OK) {
+      ESP_LOGI(TAG, "Filter enabled for ID: 0x%03X Mask: 0x%03X",
+               data_filter.id, data_filter.mask);
+    } else {
+      ESP_LOGW(TAG, "Failed to set hardware filter: %s", esp_err_to_name(ret));
+    }
+  } else {
+    ESP_LOGI(TAG, "Filter: ACCEPT ALL");
+  }
+
+  // Enable TWAI node
+  ret = twai_node_enable(g_can_ctx.node_handle);
   if (ret != ESP_OK) {
-    twai_node_delete(twai_handle);
-    vQueueDelete(rx_queue);
-    twai_handle = NULL;
-    rx_queue = NULL;
-    return CAN_ERR_DRIVER_INSTALL;
+    ESP_LOGE(TAG, "Failed to enable node: %s", esp_err_to_name(ret));
+    goto err_node;
   }
 
-  // Enable TWAI node (start)
-  ret = twai_node_enable(twai_handle);
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to enable TWAI node: %s", esp_err_to_name(ret));
-    twai_node_delete(twai_handle);
-    vQueueDelete(rx_queue);
-    twai_handle = NULL;
-    rx_queue = NULL;
-    return CAN_ERR_DRIVER_START;
-  }
+  atomic_store(&g_can_ctx.is_initialized, true);
+  ESP_LOGI(TAG, "TWAI start - Mode: %d, Bitrate: %lu bps",
+           g_can_config.operating_mode, g_can_config.baud_rate);
 
-  driver_initialized = true;
-  ESP_LOGI(TAG, "CAN driver initialized: TX=%d, RX=%d, Baud=%lu, Mode=%d",
-           s_tx_gpio, s_rx_gpio, g_can_config.baud_rate,
-           g_can_config.operating_mode);
   return CAN_OK;
+
+err_node:
+  if (g_can_ctx.node_handle) {
+    twai_node_delete(g_can_ctx.node_handle);
+    g_can_ctx.node_handle = NULL;
+  }
+
+err_queue:
+  if (g_can_ctx.rx_queue) {
+    vQueueDelete(g_can_ctx.rx_queue);
+    g_can_ctx.rx_queue = NULL;
+  }
+
+  return CAN_ERR_DRIVER_INSTALL;
 }
 
 /**
- * @brief Transmit CAN message (REQ-TX-001, REQ-TX-002, REQ-TX-003, REQ-TX-004)
+ * @brief Transmit a CAN message (Standard Frame, non-blocking)
+ * @param id Standard 11-bit CAN ID
+ * @param data Pointer to data buffer
+ * @param len Data length (0-8 bytes)
+ * @return can_status_t status code
  */
 can_status_t can_transmit(uint16_t id, const uint8_t *data, uint8_t len) {
-  if (!driver_initialized || twai_handle == NULL) {
+  // Validate driver state
+  if (!atomic_load(&g_can_ctx.is_initialized)) {
+    ESP_LOGE(TAG, "Driver not initialized");
     return CAN_ERR_NOT_INITIALIZED;
   }
 
-  // Validate parameters (REQ-CST-002)
-  if (id > 0x7FF) { // Standard frame: 11-bit ID max
-    ESP_LOGE(TAG, "Invalid ID: 0x%03X (must be <= 0x7FF)", id);
+  if (!g_can_ctx.node_handle) {
+    ESP_LOGE(TAG, "Invalid node handle");
+    return CAN_ERR_NOT_INITIALIZED;
+  }
+
+  // Validate parameters
+  if (id > 0x7FF) {
+    ESP_LOGE(TAG, "Invalid CAN ID: 0x%X (max 0x7FF)", id);
     return CAN_ERR_INVALID_PARAM;
   }
 
-  if (len > 8) { // CAN 2.0A max DLC
-    ESP_LOGE(TAG, "Invalid DLC: %d (must be 0-8)", len);
+  if (len > 8) {
+    ESP_LOGE(TAG, "Invalid length: %d (max 8)", len);
     return CAN_ERR_INVALID_PARAM;
   }
 
-  if (data == NULL && len > 0) {
-    return CAN_ERR_INVALID_PARAM;
-  }
-
-  // Construct Standard Frame (REQ-TX-002)
+  // Prepare frame
   twai_frame_t tx_frame = {
       .header =
           {
               .id = id,
-              .ide = false, // Standard 11-bit ID
-              .rtr = false, // Data frame
+              .ide = 0, // Standard frame
+              .rtr = 0,
+              .fdf = 0,
           },
       .buffer = (uint8_t *)data,
       .buffer_len = len,
   };
 
-  // Non-blocking transmit (REQ-TX-004)
-  esp_err_t ret = twai_node_transmit(twai_handle, &tx_frame, CAN_TX_TIMEOUT_MS);
+  // Transmit with timeout
+  esp_err_t ret = twai_node_transmit(g_can_ctx.node_handle, &tx_frame,
+                                     pdMS_TO_TICKS(TX_TIMEOUT_MS));
+
   if (ret == ESP_OK) {
     return CAN_OK;
   } else if (ret == ESP_ERR_TIMEOUT) {
-    return CAN_ERR_TX_TIMEOUT; // Buffer full
-  } else {
-    ESP_LOGE(TAG, "TX failed: %s", esp_err_to_name(ret));
-    return CAN_ERR_TX_FAILED;
+    return CAN_ERR_TX_TIMEOUT;
+  } else if (ret == ESP_ERR_INVALID_STATE) {
+    return CAN_ERR_BUS_OFF;
   }
+
+  return CAN_ERR_TX_FAILED;
 }
 
 /**
- * @brief Software ID filtering (REQ-RX-002)
- * @note REQ-CST-003 - optimized with early break
- */
-static inline bool is_id_whitelisted(uint16_t id) {
-  // If whitelist is empty, accept all (REQ-RX-002)
-  if (g_whitelist_count == 0) {
-    return true;
-  }
-
-  // Check against whitelist (optimized loop - REQ-CST-003)
-  for (uint8_t i = 0; i < g_whitelist_count; i++) {
-    if (g_can_whitelist[i] == id) {
-      return true; // Early exit on match
-    }
-  }
-  return false; // No match found
-}
-
-/**
- * @brief Receive CAN message with software filtering (REQ-RX-001, REQ-RX-002,
- * REQ-RX-003)
+ * @brief Receive a CAN message (polling, non-blocking)
+ * @param msg Pointer to message structure to fill
+ * @return can_status_t CAN_OK if message received, CAN_ERR_RX_NO_DATA if no
+ * data
  */
 can_status_t can_receive(can_message_t *msg) {
-  if (!driver_initialized || twai_handle == NULL) {
+  // Validate driver state
+  if (!atomic_load(&g_can_ctx.is_initialized)) {
     return CAN_ERR_NOT_INITIALIZED;
   }
 
-  if (msg == NULL) {
+  if (!g_can_ctx.rx_queue) {
+    return CAN_ERR_NOT_INITIALIZED;
+  }
+
+  if (!msg) {
     return CAN_ERR_INVALID_PARAM;
   }
 
-  twai_frame_t rx_frame;
-
-  // Non-blocking receive from queue (populated by callback)
-  if (xQueueReceive(rx_queue, &rx_frame, 0) != pdTRUE) {
+  // Receive from queue (non-blocking)
+  rx_queue_item_t item;
+  if (xQueueReceive(g_can_ctx.rx_queue, &item, 0) != pdTRUE) {
     return CAN_ERR_RX_NO_DATA;
   }
 
-  // Only process Standard Frames (REQ-CST-002)
-  if (rx_frame.header.ide) {
-    ESP_LOGW(TAG, "Extended frame ignored");
-    return CAN_ERR_RX_NO_DATA;
+  // Software whitelist filter (if multiple IDs)
+  if (g_whitelist_count > 1) {
+    bool found = false;
+    for (int i = 0; i < g_whitelist_count; i++) {
+      if (g_can_whitelist[i] == item.msg.id) {
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      return CAN_ERR_RX_NO_DATA; // Filter out non-whitelisted IDs
+    }
   }
 
-  uint16_t rx_id = (uint16_t)(rx_frame.header.id & 0x7FF);
-
-  // Software filtering (REQ-RX-002)
-  if (!is_id_whitelisted(rx_id)) {
-    // Silently discard non-whitelisted messages
-    return CAN_ERR_RX_NO_DATA;
-  }
-
-  // Copy message to output structure (REQ-RX-003)
-  msg->id = rx_id;
-  msg->len = rx_frame.buffer_len;
-  msg->rtr = rx_frame.header.rtr;
-  memcpy(msg->data, rx_frame.buffer, rx_frame.buffer_len);
-
+  // Copy message to user
+  *msg = item.msg;
   return CAN_OK;
 }
 
 /**
- * @brief Check bus status (REQ-ERR-001)
+ * @brief Check current TWAI bus status
+ * @return can_bus_state_t current bus state
  */
 can_bus_state_t can_check_bus_status(void) {
-  if (!driver_initialized || twai_handle == NULL) {
+  if (!atomic_load(&g_can_ctx.is_initialized) || !g_can_ctx.node_handle) {
     return CAN_BUS_UNKNOWN;
   }
 
   twai_node_status_t status;
   twai_node_record_t record;
+  esp_err_t ret = twai_node_get_info(g_can_ctx.node_handle, &status, &record);
 
-  esp_err_t ret = twai_node_get_info(twai_handle, &status, &record);
   if (ret != ESP_OK) {
+    ESP_LOGW(TAG, "Failed to get node info: %s", esp_err_to_name(ret));
     return CAN_BUS_UNKNOWN;
   }
 
-  // Check TEC and REC to determine error state
-  // Error Active: TEC < 96 and REC < 96
-  // Error Warning: TEC >= 96 or REC >= 96 (but < 128)
-  // Error Passive: TEC >= 128 or REC >= 128 (but < 256)
-  // Bus Off: TEC >= 256
-
-  if (status.tx_error_count >= 256) {
+  // Map TWAI states to CAN bus states
+  switch (status.state) {
+  case TWAI_ERROR_BUS_OFF:
     return CAN_BUS_BUS_OFF;
-  } else if (status.tx_error_count >= 128 || status.rx_error_count >= 128) {
+  case TWAI_ERROR_PASSIVE:
     return CAN_BUS_ERROR_PASSIVE;
-  } else if (status.tx_error_count >= 96 || status.rx_error_count >= 96) {
+  case TWAI_ERROR_WARNING:
     return CAN_BUS_WARNING;
-  } else {
+  case TWAI_ERROR_ACTIVE:
     return CAN_BUS_RUNNING;
+  default:
+    return CAN_BUS_UNKNOWN;
   }
 }
 
 /**
- * @brief Initiate bus-off recovery (REQ-ERR-002)
+ * @brief Initiate recovery from Bus-Off state
+ * @return can_status_t status code
  */
 can_status_t can_initiate_recovery(void) {
-  if (!driver_initialized || twai_handle == NULL) {
+  if (!atomic_load(&g_can_ctx.is_initialized)) {
+    ESP_LOGE(TAG, "Driver not initialized");
     return CAN_ERR_NOT_INITIALIZED;
   }
 
-  // Use twai_node_recover for bus-off recovery
-  esp_err_t ret = twai_node_recover(twai_handle);
-  if (ret == ESP_OK) {
-    ESP_LOGI(TAG, "Bus-off recovery initiated");
-    return CAN_OK;
-  } else {
-    ESP_LOGE(TAG, "Recovery failed: %s", esp_err_to_name(ret));
+  if (!g_can_ctx.node_handle) {
+    ESP_LOGE(TAG, "Invalid node handle");
+    return CAN_ERR_NOT_INITIALIZED;
+  }
+
+  // Check if recovery is needed
+  twai_node_status_t status;
+  esp_err_t ret = twai_node_get_info(g_can_ctx.node_handle, &status, NULL);
+
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to get node status: %s", esp_err_to_name(ret));
     return CAN_ERR_BUS_OFF;
   }
+
+  if (status.state != TWAI_ERROR_BUS_OFF) {
+    ESP_LOGI(TAG, "Recovery not needed, current state: %d", status.state);
+    return CAN_OK;
+  }
+
+  // Initiate recovery
+  ret = twai_node_recover(g_can_ctx.node_handle);
+  if (ret == ESP_OK) {
+    ESP_LOGI(TAG, "Bus recovery initiated");
+    return CAN_OK;
+  }
+
+  ESP_LOGE(TAG, "Recovery failed: %s", esp_err_to_name(ret));
+  return CAN_ERR_BUS_OFF;
 }
 
 /**
  * @brief Deinitialize the CAN driver
+ * @return can_status_t status code
  */
 can_status_t can_driver_deinit(void) {
-  if (!driver_initialized) {
+  if (!atomic_load(&g_can_ctx.is_initialized)) {
+    ESP_LOGI(TAG, "Driver not initialized");
     return CAN_OK;
   }
 
-  if (twai_handle != NULL) {
-    twai_node_disable(twai_handle);
-    twai_node_delete(twai_handle);
-    twai_handle = NULL;
+  // Disable and delete TWAI node
+  if (g_can_ctx.node_handle) {
+    esp_err_t ret = twai_node_disable(g_can_ctx.node_handle);
+    if (ret != ESP_OK) {
+      ESP_LOGW(TAG, "Failed to disable node: %s", esp_err_to_name(ret));
+    }
+
+    ret = twai_node_delete(g_can_ctx.node_handle);
+    if (ret != ESP_OK) {
+      ESP_LOGW(TAG, "Failed to delete node: %s", esp_err_to_name(ret));
+    }
+
+    g_can_ctx.node_handle = NULL;
   }
 
-  if (rx_queue != NULL) {
-    vQueueDelete(rx_queue);
-    rx_queue = NULL;
+  // Delete RX queue
+  if (g_can_ctx.rx_queue) {
+    vQueueDelete(g_can_ctx.rx_queue);
+    g_can_ctx.rx_queue = NULL;
   }
 
-  driver_initialized = false;
+  atomic_store(&g_can_ctx.is_initialized, false);
   ESP_LOGI(TAG, "CAN driver deinitialized");
+
   return CAN_OK;
 }
