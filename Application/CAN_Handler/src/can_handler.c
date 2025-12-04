@@ -1,249 +1,312 @@
 /**
  * @file can_handler.c
- * @brief CAN Message Handler Implementation
+ * @brief CAN Handler for LAN MCU - Bidirectional Data Flow
+ * 
+ * Handles:
+ * - CAN Bus RX -> Uplink to WAN MCU (via mcu_wan_enqueue_uplink)
+ * - Downlink from WAN MCU -> CAN Bus TX
  */
-
 #include "can_handler.h"
 #include "can_driver.h"
 #include "mcu_wan_handler.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
+#include <string.h>
+#include <stdlib.h>
 
 static const char *TAG = "CAN_HANDLER";
 
-// ===== Task Configuration =====
-#define CAN_HANDLER_TASK_STACK_SIZE 3072
-#define CAN_HANDLER_TASK_PRIORITY 4
-#define CAN_POLL_DELAY_MS 10
-#define BUS_STATUS_CHECK_INTERVAL_MS 1000
-#define STATS_LOG_INTERVAL_MS 30000
+// ===== Configuration =====
+#define CAN_HANDLER_TASK_STACK_SIZE     3072
+#define CAN_HANDLER_TASK_PRIORITY       4
+#define CAN_POLL_DELAY_MS               10
+#define BUS_STATUS_CHECK_INTERVAL_MS    1000
+#define STATS_LOG_INTERVAL_MS           30000
+#define DOWNLINK_QUEUE_SIZE             20
+#define MAX_CAN_PAYLOAD_SIZE            64   // CAN FD support
 
-// ===== State =====
-static TaskHandle_t g_can_handler_task = NULL;
-static bool g_handler_running = false;
-can_config_t g_can_config = {
-    .baud_rate = 500000,            // Default 500 kbps
-    .operating_mode = CAN_MODE_NORMAL // Default Normal mode
-};
-
-// ===== Statistics (internal) =====
+// ===== Downlink Packet =====
 typedef struct {
-    uint32_t rx_count;          // Total received
-    uint32_t filtered_count;    // Filtered out (done by driver)
-    uint32_t forwarded_count;   // Successfully forwarded
-    uint32_t wan_queue_full;    // WAN queue full errors
-    uint32_t wan_no_mem;        // WAN memory errors
-    uint32_t bus_errors;        // Bus error count
-    uint32_t bus_recoveries;    // Bus recovery attempts
+    uint8_t *data_payload;
+    uint16_t data_length;
+} can_downlink_packet_t;
+
+// ===== Statistics =====
+typedef struct {
+    uint32_t rx_count;
+    uint32_t tx_count;
+    uint32_t forwarded_count;
+    uint32_t tx_failed_count;
+    uint32_t uplink_queue_full;
+    uint32_t bus_errors;
+    uint32_t bus_recoveries;
 } can_handler_stats_t;
 
+// ===== Global State =====
+static TaskHandle_t g_can_handler_task = NULL;
+static QueueHandle_t g_downlink_queue = NULL;
+static bool g_handler_running = false;
 static can_handler_stats_t g_stats = {0};
+
+can_config_t g_can_config = {
+    .baud_rate = 500000,
+    .operating_mode = CAN_MODE_NORMAL
+};
 
 // ===== Forward Declarations =====
 static void can_handler_task(void *pvParameters);
 static void check_and_handle_bus_errors(void);
 static void log_statistics(void);
+static void process_can_rx(void);
+static void process_downlink_tx(void);
 
-// ===== Public API Implementation =====
+// ===== Public API =====
 
 esp_err_t can_handler_start(void) {
     if (g_handler_running) {
         ESP_LOGW(TAG, "CAN handler already running");
         return ESP_OK;
     }
-
+    
     ESP_LOGI(TAG, "Starting CAN Handler");
-
-    // Phase 1: Initialize CAN driver
+    
+    // Initialize CAN driver
     can_status_t can_ret = can_driver_init();
     if (can_ret != CAN_OK) {
         ESP_LOGE(TAG, "Failed to initialize CAN driver: %d", can_ret);
-        ESP_LOGE(TAG, "Check CAN configuration, GPIO pins, and hardware connection");
         return ESP_FAIL;
     }
-
-    ESP_LOGI(TAG, "CAN driver initialized successfully");
-
-    // Create handler task
-    BaseType_t ret = xTaskCreate(
-        can_handler_task,
-        "can_handler",
-        CAN_HANDLER_TASK_STACK_SIZE,
-        NULL,
-        CAN_HANDLER_TASK_PRIORITY,
-        &g_can_handler_task
-    );
-
-    if (ret != pdPASS) {
-        ESP_LOGE(TAG, "Failed to create CAN handler task");
+    
+    // Create downlink queue
+    g_downlink_queue = xQueueCreate(DOWNLINK_QUEUE_SIZE, sizeof(can_downlink_packet_t));
+    if (g_downlink_queue == NULL) {
+        ESP_LOGE(TAG, "Failed to create downlink queue");
         can_driver_deinit();
         return ESP_FAIL;
     }
-
+    
+    // Create handler task
+    BaseType_t ret = xTaskCreate(can_handler_task, "can_handler",
+                                  CAN_HANDLER_TASK_STACK_SIZE, NULL,
+                                  CAN_HANDLER_TASK_PRIORITY, &g_can_handler_task);
+    if (ret != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create CAN handler task");
+        vQueueDelete(g_downlink_queue);
+        can_driver_deinit();
+        return ESP_FAIL;
+    }
+    
     g_handler_running = true;
-    ESP_LOGI(TAG, "CAN handler task created successfully");
+    memset(&g_stats, 0, sizeof(g_stats));
+    
+    ESP_LOGI(TAG, "CAN handler started successfully");
     return ESP_OK;
 }
 
 esp_err_t can_handler_stop(void) {
-    if (!g_handler_running) {
-        return ESP_OK;
-    }
-
+    if (!g_handler_running) return ESP_OK;
+    
     ESP_LOGI(TAG, "Stopping CAN handler");
     g_handler_running = false;
-
-    // Wait briefly for task to exit gracefully
+    
     vTaskDelay(pdMS_TO_TICKS(100));
-
+    
     if (g_can_handler_task != NULL) {
         vTaskDelete(g_can_handler_task);
         g_can_handler_task = NULL;
     }
-
-    can_driver_deinit();
     
-    // Log final statistics
-    ESP_LOGI(TAG, "Final Stats - RX: %lu, Forwarded: %lu, Errors: %lu",
-             g_stats.rx_count, g_stats.forwarded_count,
-             g_stats.wan_queue_full + g_stats.wan_no_mem);
+    // Clean up downlink queue
+    if (g_downlink_queue != NULL) {
+        can_downlink_packet_t pkt;
+        while (xQueueReceive(g_downlink_queue, &pkt, 0) == pdTRUE) {
+            if (pkt.data_payload) free(pkt.data_payload);
+        }
+        vQueueDelete(g_downlink_queue);
+        g_downlink_queue = NULL;
+    }
+    
+    can_driver_deinit();
     
     ESP_LOGI(TAG, "CAN handler stopped");
     return ESP_OK;
 }
 
-// ===== Internal Task Implementation =====
+bool can_handler_enqueue_downlink(uint8_t *data, uint16_t len) {
+    if (g_downlink_queue == NULL || data == NULL || len == 0) {
+        ESP_LOGE(TAG, "Invalid downlink parameters");
+        return false;
+    }
+    
+    can_downlink_packet_t packet;
+    packet.data_payload = (uint8_t *)malloc(len);
+    if (packet.data_payload == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate downlink memory");
+        return false;
+    }
+    
+    memcpy(packet.data_payload, data, len);
+    packet.data_length = len;
+    
+    if (xQueueSend(g_downlink_queue, &packet, pdMS_TO_TICKS(100)) != pdTRUE) {
+        free(packet.data_payload);
+        ESP_LOGW(TAG, "Downlink queue full");
+        return false;
+    }
+    
+    ESP_LOGD(TAG, "Downlink packet enqueued (%d bytes)", len);
+    return true;
+}
 
-/**
- * @brief CAN Handler Main Task
- * 
- * Implements the flowchart logic with additional error handling:
- * 1. Receive CAN messages (non-blocking)
- * 2. Forward valid messages to WAN handler
- * 3. Monitor bus health periodically
- * 4. Log statistics periodically
- */
+void can_handler_get_stats(uint32_t *rx_count, uint32_t *tx_count, uint32_t *errors) {
+    if (rx_count) *rx_count = g_stats.rx_count;
+    if (tx_count) *tx_count = g_stats.tx_count;
+    if (errors) *errors = g_stats.bus_errors;
+}
+
+// ===== Main Task =====
+
 static void can_handler_task(void *pvParameters) {
     ESP_LOGI(TAG, "CAN handler task started");
-
-    can_message_t rx_msg;
+    
     TickType_t last_bus_check = xTaskGetTickCount();
     TickType_t last_stats_log = xTaskGetTickCount();
-
-    // Main loop
+    
     while (g_handler_running) {
-        // Phase 2: Receive & Filter
-        // Call can_receive (non-blocking, filtering done in driver)
-        can_status_t status = can_receive(&rx_msg);
-
-        if (status == CAN_OK) {
-            // Message received and validated (frame type + whitelist already filtered)
-            g_stats.rx_count++;
-
-            ESP_LOGI(TAG, "CAN RX - ID: 0x%03X, DLC: %d", rx_msg.id, rx_msg.len);
-
-            // Phase 3: Forward to WAN Handler
-            esp_err_t wan_ret = mcu_wan_handler_queue_data(rx_msg.data, rx_msg.len);
-
-            if (wan_ret == ESP_OK) {
-                // Successfully queued to WAN handler
-                g_stats.forwarded_count++;
-                ESP_LOGI(TAG, "Forwarded to WAN handler");
-            } else if (wan_ret == ESP_ERR_NO_MEM) {
-                // Memory allocation failed
-                g_stats.wan_no_mem++;
-                ESP_LOGE(TAG, "WAN forward failed: Out of memory");
-            } else if (wan_ret == ESP_FAIL) {
-                // WAN queue full
-                g_stats.wan_queue_full++;
-                ESP_LOGW(TAG, "WAN forward failed: Queue full");
-            } else {
-                // Other errors
-                ESP_LOGE(TAG, "WAN forward failed: %d", wan_ret);
-            }
-        } else if (status == CAN_ERR_RX_NO_DATA) {
-            // No data in driver RX queue - yield CPU
-            vTaskDelay(pdMS_TO_TICKS(CAN_POLL_DELAY_MS));
-        } else {
-            // Other errors (unlikely - driver should handle most issues)
-            ESP_LOGE(TAG, "CAN receive error: %d", status);
-            vTaskDelay(pdMS_TO_TICKS(CAN_POLL_DELAY_MS));
-        }
-
-        // Periodic bus health check
         TickType_t current_tick = xTaskGetTickCount();
+        
+        // ===== Process CAN RX -> Uplink =====
+        process_can_rx();
+        
+        // ===== Process Downlink -> CAN TX =====
+        process_downlink_tx();
+        
+        // ===== Periodic Bus Health Check =====
         if ((current_tick - last_bus_check) >= pdMS_TO_TICKS(BUS_STATUS_CHECK_INTERVAL_MS)) {
             check_and_handle_bus_errors();
             last_bus_check = current_tick;
         }
-
-        // Periodic statistics logging
+        
+        // ===== Periodic Statistics Log =====
         if ((current_tick - last_stats_log) >= pdMS_TO_TICKS(STATS_LOG_INTERVAL_MS)) {
             log_statistics();
             last_stats_log = current_tick;
         }
+        
+        vTaskDelay(pdMS_TO_TICKS(CAN_POLL_DELAY_MS));
     }
-
+    
     ESP_LOGI(TAG, "CAN handler task exiting");
     vTaskDelete(NULL);
 }
 
-/**
- * @brief Check CAN bus status and handle errors
- */
+// ===== CAN RX Processing =====
+static void process_can_rx(void) {
+    can_message_t rx_msg;
+    can_status_t status = can_receive(&rx_msg);
+    
+    if (status == CAN_OK) {
+        g_stats.rx_count++;
+        
+        ESP_LOGI(TAG, "CAN RX - ID: 0x%03lX, DLC: %d", rx_msg.id, rx_msg.len);
+        
+        // Build uplink packet: [CAN_ID(4)][DLC(1)][DATA(8)]
+        uint8_t uplink_data[13];
+        uplink_data[0] = (rx_msg.id >> 24) & 0xFF;
+        uplink_data[1] = (rx_msg.id >> 16) & 0xFF;
+        uplink_data[2] = (rx_msg.id >> 8) & 0xFF;
+        uplink_data[3] = rx_msg.id & 0xFF;
+        uplink_data[4] = rx_msg.len;
+        memcpy(&uplink_data[5], rx_msg.data, rx_msg.len);
+        
+        // Enqueue to WAN uplink
+        if (mcu_wan_enqueue_uplink(HANDLER_CAN, uplink_data, 5 + rx_msg.len)) {
+            g_stats.forwarded_count++;
+            ESP_LOGD(TAG, "Forwarded to WAN uplink");
+        } else {
+            g_stats.uplink_queue_full++;
+            ESP_LOGW(TAG, "WAN uplink queue full");
+        }
+    } else if (status != CAN_ERR_RX_NO_DATA) {
+        ESP_LOGE(TAG, "CAN receive error: %d", status);
+    }
+}
+
+// ===== Downlink TX Processing =====
+static void process_downlink_tx(void) {
+    can_downlink_packet_t tx_packet;
+    
+    if (xQueueReceive(g_downlink_queue, &tx_packet, 0) != pdTRUE) {
+        return;
+    }
+    
+    ESP_LOGI(TAG, "Downlink packet received (%d bytes)", tx_packet.data_length);
+    
+    // Parse downlink: [CAN_ID(4)][DLC(1)][DATA(up to 8)]
+    if (tx_packet.data_length >= 5) {
+        uint32_t can_id = (tx_packet.data_payload[0] << 24) |
+                          (tx_packet.data_payload[1] << 16) |
+                          (tx_packet.data_payload[2] << 8) |
+                          tx_packet.data_payload[3];
+        uint8_t dlc = tx_packet.data_payload[4];
+        
+        if (dlc <= 8 && tx_packet.data_length >= (5 + dlc)) {
+            can_status_t tx_status = can_transmit(can_id, &tx_packet.data_payload[5], dlc);
+            
+            if (tx_status == CAN_OK) {
+                g_stats.tx_count++;
+                ESP_LOGI(TAG, "CAN TX success - ID: 0x%03lX, DLC: %d", can_id, dlc);
+            } else {
+                g_stats.tx_failed_count++;
+                ESP_LOGE(TAG, "CAN TX failed: %d", tx_status);
+            }
+        } else {
+            ESP_LOGE(TAG, "Invalid CAN DLC: %d", dlc);
+        }
+    } else {
+        ESP_LOGE(TAG, "Malformed downlink packet");
+    }
+    
+    free(tx_packet.data_payload);
+}
+
+// ===== Bus Health Check =====
 static void check_and_handle_bus_errors(void) {
     can_bus_state_t bus_state = can_check_bus_status();
-
+    
     switch (bus_state) {
         case CAN_BUS_RUNNING:
-            // Normal operation - no action needed
             break;
-
         case CAN_BUS_WARNING:
-            ESP_LOGW(TAG, "CAN Bus Warning - Error counters elevated (TEC/REC >= 96)");
+            ESP_LOGW(TAG, "CAN Bus Warning");
             g_stats.bus_errors++;
             break;
-
         case CAN_BUS_ERROR_PASSIVE:
-            ESP_LOGW(TAG, "CAN Bus Error Passive - High error rate (TEC/REC >= 128)");
+            ESP_LOGW(TAG, "CAN Bus Error Passive");
             g_stats.bus_errors++;
             break;
-
         case CAN_BUS_BUS_OFF:
-            ESP_LOGE(TAG, "CAN Bus-Off detected! Initiating recovery...");
+            ESP_LOGE(TAG, "CAN Bus-Off! Initiating recovery...");
             g_stats.bus_errors++;
             g_stats.bus_recoveries++;
-            
-            can_status_t recovery_status = can_initiate_recovery();
-            if (recovery_status == CAN_OK) {
-                ESP_LOGI(TAG, "Bus-off recovery initiated successfully");
-            } else {
-                ESP_LOGE(TAG, "Bus-off recovery failed: %d", recovery_status);
-            }
+            can_initiate_recovery();
             break;
-
         case CAN_BUS_RECOVERING:
             ESP_LOGI(TAG, "CAN Bus recovering...");
             break;
-
-        case CAN_BUS_UNKNOWN:
         default:
             ESP_LOGW(TAG, "CAN Bus status unknown");
             break;
     }
 }
 
-/**
- * @brief Log internal statistics
- */
+// ===== Statistics Logging =====
 static void log_statistics(void) {
-    ESP_LOGI(TAG, "=== CAN Handler Statistics ===");
-    ESP_LOGI(TAG, "Messages Received:    %lu", g_stats.rx_count);
-    ESP_LOGI(TAG, "Messages Forwarded:   %lu", g_stats.forwarded_count);
-    ESP_LOGI(TAG, "WAN Queue Full:       %lu", g_stats.wan_queue_full);
-    ESP_LOGI(TAG, "WAN Out of Memory:    %lu", g_stats.wan_no_mem);
-    ESP_LOGI(TAG, "Bus Errors Detected:  %lu", g_stats.bus_errors);
-    ESP_LOGI(TAG, "Bus Recoveries:       %lu", g_stats.bus_recoveries);
-    ESP_LOGI(TAG, "==============================");
+    ESP_LOGI(TAG, "=== CAN Statistics ===");
+    ESP_LOGI(TAG, "RX: %lu, Forwarded: %lu", g_stats.rx_count, g_stats.forwarded_count);
+    ESP_LOGI(TAG, "TX: %lu, TX Failed: %lu", g_stats.tx_count, g_stats.tx_failed_count);
+    ESP_LOGI(TAG, "Uplink Full: %lu, Bus Errors: %lu", g_stats.uplink_queue_full, g_stats.bus_errors);
+    ESP_LOGI(TAG, "======================");
 }

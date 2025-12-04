@@ -32,6 +32,7 @@ extern "C" {
 #define WAN_COMM_DEFAULT_QUEUE_SIZE 7
 #define WAN_COMM_MAX_TRANSFER_SIZE 8192 // SPI DMA limitation
 #define WAN_COMM_TIMEOUT_MS 1000
+#define FRAME_HEADER_SIZE  1
 
 /**
  * @brief Status codes

@@ -1,7 +1,5 @@
 /**
  * @file can_driver.c
- * @brief Enhanced ESP32-S3 TWAI CAN Driver Implementation (ESP-IDF v6.0)
- * @note Rewritten based on esp-idf/examples/peripherals/twai patterns
  */
 
 #include "can_driver.h"
