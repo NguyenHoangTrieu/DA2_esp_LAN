@@ -6,7 +6,7 @@ idf_component_register(SRCS "DA2_esp_LAN.c"
                             "../Application/Config_Handler/src/config_load_save.c"
                             "../Application/CAN_Handler/src/can_handler.c"
                             "../BSP/MCU_WAN_Communication/src/wan_comm.c"
-                            "../BSP/LoRa_Module_Communicaiton/src/lora_comm.c"
+                            "../BSP/LoRa_Module_Communicaiton/src/lora_e32_comm.c"
                             "../BSP/CAN_Communication/src/can_driver.c"
                     PRIV_REQUIRES 
                                 esp_wifi
