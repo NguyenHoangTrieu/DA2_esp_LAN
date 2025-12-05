@@ -83,7 +83,7 @@ static handler_id_t string_to_handler_id(const uint8_t *type_str);
 
 // External downlink callbacks
 extern bool can_handler_enqueue_downlink(uint8_t *data, uint16_t len);
-// extern bool lora_handler_enqueue_downlink(uint8_t *data, uint16_t len);
+extern bool lora_handler_enqueue_downlink(uint8_t *data, uint16_t len);
 // extern bool zigbee_handler_enqueue_downlink(uint8_t *data, uint16_t len);
 
 // ===== Public API =====
@@ -501,9 +501,9 @@ static void dispatch_downlink_to_handler(handler_id_t target_id,
   case HANDLER_CAN:
     success = can_handler_enqueue_downlink((uint8_t *)data, length);
     break;
-  // case HANDLER_LORA:
-  //     success = lora_handler_enqueue_downlink((uint8_t *)data, length);
-  //     break;
+    // case HANDLER_LORA:
+    success = lora_handler_enqueue_downlink((uint8_t *)data, length);
+    break;
   // case HANDLER_ZIGBEE:
   //     success = zigbee_handler_enqueue_downlink((uint8_t *)data, length);
   //     break;

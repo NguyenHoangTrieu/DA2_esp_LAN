@@ -66,8 +66,25 @@ void config_handler_task_stop(void);
  */
 config_type_t config_parse_type(const char *cmd, uint16_t len);
 
+/**
+ * @brief Save CAN configuration to NVS
+ */
 esp_err_t save_can_config_to_nvs(void);
+
+/**
+ * @brief Save LoRa TDMA configuration (g_lora_handler_cfg and crypto key) to
+ * NVS
+ */
+esp_err_t save_lora_config_to_nvs(void);
+
+/**
+ * @brief Erase all gateway configurations from NVS
+ */
 esp_err_t erase_all_configs_from_nvs(void);
+
+/**
+ * @brief Initialize configuration system (load or save defaults)
+ */
 esp_err_t config_init(void);
 
 #endif // CONFIG_HANDLER_H
