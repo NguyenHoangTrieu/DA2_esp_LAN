@@ -46,7 +46,7 @@ static can_driver_ctx_t g_can_ctx = {0};
 
 // Global configuration (defined externally)
 uint16_t g_can_whitelist[MAX_WHITELISTED_IDS] = {0};
-uint8_t g_whitelist_count = 0;
+uint16_t g_can_whitelist_count = 0;
 volatile uint32_t g_counter = 0;
 
 /**
@@ -225,7 +225,7 @@ can_status_t can_driver_init(void) {
   }
 
   // Configure acceptance filter if needed
-  if (g_whitelist_count == 1) {
+  if (g_can_whitelist_count == 1) {
     twai_mask_filter_config_t data_filter = {
         .id = (uint32_t)g_can_whitelist[0],
         .mask = 0x7FF,   // Match all 11 bits
@@ -355,9 +355,9 @@ can_status_t can_receive(can_message_t *msg) {
   }
 
   // Software whitelist filter (if multiple IDs)
-  if (g_whitelist_count > 1) {
+  if (g_can_whitelist_count > 1) {
     bool found = false;
-    for (int i = 0; i < g_whitelist_count; i++) {
+    for (int i = 0; i < g_can_whitelist_count; i++) {
       if (g_can_whitelist[i] == item.msg.id) {
         found = true;
         break;

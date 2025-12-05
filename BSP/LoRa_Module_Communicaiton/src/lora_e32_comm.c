@@ -1,22 +1,23 @@
 /**
- * @file lora_comm.c
- * @brief E32 LoRa Module Communication Driver Implementation (API Only)
+ * @file lora_e32_comm.c
+ * @brief E32 LoRa Module Communication Driver Implementation (Broadcast API)
  */
 
-#include "lora_comm.h"
 #include "driver/gpio.h"
 #include "driver/uart.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "lora_e32_comm.h"
+#include <stdlib.h>
 #include <string.h>
 
-static const char *TAG = "LORA_COMM";
+static const char *TAG = "LORA_E32_COMM";
 
 // ===== Internal Handle Structure =====
-struct lora_comm_handle_s {
-  lora_comm_config_t config;
-  lora_comm_interface_t interface;
+struct lora_e32_comm_handle_s {
+  lora_e32_comm_config_t config;
+  lora_e32_comm_interface_t interface;
   e32_mode_t current_mode;
   bool is_initialized;
 };
@@ -28,7 +29,8 @@ static esp_err_t uart_init_impl(void *config_ptr, void **user_ctx) {
     return ESP_ERR_INVALID_ARG;
   }
 
-  lora_uart_config_t *uart_cfg = (lora_uart_config_t *)config_ptr;
+  lora_e32_comm_uart_config_t *uart_cfg =
+      (lora_e32_comm_uart_config_t *)config_ptr;
 
   uart_config_t uart_config = {.baud_rate = uart_cfg->baud_rate,
                                .data_bits = UART_DATA_8_BITS,
@@ -135,20 +137,23 @@ static size_t uart_available_impl(void *user_ctx) {
 }
 
 // ===== Create UART Interface =====
-lora_comm_interface_t lora_create_uart_interface(void) {
-  lora_comm_interface_t interface = {.user_ctx = NULL,
-                                     .init = uart_init_impl,
-                                     .deinit = uart_deinit_impl,
-                                     .write = uart_write_impl,
-                                     .read = uart_read_impl,
-                                     .flush = uart_flush_impl,
-                                     .available = uart_available_impl};
+lora_e32_comm_interface_t lora_e32_comm_create_uart_interface(void) {
+  lora_e32_comm_interface_t interface = {.user_ctx = NULL,
+                                         .init = uart_init_impl,
+                                         .deinit = uart_deinit_impl,
+                                         .write = uart_write_impl,
+                                         .read = uart_read_impl,
+                                         .flush = uart_flush_impl,
+                                         .available = uart_available_impl};
   return interface;
 }
 
+// Predefined instance (optional external reference)
+lora_e32_comm_interface_t lora_e32_comm_uart_interface;
+
 // ===== Internal Helper Functions =====
 
-static esp_err_t set_gpio_mode_pins(lora_comm_handle_t handle,
+static esp_err_t set_gpio_mode_pins(lora_e32_comm_handle_t handle,
                                     e32_mode_t mode) {
   if (handle->config.gpio_config.m0_pin < 0 ||
       handle->config.gpio_config.m1_pin < 0) {
@@ -164,7 +169,7 @@ static esp_err_t set_gpio_mode_pins(lora_comm_handle_t handle,
   return ESP_OK;
 }
 
-static bool is_aux_high_internal(lora_comm_handle_t handle) {
+static bool is_aux_high_internal(lora_e32_comm_handle_t handle) {
   if (handle->config.gpio_config.aux_pin < 0) {
     return true; // Assume ready if no AUX pin
   }
@@ -173,24 +178,24 @@ static bool is_aux_high_internal(lora_comm_handle_t handle) {
 
 // ===== API Implementation =====
 
-lora_comm_status_t lora_comm_init(const lora_comm_config_t *config,
-                                  lora_comm_handle_t *handle) {
+lora_e32_comm_status_t lora_e32_comm_init(const lora_e32_comm_config_t *config,
+                                          lora_e32_comm_handle_t *handle) {
   if (config == NULL || handle == NULL) {
-    return LORA_COMM_ERR_INVALID_ARG;
+    return LORA_E32_COMM_ERR_INVALID_ARG;
   }
 
-  ESP_LOGI(TAG, "Initializing LoRa communication driver");
+  ESP_LOGI(TAG, "Initializing LoRa E32 broadcast driver");
 
   // Allocate handle
-  lora_comm_handle_t h =
-      (lora_comm_handle_t)calloc(1, sizeof(struct lora_comm_handle_s));
+  lora_e32_comm_handle_t h =
+      (lora_e32_comm_handle_t)calloc(1, sizeof(struct lora_e32_comm_handle_s));
   if (h == NULL) {
     ESP_LOGE(TAG, "Failed to allocate handle");
-    return LORA_COMM_ERR_NO_MEM;
+    return LORA_E32_COMM_ERR_NO_MEM;
   }
 
   // Copy configuration
-  memcpy(&h->config, config, sizeof(lora_comm_config_t));
+  memcpy(&h->config, config, sizeof(lora_e32_comm_config_t));
   h->interface = config->interface;
   h->current_mode = E32_MODE_SLEEP;
   h->is_initialized = false;
@@ -232,7 +237,7 @@ lora_comm_status_t lora_comm_init(const lora_comm_config_t *config,
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "Failed to initialize communication interface");
     free(h);
-    return LORA_COMM_ERR_COMM_FAILED;
+    return LORA_E32_COMM_ERR_COMM_FAILED;
   }
 
   // Set initial mode to SLEEP for configuration
@@ -242,16 +247,16 @@ lora_comm_status_t lora_comm_init(const lora_comm_config_t *config,
   h->is_initialized = true;
   *handle = h;
 
-  ESP_LOGI(TAG, "LoRa communication initialized successfully");
-  return LORA_COMM_OK;
+  ESP_LOGI(TAG, "LoRa E32 broadcast driver initialized");
+  return LORA_E32_COMM_OK;
 }
 
-lora_comm_status_t lora_comm_deinit(lora_comm_handle_t handle) {
+lora_e32_comm_status_t lora_e32_comm_deinit(lora_e32_comm_handle_t handle) {
   if (handle == NULL || !handle->is_initialized) {
-    return LORA_COMM_ERR_INVALID_ARG;
+    return LORA_E32_COMM_ERR_INVALID_ARG;
   }
 
-  ESP_LOGI(TAG, "Deinitializing LoRa communication");
+  ESP_LOGI(TAG, "Deinitializing LoRa E32 driver");
 
   // Deinitialize interface
   handle->interface.deinit(handle->interface.user_ctx);
@@ -260,22 +265,22 @@ lora_comm_status_t lora_comm_deinit(lora_comm_handle_t handle) {
   handle->is_initialized = false;
   free(handle);
 
-  ESP_LOGI(TAG, "LoRa communication deinitialized");
-  return LORA_COMM_OK;
+  ESP_LOGI(TAG, "LoRa E32 driver deinitialized");
+  return LORA_E32_COMM_OK;
 }
 
-lora_comm_status_t lora_comm_set_mode(lora_comm_handle_t handle,
-                                      e32_mode_t mode) {
+lora_e32_comm_status_t lora_e32_comm_set_mode(lora_e32_comm_handle_t handle,
+                                              e32_mode_t mode) {
   if (handle == NULL || !handle->is_initialized) {
-    return LORA_COMM_ERR_NOT_INITIALIZED;
+    return LORA_E32_COMM_ERR_NOT_INITIALIZED;
   }
 
   ESP_LOGI(TAG, "Setting mode: %d", mode);
 
   // Wait for AUX to go high before mode switch
   if (handle->config.gpio_config.aux_pin >= 0) {
-    lora_comm_status_t status = lora_comm_wait_aux_high(handle, 1000);
-    if (status != LORA_COMM_OK) {
+    lora_e32_comm_status_t status = lora_e32_comm_wait_aux_high(handle, 1000);
+    if (status != LORA_E32_COMM_OK) {
       ESP_LOGW(TAG, "AUX not high before mode switch");
     }
   }
@@ -289,110 +294,85 @@ lora_comm_status_t lora_comm_set_mode(lora_comm_handle_t handle,
 
   // Wait for AUX high after mode switch
   if (handle->config.gpio_config.aux_pin >= 0) {
-    lora_comm_wait_aux_high(handle, 1000);
+    lora_e32_comm_wait_aux_high(handle, 1000);
   }
 
-  return LORA_COMM_OK;
+  return LORA_E32_COMM_OK;
 }
 
-lora_comm_status_t lora_comm_get_mode(lora_comm_handle_t handle,
-                                      e32_mode_t *mode) {
+lora_e32_comm_status_t lora_e32_comm_get_mode(lora_e32_comm_handle_t handle,
+                                              e32_mode_t *mode) {
   if (handle == NULL || !handle->is_initialized || mode == NULL) {
-    return LORA_COMM_ERR_INVALID_ARG;
+    return LORA_E32_COMM_ERR_INVALID_ARG;
   }
 
   *mode = handle->current_mode;
-  return LORA_COMM_OK;
+  return LORA_E32_COMM_OK;
 }
 
-lora_comm_status_t lora_comm_wait_aux_high(lora_comm_handle_t handle,
-                                           uint32_t timeout_ms) {
+lora_e32_comm_status_t
+lora_e32_comm_wait_aux_high(lora_e32_comm_handle_t handle,
+                            uint32_t timeout_ms) {
   if (handle == NULL || handle->config.gpio_config.aux_pin < 0) {
-    return LORA_COMM_OK; // No AUX pin configured
+    return LORA_E32_COMM_OK; // No AUX pin configured
   }
 
   uint32_t start = xTaskGetTickCount();
   while (!is_aux_high_internal(handle)) {
     if ((xTaskGetTickCount() - start) > pdMS_TO_TICKS(timeout_ms)) {
       ESP_LOGW(TAG, "AUX timeout");
-      return LORA_COMM_ERR_TIMEOUT;
+      return LORA_E32_COMM_ERR_TIMEOUT;
     }
     vTaskDelay(pdMS_TO_TICKS(1));
   }
 
   // Wait additional 2ms after AUX goes high
   vTaskDelay(pdMS_TO_TICKS(E32_AUX_HIGH_TIME_MS));
-  return LORA_COMM_OK;
+  return LORA_E32_COMM_OK;
 }
 
-bool lora_comm_is_aux_high(lora_comm_handle_t handle) {
+bool lora_e32_comm_is_aux_high(lora_e32_comm_handle_t handle) {
   if (handle == NULL || !handle->is_initialized) {
     return false;
   }
   return is_aux_high_internal(handle);
 }
 
-lora_comm_status_t lora_comm_send_transparent(lora_comm_handle_t handle,
-                                              const uint8_t *data,
-                                              size_t length) {
+lora_e32_comm_status_t
+lora_e32_comm_send_broadcast(lora_e32_comm_handle_t handle, const uint8_t *data,
+                             size_t length) {
   if (handle == NULL || !handle->is_initialized || data == NULL ||
       length == 0) {
-    return LORA_COMM_ERR_INVALID_ARG;
+    return LORA_E32_COMM_ERR_INVALID_ARG;
   }
 
   if (handle->current_mode != E32_MODE_NORMAL &&
       handle->current_mode != E32_MODE_WAKEUP) {
     ESP_LOGE(TAG, "Invalid mode for transmission: %d", handle->current_mode);
-    return LORA_COMM_ERR_MODE_SWITCH;
+    return LORA_E32_COMM_ERR_MODE_SWITCH;
   }
 
-  ESP_LOGI(TAG, "Sending %d bytes (transparent)", length);
+  ESP_LOGI(TAG, "Sending %d bytes (broadcast)", (int)length);
+
+  // At physical layer, module should be configured:
+  //  - Address = 0xFFFF
+  //  - Same channel on all nodes
+  // so a normal transparent frame becomes broadcast to all modules.
 
   esp_err_t ret =
       handle->interface.write(handle->interface.user_ctx, data, length, 1000);
 
-  return (ret == ESP_OK) ? LORA_COMM_OK : LORA_COMM_ERR_COMM_FAILED;
+  return (ret == ESP_OK) ? LORA_E32_COMM_OK : LORA_E32_COMM_ERR_COMM_FAILED;
 }
 
-lora_comm_status_t lora_comm_send_fixed(lora_comm_handle_t handle,
-                                        uint16_t target_addr,
-                                        uint8_t target_channel,
-                                        const uint8_t *data, size_t length) {
-  if (handle == NULL || !handle->is_initialized || data == NULL ||
-      length == 0) {
-    return LORA_COMM_ERR_INVALID_ARG;
-  }
-
-  if (handle->current_mode != E32_MODE_NORMAL &&
-      handle->current_mode != E32_MODE_WAKEUP) {
-    return LORA_COMM_ERR_MODE_SWITCH;
-  }
-
-  // Build fixed transmission frame: [ADDH][ADDL][CHAN][DATA]
-  size_t total_length = 3 + length;
-  uint8_t *frame = (uint8_t *)malloc(total_length);
-  if (frame == NULL) {
-    return LORA_COMM_ERR_NO_MEM;
-  }
-
-  frame[0] = E32_GET_ADDH(target_addr);
-  frame[1] = E32_GET_ADDL(target_addr);
-  frame[2] = target_channel;
-  memcpy(&frame[3], data, length);
-
-  lora_comm_status_t status =
-      lora_comm_send_transparent(handle, frame, total_length);
-
-  free(frame);
-  return status;
-}
-
-lora_comm_status_t lora_comm_receive(lora_comm_handle_t handle, uint8_t *buffer,
-                                     size_t buffer_size, size_t *actual_length,
-                                     uint32_t timeout_ms) {
+lora_e32_comm_status_t lora_e32_comm_receive(lora_e32_comm_handle_t handle,
+                                             uint8_t *buffer,
+                                             size_t buffer_size,
+                                             size_t *actual_length,
+                                             uint32_t timeout_ms) {
   if (handle == NULL || !handle->is_initialized || buffer == NULL ||
       actual_length == NULL) {
-    return LORA_COMM_ERR_INVALID_ARG;
+    return LORA_E32_COMM_ERR_INVALID_ARG;
   }
 
   esp_err_t ret =
@@ -400,15 +380,15 @@ lora_comm_status_t lora_comm_receive(lora_comm_handle_t handle, uint8_t *buffer,
                              actual_length, timeout_ms);
 
   if (ret == ESP_OK && *actual_length > 0) {
-    ESP_LOGD(TAG, "Received %d bytes", *actual_length);
-    return LORA_COMM_OK;
+    ESP_LOGD(TAG, "Received %d bytes", (int)*actual_length);
+    return LORA_E32_COMM_OK;
   }
 
-  return (ret == ESP_ERR_TIMEOUT) ? LORA_COMM_ERR_TIMEOUT
-                                  : LORA_COMM_ERR_COMM_FAILED;
+  return (ret == ESP_ERR_TIMEOUT) ? LORA_E32_COMM_ERR_TIMEOUT
+                                  : LORA_E32_COMM_ERR_COMM_FAILED;
 }
 
-size_t lora_comm_available(lora_comm_handle_t handle) {
+size_t lora_e32_comm_available(lora_e32_comm_handle_t handle) {
   if (handle == NULL || !handle->is_initialized) {
     return 0;
   }
@@ -416,15 +396,15 @@ size_t lora_comm_available(lora_comm_handle_t handle) {
   return handle->interface.available(handle->interface.user_ctx);
 }
 
-lora_comm_status_t lora_comm_read_params(lora_comm_handle_t handle,
-                                         e32_params_t *params) {
+lora_e32_comm_status_t lora_e32_comm_read_params(lora_e32_comm_handle_t handle,
+                                                 e32_params_t *params) {
   if (handle == NULL || !handle->is_initialized || params == NULL) {
-    return LORA_COMM_ERR_INVALID_ARG;
+    return LORA_E32_COMM_ERR_INVALID_ARG;
   }
 
   // Ensure we're in sleep mode
   if (handle->current_mode != E32_MODE_SLEEP) {
-    lora_comm_set_mode(handle, E32_MODE_SLEEP);
+    lora_e32_comm_set_mode(handle, E32_MODE_SLEEP);
   }
 
   // Flush RX buffer
@@ -436,7 +416,7 @@ lora_comm_status_t lora_comm_read_params(lora_comm_handle_t handle,
       handle->interface.write(handle->interface.user_ctx, cmd, 3, 1000);
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "Failed to send read params command");
-    return LORA_COMM_ERR_COMM_FAILED;
+    return LORA_E32_COMM_ERR_COMM_FAILED;
   }
 
   // Read response: C0 + 5 bytes
@@ -448,24 +428,24 @@ lora_comm_status_t lora_comm_read_params(lora_comm_handle_t handle,
   if (ret != ESP_OK || actual_len != 6 ||
       response[0] != E32_CMD_SET_PARAM_SAVE) {
     ESP_LOGE(TAG, "Failed to read parameters (got %d bytes, first=0x%02X)",
-             actual_len, response[0]);
-    return LORA_COMM_ERR_CONFIG_FAILED;
+             (int)actual_len, response[0]);
+    return LORA_E32_COMM_ERR_CONFIG_FAILED;
   }
 
   memcpy(params, response, 6);
   ESP_LOGI(TAG, "Parameters read successfully");
-  return LORA_COMM_OK;
+  return LORA_E32_COMM_OK;
 }
 
-lora_comm_status_t lora_comm_write_params(lora_comm_handle_t handle,
-                                          const e32_params_t *params) {
+lora_e32_comm_status_t lora_e32_comm_write_params(lora_e32_comm_handle_t handle,
+                                                  const e32_params_t *params) {
   if (handle == NULL || !handle->is_initialized || params == NULL) {
-    return LORA_COMM_ERR_INVALID_ARG;
+    return LORA_E32_COMM_ERR_INVALID_ARG;
   }
 
   // Ensure we're in sleep mode
   if (handle->current_mode != E32_MODE_SLEEP) {
-    lora_comm_set_mode(handle, E32_MODE_SLEEP);
+    lora_e32_comm_set_mode(handle, E32_MODE_SLEEP);
   }
 
   // Prepare command with C0 header (save to flash)
@@ -479,23 +459,24 @@ lora_comm_status_t lora_comm_write_params(lora_comm_handle_t handle,
 
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "Failed to write parameters");
-    return LORA_COMM_ERR_CONFIG_FAILED;
+    return LORA_E32_COMM_ERR_CONFIG_FAILED;
   }
 
   vTaskDelay(pdMS_TO_TICKS(100)); // Wait for module to save
 
   ESP_LOGI(TAG, "Parameters written successfully");
-  return LORA_COMM_OK;
+  return LORA_E32_COMM_OK;
 }
 
-lora_comm_status_t lora_comm_write_params_temp(lora_comm_handle_t handle,
-                                               const e32_params_t *params) {
+lora_e32_comm_status_t
+lora_e32_comm_write_params_temp(lora_e32_comm_handle_t handle,
+                                const e32_params_t *params) {
   if (handle == NULL || !handle->is_initialized || params == NULL) {
-    return LORA_COMM_ERR_INVALID_ARG;
+    return LORA_E32_COMM_ERR_INVALID_ARG;
   }
 
   if (handle->current_mode != E32_MODE_SLEEP) {
-    lora_comm_set_mode(handle, E32_MODE_SLEEP);
+    lora_e32_comm_set_mode(handle, E32_MODE_SLEEP);
   }
 
   e32_params_t cmd_params;
@@ -506,17 +487,17 @@ lora_comm_status_t lora_comm_write_params_temp(lora_comm_handle_t handle,
                                           (uint8_t *)&cmd_params,
                                           sizeof(e32_params_t), 1000);
 
-  return (ret == ESP_OK) ? LORA_COMM_OK : LORA_COMM_ERR_CONFIG_FAILED;
+  return (ret == ESP_OK) ? LORA_E32_COMM_OK : LORA_E32_COMM_ERR_CONFIG_FAILED;
 }
 
-lora_comm_status_t lora_comm_read_version(lora_comm_handle_t handle,
-                                          e32_version_t *version) {
+lora_e32_comm_status_t lora_e32_comm_read_version(lora_e32_comm_handle_t handle,
+                                                  e32_version_t *version) {
   if (handle == NULL || !handle->is_initialized || version == NULL) {
-    return LORA_COMM_ERR_INVALID_ARG;
+    return LORA_E32_COMM_ERR_INVALID_ARG;
   }
 
   if (handle->current_mode != E32_MODE_SLEEP) {
-    lora_comm_set_mode(handle, E32_MODE_SLEEP);
+    lora_e32_comm_set_mode(handle, E32_MODE_SLEEP);
   }
 
   // Flush RX buffer
@@ -527,7 +508,7 @@ lora_comm_status_t lora_comm_read_version(lora_comm_handle_t handle,
   esp_err_t ret =
       handle->interface.write(handle->interface.user_ctx, cmd, 3, 1000);
   if (ret != ESP_OK) {
-    return LORA_COMM_ERR_COMM_FAILED;
+    return LORA_E32_COMM_ERR_COMM_FAILED;
   }
 
   uint8_t response[4];
@@ -536,7 +517,7 @@ lora_comm_status_t lora_comm_read_version(lora_comm_handle_t handle,
                                &actual_len, 1000);
 
   if (ret != ESP_OK || actual_len != 4 || response[0] != E32_CMD_READ_VERSION) {
-    return LORA_COMM_ERR_CONFIG_FAILED;
+    return LORA_E32_COMM_ERR_CONFIG_FAILED;
   }
 
   version->model = response[1];
@@ -546,16 +527,16 @@ lora_comm_status_t lora_comm_read_version(lora_comm_handle_t handle,
   ESP_LOGI(TAG, "Version: Model=0x%02X, Ver=0x%02X, Features=0x%02X",
            version->model, version->version, version->features);
 
-  return LORA_COMM_OK;
+  return LORA_E32_COMM_OK;
 }
 
-lora_comm_status_t lora_comm_reset(lora_comm_handle_t handle) {
+lora_e32_comm_status_t lora_e32_comm_reset(lora_e32_comm_handle_t handle) {
   if (handle == NULL || !handle->is_initialized) {
-    return LORA_COMM_ERR_NOT_INITIALIZED;
+    return LORA_E32_COMM_ERR_NOT_INITIALIZED;
   }
 
   if (handle->current_mode != E32_MODE_SLEEP) {
-    lora_comm_set_mode(handle, E32_MODE_SLEEP);
+    lora_e32_comm_set_mode(handle, E32_MODE_SLEEP);
   }
 
   uint8_t cmd[3] = {E32_CMD_RESET, E32_CMD_RESET, E32_CMD_RESET};
@@ -563,20 +544,20 @@ lora_comm_status_t lora_comm_reset(lora_comm_handle_t handle) {
       handle->interface.write(handle->interface.user_ctx, cmd, 3, 1000);
 
   if (ret != ESP_OK) {
-    return LORA_COMM_ERR_COMM_FAILED;
+    return LORA_E32_COMM_ERR_COMM_FAILED;
   }
 
   vTaskDelay(pdMS_TO_TICKS(E32_RESET_TIME_MS));
   ESP_LOGI(TAG, "Module reset");
 
-  return LORA_COMM_OK;
+  return LORA_E32_COMM_OK;
 }
 
-lora_comm_status_t lora_comm_flush(lora_comm_handle_t handle) {
+lora_e32_comm_status_t lora_e32_comm_flush(lora_e32_comm_handle_t handle) {
   if (handle == NULL || !handle->is_initialized) {
-    return LORA_COMM_ERR_NOT_INITIALIZED;
+    return LORA_E32_COMM_ERR_NOT_INITIALIZED;
   }
 
   esp_err_t ret = handle->interface.flush(handle->interface.user_ctx);
-  return (ret == ESP_OK) ? LORA_COMM_OK : LORA_COMM_ERR_COMM_FAILED;
+  return (ret == ESP_OK) ? LORA_E32_COMM_OK : LORA_E32_COMM_ERR_COMM_FAILED;
 }

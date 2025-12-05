@@ -8,6 +8,7 @@ idf_component_register(SRCS "DA2_esp_LAN.c"
                             "../BSP/MCU_WAN_Communication/src/wan_comm.c"
                             "../BSP/LoRa_Module_Communicaiton/src/lora_e32_comm.c"
                             "../BSP/CAN_Communication/src/can_driver.c"
+                            "../Middleware/LoRa_Handler/src/lora_tdma_handler.c"
                     PRIV_REQUIRES 
                                 esp_wifi
                                 nvs_flash
@@ -36,6 +37,7 @@ idf_component_register(SRCS "DA2_esp_LAN.c"
                                 "../BSP/MCU_WAN_Communication/include"
                                 "../BSP/LoRa_Module_Communicaiton/include"
                                 "../BSP/CAN_Communication/include"
+                                "../Middleware/LoRa_Handler/include"
                                 "../rbg_led_ws_handler"
                     EMBED_TXTFILES ${project_dir}/server_certs/ca_cert.pem)
 

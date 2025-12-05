@@ -23,11 +23,6 @@ static const char *TAG = "CONFIG_NVS";
 /* CAN Whitelist Size */
 #define CAN_MAX_WHITELIST_SIZE MAX_WHITELISTED_IDS
 
-/* External global variables from can_driver */
-extern can_config_t g_can_config;
-extern uint16_t g_can_whitelist[];
-extern uint8_t g_whitelist_count;
-
 /**
  * @brief Open NVS handle
  */
@@ -82,7 +77,7 @@ static esp_err_t load_can_config_from_nvs(void) {
     // Read CAN whitelist
     typedef struct {
         uint16_t ids[CAN_MAX_WHITELIST_SIZE];
-        uint8_t count;
+        uint16_t count;
     } can_whitelist_persistent_t;
 
     can_whitelist_persistent_t whitelist;
@@ -92,22 +87,22 @@ static esp_err_t load_can_config_from_nvs(void) {
     
     if (err == ESP_OK) {
         // Copy to global whitelist
-        g_whitelist_count = whitelist.count;
-        if (g_whitelist_count > CAN_MAX_WHITELIST_SIZE) {
+        g_can_whitelist_count = whitelist.count;
+        if (g_can_whitelist_count > CAN_MAX_WHITELIST_SIZE) {
             ESP_LOGW(TAG, "Whitelist count %d exceeds max %d, truncating", 
-                     g_whitelist_count, CAN_MAX_WHITELIST_SIZE);
-            g_whitelist_count = CAN_MAX_WHITELIST_SIZE;
+                     g_can_whitelist_count, CAN_MAX_WHITELIST_SIZE);
+            g_can_whitelist_count = CAN_MAX_WHITELIST_SIZE;
         }
         
-        memcpy(g_can_whitelist, whitelist.ids, g_whitelist_count * sizeof(uint16_t));
+        memcpy(g_can_whitelist, whitelist.ids, g_can_whitelist_count * sizeof(uint16_t));
         
-        ESP_LOGI(TAG, "CAN whitelist loaded - Count: %d", g_whitelist_count);
-        for (uint8_t i = 0; i < g_whitelist_count; i++) {
+        ESP_LOGI(TAG, "CAN whitelist loaded - Count: %d", g_can_whitelist_count);
+        for (uint8_t i = 0; i < g_can_whitelist_count; i++) {
             ESP_LOGI(TAG, "  ID[%d]: 0x%03X", i, g_can_whitelist[i]);
         }
     } else if (err == ESP_ERR_NVS_NOT_FOUND) {
         ESP_LOGI(TAG, "CAN whitelist not found in NVS, using empty whitelist (accept all)");
-        g_whitelist_count = 0;
+        g_can_whitelist_count = 0;
         err = ESP_OK; // Not an error, use empty whitelist
     } else {
         ESP_LOGE(TAG, "Error reading CAN whitelist: %s", esp_err_to_name(err));
@@ -154,11 +149,11 @@ esp_err_t save_can_config_to_nvs(void) {
     // Prepare whitelist data
     typedef struct {
         uint16_t ids[CAN_MAX_WHITELIST_SIZE];
-        uint8_t count;
+        uint16_t count;
     } can_whitelist_persistent_t;
 
     can_whitelist_persistent_t whitelist = {0};
-    whitelist.count = g_whitelist_count;
+    whitelist.count = g_can_whitelist_count;
     
     if (whitelist.count > CAN_MAX_WHITELIST_SIZE) {
         ESP_LOGW(TAG, "Whitelist count %d exceeds max %d, truncating", 
@@ -183,7 +178,7 @@ esp_err_t save_can_config_to_nvs(void) {
         ESP_LOGE(TAG, "Error committing NVS: %s", esp_err_to_name(err));
     } else {
         ESP_LOGI(TAG, "CAN config saved - Baud: %lu, Mode: %d, Whitelist count: %d",
-                 g_can_config.baud_rate, g_can_config.operating_mode, g_whitelist_count);
+                 g_can_config.baud_rate, g_can_config.operating_mode, g_can_whitelist_count);
     }
 
     nvs_close(nvs_handle);

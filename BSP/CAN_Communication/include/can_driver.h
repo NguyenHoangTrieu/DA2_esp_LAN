@@ -61,7 +61,7 @@ extern can_config_t g_can_config;
 
 /* External Global Whitelist Configuration (REQ-DAT-002, REQ-DAT-003) */
 extern uint16_t g_can_whitelist[];
-extern uint8_t g_whitelist_count;
+extern uint16_t g_can_whitelist_count;
 
 /**
  * @brief Initialize and configure the TWAI CAN driver

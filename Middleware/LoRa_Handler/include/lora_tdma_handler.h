@@ -1,7 +1,7 @@
-#ifndef LORA_TDMA_H
-#define LORA_TDMA_H
+#ifndef LORA_HANDLER_H
+#define LORA_HANDLER_H
 
-#include "lora_e32_comm.h"   // Provides lora_comm_handle_t and E32_TRANSPARENT_MAX_SIZE
+#include "lora_e32_comm.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -9,180 +9,181 @@
 extern "C" {
 #endif
 
-/* Broadcast address for one-hop star topology */
-#define LORA_TDMA_ADDR_BROADCAST 0xFFFF
-
+/* ----- Basic limits (from E32 datasheet) ----- */
 /* TDMA header: type(1) + slot(1) + src(2) + dst(2) + len(1) = 7 bytes */
-#define LORA_TDMA_HEADER_SIZE   7u
+#define LORA_HANDLER_HEADER_SIZE        7u
+/* E32 transparent max is 58 bytes, payload is 58 - header */
+#define LORA_HANDLER_MAX_PAYLOAD       (E32_TRANSPARENT_MAX_SIZE - LORA_HANDLER_HEADER_SIZE)
 
-/* E32 transparent max is 58 bytes. Keep TDMA frame <= 58 bytes. */
-#define LORA_TDMA_MAX_PAYLOAD  (E32_TRANSPARENT_MAX_SIZE - LORA_TDMA_HEADER_SIZE)
+/* Simple software broadcast ID (logical addressing) */
+#define LORA_HANDLER_ADDR_BROADCAST    0xFFFF
 
-/* Node role in the star topology (no routing). */
+/* Max length of crypto key (simple XOR stream) */
+#define LORA_HANDLER_CRYPTO_KEY_MAX_LEN 16u
+
+/* How many TDMA frames until sensor loses sync without beacon */
+#define LORA_HANDLER_BEACON_TIMEOUT_FRAMES  5u
+
+/* ----- Roles & frame types ----- */
+
 typedef enum {
-    LORA_TDMA_ROLE_GATEWAY = 0,
-    LORA_TDMA_ROLE_SENSOR  = 1
-} lora_tdma_role_t;
+    LORA_HANDLER_ROLE_GATEWAY = 0,
+    LORA_HANDLER_ROLE_SENSOR  = 1
+} lora_handler_role_t;
 
-/* Simple frame types for TDMA link layer. */
+/* Very small frame type set */
 typedef enum {
-    LORA_TDMA_FRAME_BEACON    = 0x01,  /* gateway -> all sensors, time sync      */
-    LORA_TDMA_FRAME_DATA_UP   = 0x02,  /* sensor -> gateway                       */
-    LORA_TDMA_FRAME_DATA_DOWN = 0x03   /* gateway -> sensor                       */
-    /* You can extend with ACK/CONTROL later if needed. */
-} lora_tdma_frame_type_t;
+    LORA_HANDLER_FRAME_BEACON = 0x01,  /* time sync frame */
+    LORA_HANDLER_FRAME_DATA   = 0x02   /* encrypted data frame */
+} lora_handler_frame_type_t;
 
-/* One-hop TDMA frame (on-air payload). */
+/* On-air TDMA frame (after crypto applied on payload) */
 typedef struct {
-    uint8_t  type;                         /* lora_tdma_frame_type_t                */
-    uint8_t  slot_id;                      /* TDMA slot index                       */
-    uint16_t src_id;                       /* source node ID                        */
-    uint16_t dst_id;                       /* destination node ID                   */
-    uint8_t  len;                          /* payload length in bytes               */
-    uint8_t  payload[LORA_TDMA_MAX_PAYLOAD];
-} lora_tdma_frame_t;
+    uint8_t  type;                     /* lora_handler_frame_type_t         */
+    uint8_t  slot_id;                  /* TDMA slot index                   */
+    uint16_t src_id;                   /* source node ID                    */
+    uint16_t dst_id;                   /* destination node ID               */
+    uint8_t  len;                      /* payload length in bytes           */
+    uint8_t  payload[LORA_HANDLER_MAX_PAYLOAD]; /* (maybe encrypted)       */
+} lora_handler_frame_t;
 
-/* Static TDMA configuration for one node. */
+/* Basic stats for debugging */
 typedef struct {
-    lora_tdma_role_t role;                 /* gateway or sensor                     */
+    uint32_t tx_ok;
+    uint32_t rx_ok;
+    uint32_t rx_error;
+    uint32_t missed_beacon;
+} lora_handler_stats_t;
 
-    uint16_t node_id;                      /* this node ID                          */
-    uint16_t gateway_id;                   /* gateway ID (for sensors)              */
-
-    uint8_t  num_slots;                    /* number of slots per frame             */
-    uint8_t  my_slot;                      /* sensor TX slot; gateway can ignore    */
-
-    uint32_t slot_duration_ms;             /* slot duration in milliseconds         */
-    uint32_t frame_start_ms;               /* initial frame start (only gateway)    */
-} lora_tdma_config_t;
-
-/* Basic statistics for debugging and monitoring. */
+/* Public TDMA configuration (shared & override-able by application) */
 typedef struct {
-    uint32_t tx_ok;                        /* successfully transmitted frames       */
-    uint32_t rx_ok;                        /* successfully parsed frames            */
-    uint32_t rx_error;                     /* length / parse errors                 */
-    uint32_t missed_beacon;               /* beacons not received (for sensors)    */
-} lora_tdma_stats_t;
+    lora_handler_role_t role;          /* gateway or sensor                 */
 
-/* Application callback when a frame addressed to this node is received. */
-typedef void (*lora_tdma_rx_cb_t)(const lora_tdma_frame_t *frame);
+    uint16_t node_id;                  /* this node's logical ID            */
+    uint16_t gateway_id;               /* logical gateway ID (used by sensors) */
 
-/* Application callback when entering a new slot. */
-typedef void (*lora_tdma_slot_cb_t)(uint8_t slot_id, bool is_tx_slot);
+    uint8_t  num_slots;                /* number of slots per frame         */
+    uint8_t  my_slot;                  /* TX slot for this node             */
 
-/* TDMA runtime context. Allocate one per node (gateway or sensor). */
-typedef struct {
-    /* Static config + statistics */
-    lora_tdma_config_t cfg;
-    lora_tdma_stats_t  stats;
+    uint32_t slot_duration_ms;         /* slot duration in milliseconds     */
+} lora_handler_config_t;
 
-    /* Radio driver handle (from lora_comm_init) */
-    lora_comm_handle_t radio;
+/* Public globals for configuration & crypto key.
+ * Define them once in lora_handler.c, and you can modify them
+ * from application code before calling lora_handler_init().
+ */
+
+/* Default TDMA configuration (no hardcoded values in logic). */
+extern lora_handler_config_t g_lora_handler_cfg;
+
+/* Default crypto key (XOR stream). Only first g_lora_handler_crypto_key_len bytes are used.
+ */
+extern uint8_t g_lora_handler_crypto_key[LORA_HANDLER_CRYPTO_KEY_MAX_LEN];
+extern uint8_t g_lora_handler_crypto_key_len;
+
+/* ----- Forward declarations for callbacks & context ----- */
+
+struct lora_handler_ctx_s;
+typedef struct lora_handler_ctx_s lora_handler_ctx_t;
+
+/* Called when a valid, decrypted frame for this node is received. */
+typedef void (*lora_handler_rx_cb_t)(const lora_handler_frame_t *frame);
+
+/* Called each time TDMA enters a new slot. */
+typedef void (*lora_handler_slot_cb_t)(uint8_t slot_id, bool is_tx_slot);
+
+/* TDMA runtime context (one per node) */
+struct lora_handler_ctx_s {
+    lora_handler_config_t cfg;         /* local copy of config              */
+    lora_handler_stats_t  stats;
+
+    lora_e32_comm_handle_t radio;      /* underlying E32 driver handle      */
 
     /* TDMA timing state */
-    uint8_t  current_slot;                 /* current slot index in frame           */
-    uint32_t frame_start_ms;               /* local frame start timestamp           */
-    uint32_t frame_counter;                /* frame index (0,1,2,...)               */
+    uint8_t  current_slot;
+    uint32_t frame_start_ms;
+    uint32_t frame_counter;
 
-    bool     started;                      /* true after TDMA timing is running     */
-    bool     is_synced;                    /* sensors set true after first beacon   */
-    bool     beacon_sent;                  /* gateway: beacon already sent this frame */
+    bool     started;
+    bool     is_synced;                /* sensors: set true after beacon    */
+    bool     beacon_sent;              /* gateway: beacon for this frame    */
 
-    /* Simple single-frame TX buffer */
-    bool              tx_pending;
-    lora_tdma_frame_t tx_frame;
+    /* Simple TX buffer (single pending frame) */
+    bool                tx_pending;
+    lora_handler_frame_t tx_frame;
 
     /* Application callbacks */
-    lora_tdma_rx_cb_t   rx_cb;
-    lora_tdma_slot_cb_t slot_cb;
-} lora_tdma_ctx_t;
+    lora_handler_rx_cb_t   rx_cb;
+    lora_handler_slot_cb_t slot_cb;
+};
 
 /* ====================== API ====================== */
 
 /**
- * @brief Initialize TDMA context.
- *
- * This does NOT start any task or timer. You must call lora_tdma_process()
- * periodically with current time in milliseconds.
- *
- * @param ctx   Pointer to TDMA context
- * @param cfg   Static configuration (copied into ctx)
- * @param radio LoRa radio handle returned by lora_comm_init()
+ * @brief Initialize handler context using global configuration & radio handle.
+ * @param ctx   Pointer to context (allocated by caller)
+ * @param radio LoRa E32 driver handle (from lora_e32_comm_init)
  */
-void lora_tdma_init(lora_tdma_ctx_t *ctx,
-                    const lora_tdma_config_t *cfg,
-                    lora_comm_handle_t radio);
+void lora_handler_init(lora_handler_ctx_t *ctx, lora_e32_comm_handle_t radio);
 
 /**
- * @brief Register RX callback for application.
+ * @brief Register RX callback for decrypted frames.
  */
-void lora_tdma_register_rx_callback(lora_tdma_ctx_t *ctx,
-                                    lora_tdma_rx_cb_t cb);
+void lora_handler_register_rx_callback(lora_handler_ctx_t *ctx,
+                                       lora_handler_rx_cb_t cb);
 
 /**
- * @brief Register slot callback for application.
- *
- * Called each time TDMA enters a new slot.
+ * @brief Register slot callback, called at each slot boundary.
  */
-void lora_tdma_register_slot_callback(lora_tdma_ctx_t *ctx,
-                                      lora_tdma_slot_cb_t cb);
+void lora_handler_register_slot_callback(lora_handler_ctx_t *ctx,
+                                         lora_handler_slot_cb_t cb);
 
 /**
- * @brief Main TDMA scheduler.
+ * @brief Main TDMA scheduler. No RTOS.
  *
- * Call this periodically (e.g. every 1–10 ms) from your main loop or RTOS task.
- * 'now_ms' must use the same time base as cfg.frame_start_ms.
+ * Call this from your main loop at a reasonable rate (e.g. every 1–10 ms).
+ * 'now_ms' should be from a monotonic millisecond timer.
  */
-void lora_tdma_process(lora_tdma_ctx_t *ctx, uint32_t now_ms);
+void lora_handler_process(lora_handler_ctx_t *ctx, uint32_t now_ms);
 
 /**
- * @brief Sensor: queue an uplink frame to gateway.
+ * @brief Queue a data frame to send (will be encrypted and sent in TX slot).
  *
- * The frame will be sent automatically when the node is in its TX slot.
+ * - For gateway: usually dst_id is a specific sensor or broadcast.
+ * - For sensor: dst_id typically equals g_lora_handler_cfg.gateway_id.
  *
- * @return true if frame was queued, false otherwise
- *         (e.g. invalid role, length too big, or previous frame pending).
+ * @return true if successfully queued, false if busy/invalid.
  */
-bool lora_tdma_sensor_send(lora_tdma_ctx_t   *ctx,
-                           const uint8_t     *payload,
-                           uint8_t            len);
+bool lora_handler_send(lora_handler_ctx_t *ctx,
+                       uint16_t             dst_id,
+                       const uint8_t       *payload,
+                       uint8_t              len);
 
 /**
- * @brief Gateway: queue a downlink frame to a specific sensor.
+ * @brief Feed raw bytes received from E32 into handler.
  *
- * The frame will be sent in the current slot as soon as possible.
+ * Typical flow in main loop:
+ *   - call lora_e32_comm_receive() to get raw bytes
+ *   - pass them here with the same 'now_ms' time base.
  */
-bool lora_tdma_gateway_send_to(lora_tdma_ctx_t *ctx,
-                               uint16_t         dst_id,
-                               const uint8_t   *payload,
-                               uint8_t          len);
+void lora_handler_handle_rx(lora_handler_ctx_t *ctx,
+                            const uint8_t       *buf,
+                            uint8_t              len,
+                            uint32_t             now_ms);
 
 /**
- * @brief Gateway-only: send a beacon immediately (slot 0 recommended).
- *
- * Usually this is called automatically by lora_tdma_process() when gateway
- * enters slot 0 of a new frame, but you can call it manually if needed.
+ * @brief Get a snapshot of current stats.
  */
-bool lora_tdma_send_beacon(lora_tdma_ctx_t *ctx);
+void lora_handler_get_stats(lora_handler_ctx_t *ctx,
+                            lora_handler_stats_t *out);
 
 /**
- * @brief Feed received raw bytes from radio into TDMA layer.
- *
- * Call this from your radio RX task:
- *   - Receive bytes from lora_comm_receive()
- *   - Pass them to this function along with reception timestamp.
+ * @brief Reset statistics counters.
  */
-void lora_tdma_handle_rx(lora_tdma_ctx_t *ctx,
-                         const uint8_t   *buf,
-                         uint8_t          len,
-                         uint32_t         now_ms);
-
-/* Stats helpers */
-void lora_tdma_get_stats (lora_tdma_ctx_t *ctx, lora_tdma_stats_t *out);
-void lora_tdma_reset_stats(lora_tdma_ctx_t *ctx);
+void lora_handler_reset_stats(lora_handler_ctx_t *ctx);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* LORA_TDMA_H */
+#endif /* LORA_HANDLER_H */
