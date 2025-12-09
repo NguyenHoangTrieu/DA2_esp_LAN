@@ -1,6 +1,11 @@
 /**
  * @file lora_e32_comm.c
  * @brief E32 LoRa Module Communication Driver Implementation (Broadcast API)
+ *
+ * This driver provides a thin abstraction over the E32 module using a
+ * pluggable communication interface (currently UART only). All data is
+ * transmitted in transparent broadcast mode: the radio must be configured
+ * with address 0xFFFF and the same RF channel on all nodes.
  */
 
 #include "driver/gpio.h"
@@ -14,12 +19,66 @@
 
 static const char *TAG = "LORA_E32_COMM";
 
+/* ===== Default E32 parameter bytes (compile‑time constants) =====
+ *
+ * We cannot call inline helper functions (e32_build_sped / e32_build_option)
+ * inside a global initializer because they are not constant expressions.
+ *
+ * Instead we re‑encode the logic here using only macros and bit‑operations,
+ * which *are* allowed in constant initializers.
+ */
+enum {
+  E32_DEFAULT_SPED_BYTE =
+      ((E32_DEFAULT_UART_PARITY << E32_SPED_PARITY_SHIFT) &
+       E32_SPED_PARITY_MASK) |
+      ((E32_DEFAULT_UART_BAUD << E32_SPED_UART_BAUD_SHIFT) &
+       E32_SPED_UART_BAUD_MASK) |
+      ((E32_DEFAULT_AIR_RATE << E32_SPED_AIR_RATE_SHIFT) &
+       E32_SPED_AIR_RATE_MASK),
+
+  E32_DEFAULT_OPTION_BYTE =
+      ((E32_DEFAULT_TRANS_MODE << E32_OPTION_TRANS_MODE_SHIFT) &
+       E32_OPTION_TRANS_MODE_MASK) |
+      ((E32_DEFAULT_IO_DRIVE << E32_OPTION_IO_DRIVE_SHIFT) &
+       E32_OPTION_IO_DRIVE_MASK) |
+      ((E32_DEFAULT_WAKEUP_TIME << E32_OPTION_WAKEUP_SHIFT) &
+       E32_OPTION_WAKEUP_MASK) |
+      ((E32_DEFAULT_FEC << E32_OPTION_FEC_SHIFT) &
+       E32_OPTION_FEC_MASK) |
+      ((E32_DEFAULT_TX_POWER << E32_OPTION_POWER_SHIFT) &
+       E32_OPTION_POWER_MASK),
+};
+
+/* Global E32 configuration (UART + module params).
+ * The baud rate is used when configuring the UART interface.
+ * The params structure is the desired radio configuration that
+ * will be written to the module at initialization.
+ *
+ * Default configuration is:
+ *  - Broadcast address 0xFFFF
+ *  - 433 MHz channel (E32_DEFAULT_CHANNEL)
+ *  - Transparent transmission mode
+ *  - 9600 bps UART, 8N1
+ *  - 2.4 kbps air data rate
+ *  - FEC enabled, 30 dBm TX power
+ */
+e32_params_t g_lora_e32_params = {
+    .head   = E32_CMD_SET_PARAM_SAVE,
+    .addh   = E32_GET_ADDH(E32_ADDR_BROADCAST),
+    .addl   = E32_GET_ADDL(E32_ADDR_BROADCAST),
+    .sped   = E32_DEFAULT_SPED_BYTE,
+    .chan   = E32_DEFAULT_CHANNEL,
+    .option = E32_DEFAULT_OPTION_BYTE,
+};
+
+int g_lora_e32_baud_rate = LORA_E32_DEFAULT_BAUD_RATE; // Host UART baud rate
+
 // ===== Internal Handle Structure =====
 struct lora_e32_comm_handle_s {
-  lora_e32_comm_config_t config;
+  lora_e32_comm_config_t    config;
   lora_e32_comm_interface_t interface;
-  e32_mode_t current_mode;
-  bool is_initialized;
+  e32_mode_t                current_mode;
+  bool                      is_initialized;
 };
 
 // ===== UART Interface Implementation =====
@@ -32,39 +91,50 @@ static esp_err_t uart_init_impl(void *config_ptr, void **user_ctx) {
   lora_e32_comm_uart_config_t *uart_cfg =
       (lora_e32_comm_uart_config_t *)config_ptr;
 
-  uart_config_t uart_config = {.baud_rate = uart_cfg->baud_rate,
-                               .data_bits = UART_DATA_8_BITS,
-                               .parity = UART_PARITY_DISABLE,
-                               .stop_bits = UART_STOP_BITS_1,
-                               .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-                               .source_clk = UART_SCLK_DEFAULT};
+  int uart_port = LORA_E32_UART_PORT;
 
-  esp_err_t ret = uart_param_config(uart_cfg->uart_port, &uart_config);
+  /* If baud_rate is zero, fall back to the global default. */
+  int baud = (uart_cfg->baud_rate > 0) ? uart_cfg->baud_rate
+                                       : g_lora_e32_baud_rate;
+
+  uart_config_t uart_config = {
+      .baud_rate = baud,
+      .data_bits = UART_DATA_8_BITS,
+      .parity    = UART_PARITY_DISABLE,
+      .stop_bits = UART_STOP_BITS_1,
+      .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+      .source_clk = UART_SCLK_DEFAULT};
+
+  esp_err_t ret = uart_param_config(uart_port, &uart_config);
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "UART param config failed: %s", esp_err_to_name(ret));
     return ret;
   }
 
-  ret = uart_set_pin(uart_cfg->uart_port, uart_cfg->tx_pin, uart_cfg->rx_pin,
-                     UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+  ret = uart_set_pin(uart_port,
+                     LORA_E32_UART_TX_PIN,
+                     LORA_E32_UART_RX_PIN,
+                     UART_PIN_NO_CHANGE,
+                     UART_PIN_NO_CHANGE);
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "UART set pin failed: %s", esp_err_to_name(ret));
     return ret;
   }
 
-  ret = uart_driver_install(uart_cfg->uart_port, uart_cfg->rx_buffer_size,
-                            uart_cfg->tx_buffer_size, 0, NULL, 0);
+  ret = uart_driver_install(uart_port,
+                            uart_cfg->rx_buffer_size,
+                            uart_cfg->tx_buffer_size,
+                            0, NULL, 0);
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "UART driver install failed: %s", esp_err_to_name(ret));
     return ret;
   }
 
   // Store UART port in user context
-  *user_ctx = (void *)(intptr_t)uart_cfg->uart_port;
+  *user_ctx = (void *)(intptr_t)uart_port;
 
   ESP_LOGI(TAG, "UART initialized: port=%d, baud=%d, TX=%d, RX=%d",
-           uart_cfg->uart_port, uart_cfg->baud_rate, uart_cfg->tx_pin,
-           uart_cfg->rx_pin);
+           uart_port, baud, LORA_E32_UART_TX_PIN, LORA_E32_UART_RX_PIN);
 
   return ESP_OK;
 }
@@ -105,7 +175,8 @@ static esp_err_t uart_read_impl(void *user_ctx, uint8_t *data, size_t length,
   }
 
   int uart_port = (int)(intptr_t)user_ctx;
-  int len = uart_read_bytes(uart_port, data, length, pdMS_TO_TICKS(timeout_ms));
+  int len = uart_read_bytes(uart_port, data, length,
+                            pdMS_TO_TICKS(timeout_ms));
 
   if (len < 0) {
     *actual_length = 0;
@@ -138,13 +209,14 @@ static size_t uart_available_impl(void *user_ctx) {
 
 // ===== Create UART Interface =====
 lora_e32_comm_interface_t lora_e32_comm_create_uart_interface(void) {
-  lora_e32_comm_interface_t interface = {.user_ctx = NULL,
-                                         .init = uart_init_impl,
-                                         .deinit = uart_deinit_impl,
-                                         .write = uart_write_impl,
-                                         .read = uart_read_impl,
-                                         .flush = uart_flush_impl,
-                                         .available = uart_available_impl};
+  lora_e32_comm_interface_t interface = {
+      .user_ctx = NULL,
+      .init     = uart_init_impl,
+      .deinit   = uart_deinit_impl,
+      .write    = uart_write_impl,
+      .read     = uart_read_impl,
+      .flush    = uart_flush_impl,
+      .available = uart_available_impl};
   return interface;
 }
 
@@ -155,25 +227,28 @@ lora_e32_comm_interface_t lora_e32_comm_uart_interface;
 
 static esp_err_t set_gpio_mode_pins(lora_e32_comm_handle_t handle,
                                     e32_mode_t mode) {
-  if (handle->config.gpio_config.m0_pin < 0 ||
-      handle->config.gpio_config.m1_pin < 0) {
+  (void)handle; // handle not needed once pins are compile‑time
+
+  if (LORA_E32_M0_GPIO < 0 || LORA_E32_M1_GPIO < 0) {
     return ESP_ERR_INVALID_ARG;
   }
 
   uint8_t m0 = (mode & 0x01) ? 1 : 0;
   uint8_t m1 = (mode & 0x02) ? 1 : 0;
 
-  gpio_set_level(handle->config.gpio_config.m0_pin, m0);
-  gpio_set_level(handle->config.gpio_config.m1_pin, m1);
+  gpio_set_level(LORA_E32_M0_GPIO, m0);
+  gpio_set_level(LORA_E32_M1_GPIO, m1);
 
   return ESP_OK;
 }
 
 static bool is_aux_high_internal(lora_e32_comm_handle_t handle) {
-  if (handle->config.gpio_config.aux_pin < 0) {
+  (void)handle; // handle unused, AUX pin is global
+
+  if (LORA_E32_AUX_GPIO < 0) {
     return true; // Assume ready if no AUX pin
   }
-  return gpio_get_level(handle->config.gpio_config.aux_pin) == 1;
+  return gpio_get_level(LORA_E32_AUX_GPIO) == 1;
 }
 
 // ===== API Implementation =====
@@ -194,44 +269,49 @@ lora_e32_comm_status_t lora_e32_comm_init(const lora_e32_comm_config_t *config,
     return LORA_E32_COMM_ERR_NO_MEM;
   }
 
-  // Copy configuration
+  // Copy configuration from application
   memcpy(&h->config, config, sizeof(lora_e32_comm_config_t));
-  h->interface = config->interface;
-  h->current_mode = E32_MODE_SLEEP;
+  h->interface      = config->interface;
+  h->current_mode   = E32_MODE_SLEEP;
   h->is_initialized = false;
 
-  // Initialize GPIO pins
-  if (config->gpio_config.m0_pin >= 0) {
-    gpio_config_t io_conf = {.pin_bit_mask =
-                                 (1ULL << config->gpio_config.m0_pin),
-                             .mode = GPIO_MODE_OUTPUT,
-                             .pull_up_en = GPIO_PULLUP_DISABLE,
-                             .pull_down_en = GPIO_PULLDOWN_DISABLE,
-                             .intr_type = GPIO_INTR_DISABLE};
+#if (LORA_E32_M0_GPIO >= 0)
+  {
+    gpio_config_t io_conf = {0};
+    io_conf.pin_bit_mask = (1ULL << LORA_E32_M0_GPIO);
+    io_conf.mode         = GPIO_MODE_OUTPUT;
+    io_conf.pull_up_en   = GPIO_PULLUP_DISABLE;
+    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    io_conf.intr_type    = GPIO_INTR_DISABLE;
     gpio_config(&io_conf);
   }
+#endif
 
-  if (config->gpio_config.m1_pin >= 0) {
-    gpio_config_t io_conf = {.pin_bit_mask =
-                                 (1ULL << config->gpio_config.m1_pin),
-                             .mode = GPIO_MODE_OUTPUT,
-                             .pull_up_en = GPIO_PULLUP_DISABLE,
-                             .pull_down_en = GPIO_PULLDOWN_DISABLE,
-                             .intr_type = GPIO_INTR_DISABLE};
+#if (LORA_E32_M1_GPIO >= 0)
+  {
+    gpio_config_t io_conf = {0};
+    io_conf.pin_bit_mask = (1ULL << LORA_E32_M1_GPIO);
+    io_conf.mode         = GPIO_MODE_OUTPUT;
+    io_conf.pull_up_en   = GPIO_PULLUP_DISABLE;
+    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    io_conf.intr_type    = GPIO_INTR_DISABLE;
     gpio_config(&io_conf);
   }
+#endif
 
-  if (config->gpio_config.aux_pin >= 0) {
-    gpio_config_t io_conf = {.pin_bit_mask =
-                                 (1ULL << config->gpio_config.aux_pin),
-                             .mode = GPIO_MODE_INPUT,
-                             .pull_up_en = GPIO_PULLUP_ENABLE,
-                             .pull_down_en = GPIO_PULLDOWN_DISABLE,
-                             .intr_type = GPIO_INTR_DISABLE};
+#if (LORA_E32_AUX_GPIO >= 0)
+  {
+    gpio_config_t io_conf = {0};
+    io_conf.pin_bit_mask = (1ULL << LORA_E32_AUX_GPIO);
+    io_conf.mode         = GPIO_MODE_INPUT;
+    io_conf.pull_up_en   = GPIO_PULLUP_ENABLE;
+    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    io_conf.intr_type    = GPIO_INTR_DISABLE;
     gpio_config(&io_conf);
   }
+#endif
 
-  // Initialize communication interface
+  // Initialize communication interface (UART or others)
   esp_err_t ret =
       h->interface.init(config->interface_config, &h->interface.user_ctx);
   if (ret != ESP_OK) {
@@ -243,6 +323,19 @@ lora_e32_comm_status_t lora_e32_comm_init(const lora_e32_comm_config_t *config,
   // Set initial mode to SLEEP for configuration
   set_gpio_mode_pins(h, E32_MODE_SLEEP);
   vTaskDelay(pdMS_TO_TICKS(E32_MODE_SWITCH_TIME_MS));
+
+  // Overwrite module_params with the global default configuration so that
+  // the radio is always configured to the desired broadcast settings at startup.
+  h->config.module_params = g_lora_e32_params;
+
+  // Write the initial parameters to the module (save to flash).
+  lora_e32_comm_status_t st =
+      lora_e32_comm_write_params(h, &h->config.module_params);
+  if (st != LORA_E32_COMM_OK) {
+    ESP_LOGW(TAG, "Failed to apply initial E32 parameters (status=%d)", st);
+  } else {
+    ESP_LOGI(TAG, "Initial E32 parameters applied to module");
+  }
 
   h->is_initialized = true;
   *handle = h;
@@ -278,7 +371,7 @@ lora_e32_comm_status_t lora_e32_comm_set_mode(lora_e32_comm_handle_t handle,
   ESP_LOGI(TAG, "Setting mode: %d", mode);
 
   // Wait for AUX to go high before mode switch
-  if (handle->config.gpio_config.aux_pin >= 0) {
+  if (LORA_E32_AUX_GPIO >= 0) {
     lora_e32_comm_status_t status = lora_e32_comm_wait_aux_high(handle, 1000);
     if (status != LORA_E32_COMM_OK) {
       ESP_LOGW(TAG, "AUX not high before mode switch");
@@ -293,7 +386,7 @@ lora_e32_comm_status_t lora_e32_comm_set_mode(lora_e32_comm_handle_t handle,
   vTaskDelay(pdMS_TO_TICKS(E32_MODE_SWITCH_TIME_MS));
 
   // Wait for AUX high after mode switch
-  if (handle->config.gpio_config.aux_pin >= 0) {
+  if (LORA_E32_AUX_GPIO >= 0) {
     lora_e32_comm_wait_aux_high(handle, 1000);
   }
 
@@ -313,7 +406,7 @@ lora_e32_comm_status_t lora_e32_comm_get_mode(lora_e32_comm_handle_t handle,
 lora_e32_comm_status_t
 lora_e32_comm_wait_aux_high(lora_e32_comm_handle_t handle,
                             uint32_t timeout_ms) {
-  if (handle == NULL || handle->config.gpio_config.aux_pin < 0) {
+  if (handle == NULL || LORA_E32_AUX_GPIO < 0) {
     return LORA_E32_COMM_OK; // No AUX pin configured
   }
 
@@ -421,7 +514,7 @@ lora_e32_comm_status_t lora_e32_comm_read_params(lora_e32_comm_handle_t handle,
 
   // Read response: C0 + 5 bytes
   uint8_t response[6];
-  size_t actual_len;
+  size_t actual_len = 0;
   ret = handle->interface.read(handle->interface.user_ctx, response, 6,
                                &actual_len, 1000);
 
@@ -434,6 +527,11 @@ lora_e32_comm_status_t lora_e32_comm_read_params(lora_e32_comm_handle_t handle,
 
   memcpy(params, response, 6);
   ESP_LOGI(TAG, "Parameters read successfully");
+
+  // Keep internal state in sync with the module
+  memcpy(&handle->config.module_params, params, sizeof(e32_params_t));
+  g_lora_e32_params = *params;
+
   return LORA_E32_COMM_OK;
 }
 
@@ -465,6 +563,11 @@ lora_e32_comm_status_t lora_e32_comm_write_params(lora_e32_comm_handle_t handle,
   vTaskDelay(pdMS_TO_TICKS(100)); // Wait for module to save
 
   ESP_LOGI(TAG, "Parameters written successfully");
+
+  // Update internal copies so that application / NVS can reuse them
+  handle->config.module_params = *params;
+  g_lora_e32_params = *params;
+
   return LORA_E32_COMM_OK;
 }
 
@@ -487,7 +590,15 @@ lora_e32_comm_write_params_temp(lora_e32_comm_handle_t handle,
                                           (uint8_t *)&cmd_params,
                                           sizeof(e32_params_t), 1000);
 
-  return (ret == ESP_OK) ? LORA_E32_COMM_OK : LORA_E32_COMM_ERR_CONFIG_FAILED;
+  if (ret == ESP_OK) {
+    // Temporary write still affects current runtime parameters,
+    // so keep the internal copies in sync.
+    handle->config.module_params = *params;
+    g_lora_e32_params = *params;
+    return LORA_E32_COMM_OK;
+  }
+
+  return LORA_E32_COMM_ERR_CONFIG_FAILED;
 }
 
 lora_e32_comm_status_t lora_e32_comm_read_version(lora_e32_comm_handle_t handle,
@@ -512,7 +623,7 @@ lora_e32_comm_status_t lora_e32_comm_read_version(lora_e32_comm_handle_t handle,
   }
 
   uint8_t response[4];
-  size_t actual_len;
+  size_t actual_len = 0;
   ret = handle->interface.read(handle->interface.user_ctx, response, 4,
                                &actual_len, 1000);
 
@@ -520,8 +631,8 @@ lora_e32_comm_status_t lora_e32_comm_read_version(lora_e32_comm_handle_t handle,
     return LORA_E32_COMM_ERR_CONFIG_FAILED;
   }
 
-  version->model = response[1];
-  version->version = response[2];
+  version->model    = response[1];
+  version->version  = response[2];
   version->features = response[3];
 
   ESP_LOGI(TAG, "Version: Model=0x%02X, Ver=0x%02X, Features=0x%02X",
@@ -560,4 +671,43 @@ lora_e32_comm_status_t lora_e32_comm_flush(lora_e32_comm_handle_t handle) {
 
   esp_err_t ret = handle->interface.flush(handle->interface.user_ctx);
   return (ret == ESP_OK) ? LORA_E32_COMM_OK : LORA_E32_COMM_ERR_COMM_FAILED;
+}
+
+lora_e32_comm_handle_t g_lora_e32_handle = NULL;
+
+static lora_e32_comm_uart_config_t g_default_uart_cfg = {
+    .baud_rate = 9600,
+    .rx_buffer_size = 512,
+    .tx_buffer_size = 512
+};
+
+static lora_e32_comm_config_t g_default_comm_cfg;
+
+esp_err_t lora_e32_auto_init_default(void)
+{
+    static bool s_inited = false;
+    if (s_inited) {
+        return ESP_OK;
+    }
+
+    g_default_comm_cfg.comm_type        = LORA_E32_COMM_TYPE_UART;
+    g_default_comm_cfg.interface        = lora_e32_comm_create_uart_interface();
+    g_default_comm_cfg.interface_config = &g_default_uart_cfg;
+    g_default_comm_cfg.module_params    = g_lora_e32_params;
+
+    lora_e32_comm_status_t st =
+        lora_e32_comm_init(&g_default_comm_cfg, &g_lora_e32_handle);
+
+    if (st != LORA_E32_COMM_OK) {
+        ESP_LOGE("LORA_E32", "Auto default E32 init FAILED, status=%d", st);
+        g_lora_e32_handle = NULL;
+        return ESP_FAIL;
+    }
+
+    // Optionally: set mode NORMAL luôn
+    lora_e32_comm_set_mode(g_lora_e32_handle, E32_MODE_NORMAL);
+
+    s_inited = true;
+    ESP_LOGI("LORA_E32", "Auto default E32 initialized");
+    return ESP_OK;
 }

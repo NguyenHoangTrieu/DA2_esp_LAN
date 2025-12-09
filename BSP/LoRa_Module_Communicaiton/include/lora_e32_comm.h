@@ -24,6 +24,43 @@
 extern "C" {
 #endif
 
+/* ===== Default hardware configuration (override these at compile time if needed) ===== */
+
+/* GPIO pins for E32 mode control and AUX. 
+ * Set to -1 to disable a pin if your hardware does not use it. 
+ */
+#ifndef LORA_E32_M0_GPIO
+#define LORA_E32_M0_GPIO   (-1)
+#endif
+
+#ifndef LORA_E32_M1_GPIO
+#define LORA_E32_M1_GPIO   (-1)
+#endif
+
+#ifndef LORA_E32_AUX_GPIO
+#define LORA_E32_AUX_GPIO  (-1)
+#endif
+
+/* UART hardware mapping used by the E32 module. 
+ * These are board-specific and can be overridden from Kconfig or build flags. 
+ */
+#ifndef LORA_E32_UART_PORT
+#define LORA_E32_UART_PORT (1)
+#endif
+
+#ifndef LORA_E32_UART_TX_PIN
+#define LORA_E32_UART_TX_PIN (17)
+#endif
+
+#ifndef LORA_E32_UART_RX_PIN
+#define LORA_E32_UART_RX_PIN (16)
+#endif
+
+/* Default UART baud rate for the E32 driver (config / normal mode). */
+#ifndef LORA_E32_DEFAULT_BAUD_RATE
+#define LORA_E32_DEFAULT_BAUD_RATE (9600)
+#endif
+
 // ===== Status Codes =====
 typedef enum {
   LORA_E32_COMM_OK = 0,
@@ -104,18 +141,8 @@ typedef struct {
   size_t (*available)(void *user_ctx);
 } lora_e32_comm_interface_t;
 
-// ===== GPIO Configuration =====
-typedef struct {
-  int m0_pin;  // M0 mode control pin (-1 if not used)
-  int m1_pin;  // M1 mode control pin (-1 if not used)
-  int aux_pin; // AUX status pin (-1 if not used)
-} lora_e32_comm_gpio_config_t;
-
 // ===== UART Configuration =====
 typedef struct {
-  int uart_port;      // UART port number
-  int tx_pin;         // UART TX pin
-  int rx_pin;         // UART RX pin
   int baud_rate;      // UART baud rate (9600 for config mode)
   int rx_buffer_size; // RX buffer size
   int tx_buffer_size; // TX buffer size
@@ -124,13 +151,24 @@ typedef struct {
 // ===== Main Configuration =====
 typedef struct {
   lora_e32_comm_type_t comm_type;            // Communication type
-  lora_e32_comm_gpio_config_t gpio_config;   // GPIO configuration
   lora_e32_comm_interface_t interface;       // Communication interface
   void *interface_config;                    // Interface-specific config
   e32_params_t module_params;                // E32 module parameters
 } lora_e32_comm_config_t;
 
+/* ===== Global E32 configuration context ===== */
+/* 
+ * These globals hold the current E32 module parameters and UART baud rate. 
+ * They are initialized with default values in the driver and can be updated 
+ * at runtime by the application, and persisted to NVS if desired. 
+ */
+extern e32_params_t g_lora_e32_params;
+extern int g_lora_e32_baud_rate;
+
 // ===== API Functions =====
+
+//First call this function to auto-initialize the default E32 driver
+esp_err_t lora_e32_auto_init_default(void);
 
 /**
  * @brief Initialize LoRa E32 broadcast communication driver

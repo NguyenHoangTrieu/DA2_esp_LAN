@@ -69,11 +69,6 @@ typedef struct {
   uint32_t slot_duration_ms; /* slot duration in milliseconds     */
 } lora_handler_config_t;
 
-/* Public globals for configuration & crypto key.
- * Define them once in lora_handler.c, and you can modify them
- * from application code before calling lora_handler_init().
- */
-
 /* Default TDMA configuration (no hardcoded values in logic). */
 extern lora_handler_config_t g_lora_handler_cfg;
 

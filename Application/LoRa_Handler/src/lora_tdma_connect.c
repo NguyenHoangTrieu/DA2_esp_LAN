@@ -69,6 +69,11 @@ static void lora_tdma_connect_log_stats(void);
 /* ===== Public API ===== */
 
 esp_err_t lora_tdma_connect_start(void) {
+  lora_e32_auto_init_default();
+  if (g_lora_e32_handle == NULL) {
+    ESP_LOGE(TAG, "E32 handle is NULL! Init failed");
+    return ESP_FAIL;
+  }
   if (g_lora_tdma_running) {
     ESP_LOGW(TAG, "LoRa TDMA connect already running");
     return ESP_OK;
@@ -228,6 +233,25 @@ static void lora_tdma_connect_task(void *pvParameters) {
   while (g_lora_tdma_running) {
     uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
 
+    /* RX Polling */
+    if (g_lora_e32_handle != NULL) {
+      uint8_t rx_buf[E32_TRANSPARENT_MAX_SIZE];
+
+      while (lora_e32_comm_available(g_lora_e32_handle) > 0) {
+        size_t rx_len = 0;
+        lora_e32_comm_status_t rx_status =
+            lora_e32_comm_receive(g_lora_e32_handle, rx_buf, sizeof(rx_buf),
+                                  &rx_len, 0 /* timeout_ms */);
+
+        if (rx_status != LORA_E32_COMM_OK || rx_len == 0) {
+          break;
+        }
+        /* Handler len is uint8_t -> clamp for safety */
+        uint8_t frame_len = (rx_len > 0xFF) ? 0xFF : (uint8_t)rx_len;
+        /* Pass frame to TDMA handler for processing */
+        lora_handler_handle_rx(&g_lora_tdma_ctx, rx_buf, frame_len, now_ms);
+      }
+    }
     /* Run TDMA scheduler (no RTOS inside lora_handler) */
     lora_handler_process(&g_lora_tdma_ctx, now_ms);
 

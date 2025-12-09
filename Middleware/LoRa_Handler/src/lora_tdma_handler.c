@@ -12,14 +12,15 @@
  */
 
 #include "lora_tdma_handler.h"
+#include "esp_log.h"
 #include <string.h>
 
 /* ===== Global configuration defaults (can be modified by application) ===== */
-
+extern lora_e32_comm_handle_t g_lora_e32_handle;
 /* Default TDMA configuration.
  * Application may change fields before calling lora_handler_init().
  */
-lora_handler_config_t g_lora_handler_cfg = {.role = LORA_HANDLER_ROLE_SENSOR,
+lora_handler_config_t g_lora_handler_cfg = {.role = LORA_HANDLER_ROLE_GATEWAY,
                                             .node_id = 0x0001,
                                             .gateway_id = 0x0001,
                                             .num_slots = 8,
@@ -181,6 +182,11 @@ void lora_handler_init(lora_handler_ctx_t *ctx, lora_e32_comm_handle_t radio) {
   if (!ctx)
     return;
 
+  if (radio == NULL) {
+    ESP_LOGE("lora_handler", "Radio handle is NULL!");
+    return;
+  }
+
   memset(ctx, 0, sizeof(*ctx));
 
   ctx->cfg = g_lora_handler_cfg; /* copy global config */
@@ -197,7 +203,7 @@ void lora_handler_init(lora_handler_ctx_t *ctx, lora_e32_comm_handle_t radio) {
   ctx->tx_pending = false;
   ctx->rx_cb = NULL;
   ctx->slot_cb = NULL;
-
+  lora_e32_comm_set_mode(ctx->radio, E32_MODE_NORMAL);
   memset(&ctx->stats, 0, sizeof(ctx->stats));
 }
 

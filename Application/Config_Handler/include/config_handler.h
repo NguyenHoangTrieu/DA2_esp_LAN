@@ -22,7 +22,7 @@
  */
 typedef enum {
   CONFIG_UPDATE_FIRMWARE = 0, // "FW" - Firmware update command
-  CONFIG_SYNC_DATA = 1,
+  CONFIG_UPDATE_LORA = 1,
   CONFIG_TYPE_UNKNOWN = 0xFF
 } config_type_t;
 
@@ -75,7 +75,13 @@ esp_err_t save_can_config_to_nvs(void);
  * @brief Save LoRa TDMA configuration (g_lora_handler_cfg and crypto key) to
  * NVS
  */
-esp_err_t save_lora_config_to_nvs(void);
+esp_err_t save_lora_handler_config_to_nvs(void);
+
+/**
+ * @brief Save LoRa E32 radio configuration (g_lora_e32_params and baud rate) to
+ * NVS
+ */
+esp_err_t save_lora_e32_config_to_nvs(void);
 
 /**
  * @brief Erase all gateway configurations from NVS

@@ -7,6 +7,8 @@
 #include "config_handler.h"
 #include "esp_log.h"
 #include "lora_tdma_handler.h"
+#include "lora_e32_comm.h"
+#include "lora_tdma_connect.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include <string.h>
@@ -22,6 +24,9 @@ static const char *TAG = "CONFIG_NVS";
 #define NVS_KEY_CAN_WHITELIST "can_wlist"
 #define NVS_KEY_LORA_CONFIG "lora_cfg"
 #define NVS_KEY_LORA_CRYPTO "lora_crypto"
+#define NVS_KEY_LORA_E32_PARAMS "lora_e32_params"
+#define NVS_KEY_LORA_E32_BAUD   "lora_e32_baud"
+
 
 /* CAN Whitelist Size */
 #define CAN_MAX_WHITELIST_SIZE MAX_WHITELISTED_IDS
@@ -126,7 +131,7 @@ static esp_err_t load_can_config_from_nvs(void) {
  *  - g_lora_handler_cfg (role, IDs, TDMA params)
  *  - g_lora_handler_crypto_key & g_lora_handler_crypto_key_len
  */
-static esp_err_t load_lora_config_from_nvs(void) {
+static esp_err_t load_lora_handler_config_from_nvs(void) {
   nvs_handle_t nvs_handle;
   esp_err_t err;
 
@@ -288,9 +293,106 @@ esp_err_t save_can_config_to_nvs(void) {
 }
 
 /**
+ * @brief Load E32 radio configuration (module params + UART baud) from NVS.
+ *
+ * Only the global context g_lora_e32_params and g_lora_e32_baud_rate is
+ * persisted. Other driver settings are compile-time defaults.
+ */
+static esp_err_t load_lora_e32_config_from_nvs(void) {
+  nvs_handle_t nvs_handle;
+  esp_err_t err;
+
+  ESP_LOGI(TAG, "Loading E32 radio config from NVS...");
+
+  err = nvs_open_handle(&nvs_handle);
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  /* Load module params (e32_params_t) */
+  size_t required_size = sizeof(e32_params_t);
+  err = nvs_get_blob(nvs_handle, NVS_KEY_LORA_E32_PARAMS, &g_lora_e32_params,
+                     &required_size);
+
+  if (err == ESP_OK) {
+    ESP_LOGI(TAG, "E32 params loaded from NVS");
+  } else if (err == ESP_ERR_NVS_NOT_FOUND) {
+    ESP_LOGI(TAG, "E32 params not found in NVS, using defaults in g_lora_e32_params");
+    err = ESP_OK; /* Not an error, keep defaults */
+  } else {
+    ESP_LOGE(TAG, "Error reading E32 params: %s", esp_err_to_name(err));
+    nvs_close(nvs_handle);
+    return err;
+  }
+
+  /* Load UART baud rate */
+  int32_t baud = 0;
+  err = nvs_get_i32(nvs_handle, NVS_KEY_LORA_E32_BAUD, &baud);
+  if (err == ESP_OK && baud > 0) {
+    g_lora_e32_baud_rate = baud;
+    ESP_LOGI(TAG, "E32 baud rate loaded from NVS: %ld", (long)baud);
+  } else if (err == ESP_ERR_NVS_NOT_FOUND) {
+    ESP_LOGI(TAG, "E32 baud rate not found in NVS, using default %d",
+             g_lora_e32_baud_rate);
+    err = ESP_OK;
+  } else if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Error reading E32 baud: %s", esp_err_to_name(err));
+  }
+
+  nvs_close(nvs_handle);
+  return err;
+}
+
+/**
+ * @brief Save E32 radio configuration (module params + UART baud) to NVS.
+ *
+ * Only the minimal set of runtime-adjustable parameters is stored so that
+ * the application can change them at runtime and keep them across reboots.
+ */
+static esp_err_t save_lora_e32_config_to_nvs_internal(void) {
+  nvs_handle_t nvs_handle;
+  esp_err_t err;
+
+  ESP_LOGI(TAG, "Saving E32 radio config to NVS...");
+
+  err = nvs_open_handle(&nvs_handle);
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  /* Store module params blob */
+  err = nvs_set_blob(nvs_handle, NVS_KEY_LORA_E32_PARAMS, &g_lora_e32_params,
+                     sizeof(e32_params_t));
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Error writing E32 params: %s", esp_err_to_name(err));
+    nvs_close(nvs_handle);
+    return err;
+  }
+
+  /* Store baud rate as signed 32-bit integer */
+  err = nvs_set_i32(nvs_handle, NVS_KEY_LORA_E32_BAUD, (int32_t)g_lora_e32_baud_rate);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Error writing E32 baud: %s", esp_err_to_name(err));
+    nvs_close(nvs_handle);
+    return err;
+  }
+
+  err = nvs_commit(nvs_handle);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Error committing E32 config to NVS: %s", esp_err_to_name(err));
+  } else {
+    ESP_LOGI(TAG, "E32 config saved (baud=%d)", g_lora_e32_baud_rate);
+  }
+
+  nvs_close(nvs_handle);
+  return err;
+}
+
+/**
  * @brief Save LoRa TDMA configuration (handler config + crypto key) to NVS
  */
-esp_err_t save_lora_config_to_nvs(void) {
+esp_err_t save_lora_handler_config_to_nvs(void) {
+  /* Save LoRa TDMA handler configuration */
   nvs_handle_t nvs_handle;
   esp_err_t err;
 
@@ -370,6 +472,14 @@ esp_err_t save_lora_config_to_nvs(void) {
   return err;
 }
 
+
+/**
+ * @brief Save only the E32 radio configuration (g_lora_e32_params + baud) to NVS.
+ */
+esp_err_t save_lora_e32_config_to_nvs(void) {
+  return save_lora_e32_config_to_nvs_internal();
+}
+
 /**
  * @brief Load all configurations from NVS (call at startup)
  */
@@ -385,7 +495,13 @@ static esp_err_t load_all_configs_from_nvs(void) {
   }
 
   // Load LoRa TDMA config
-  err = load_lora_config_from_nvs();
+  err = load_lora_handler_config_from_nvs();
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Failed to load LoRa TDMA config");
+  }
+
+  // Load E32 radio config (module params + baud)
+  err = load_lora_e32_config_from_nvs();
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "Failed to load LoRa TDMA config");
   }
@@ -473,7 +589,7 @@ esp_err_t config_init(void) {
     save_can_config_to_nvs();
 
     // Save default LoRa TDMA config to NVS
-    save_lora_config_to_nvs();
+    save_lora_handler_config_to_nvs();
 
     // TODO: Add other default configs here (Thread, Zigbee)
 
