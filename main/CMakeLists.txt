@@ -6,10 +6,13 @@ idf_component_register(SRCS "DA2_esp_LAN.c"
                             "../Application/Config_Handler/src/config_load_save.c"
                             "../Application/CAN_Handler/src/can_handler.c"
                             "../Application/LoRa_Handler/src/lora_tdma_connect.c"
+                            "../Application/Zigbee_Handler/src/zigbee_nostack_connect.c"
                             "../BSP/MCU_WAN_Communication/src/wan_comm.c"
                             "../BSP/LoRa_Module_Communicaiton/src/lora_e32_comm.c"
+                            "../BSP/Zigbee_Module_Communication/src/zigbee_cc_comm.c"
                             "../BSP/CAN_Communication/src/can_driver.c"
                             "../Middleware/LoRa_Handler/src/lora_tdma_handler.c"
+                            "../Middleware/Zigbee_Handler/src/zigbee_nostack_handler.c"
                     PRIV_REQUIRES 
                                 esp_wifi
                                 nvs_flash
@@ -36,10 +39,13 @@ idf_component_register(SRCS "DA2_esp_LAN.c"
                                 "../Application/Config_Handler/include"
                                 "../Application/CAN_Handler/include"
                                 "../Application/LoRa_Handler/include"
+                                "../Application/Zigbee_Handler/include"
                                 "../BSP/MCU_WAN_Communication/include"
                                 "../BSP/LoRa_Module_Communicaiton/include"
                                 "../BSP/CAN_Communication/include"
+                                "../BSP/Zigbee_Module_Communication/include"
                                 "../Middleware/LoRa_Handler/include"
+                                "../Middleware/Zigbee_Handler/include"
                                 "../rbg_led_ws_handler"
                     EMBED_TXTFILES ${project_dir}/server_certs/ca_cert.pem)
 
