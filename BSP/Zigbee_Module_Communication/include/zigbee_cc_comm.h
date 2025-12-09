@@ -48,6 +48,21 @@ typedef struct {
 /* ===== API Functions ===== */
 
 /**
+ * @brief Global CC2530 handle (can be used by connect task)
+ */
+extern zigbee_cc_comm_handle_t g_zigbee_cc_handle;
+
+/**
+ * @brief Auto-initialize CC2530 with default configuration
+ * 
+ * Call this once before using connect task.
+ * Creates global g_zigbee_cc_handle.
+ * 
+ * @return esp_err_t ESP_OK on success
+ */
+esp_err_t zigbee_cc_comm_auto_init_default(void);
+
+/**
  * @brief Initialize CC2530 Zigbee communication driver
  * 
  * @param config Pointer to UART configuration structure

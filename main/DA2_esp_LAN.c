@@ -46,6 +46,8 @@ void app_main(void)
     config_handler_task_start();
     mcu_wan_handler_start();
     can_handler_start();
+    zigbee_nostack_connect_start();
+    lora_tdma_connect_start();
     while (1) {
       vTaskDelay(pdMS_TO_TICKS(1000));
     }

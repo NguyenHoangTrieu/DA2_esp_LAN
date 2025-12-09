@@ -25,6 +25,37 @@ struct zigbee_cc_comm_handle_s {
 };
 
 /* ===== API Implementation ===== */
+/* Global handle for auto-init */
+zigbee_cc_comm_handle_t g_zigbee_cc_handle = NULL;
+
+/* Default UART config */
+static zigbee_cc_uart_config_t g_default_uart_config = {
+    .baud_rate = 38400,
+    .rx_buffer_size = 1024,
+    .tx_buffer_size = 512
+};
+
+esp_err_t zigbee_cc_comm_auto_init_default(void) {
+    static bool s_initialized = false;
+    
+    if (s_initialized) {
+        ESP_LOGI("ZIGBEE_CC_COMM", "Already initialized");
+        return ESP_OK;
+    }
+    
+    esp_err_t ret = zigbee_cc_comm_init(&g_default_uart_config, 
+                                         &g_zigbee_cc_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE("ZIGBEE_CC_COMM", "Auto init failed: %s", 
+                 esp_err_to_name(ret));
+        return ret;
+    }
+    
+    s_initialized = true;
+    ESP_LOGI("ZIGBEE_CC_COMM", "Auto init successful");
+    return ESP_OK;
+}
+
 
 esp_err_t zigbee_cc_comm_init(const zigbee_cc_uart_config_t *config,
                                zigbee_cc_comm_handle_t *handle)

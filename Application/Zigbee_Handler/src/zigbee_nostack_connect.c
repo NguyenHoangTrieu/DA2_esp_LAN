@@ -55,6 +55,7 @@ static void zigbee_nostack_connect_log_stats(void);
 /* ===== Public API ===== */
 
 esp_err_t zigbee_nostack_connect_start(void) {
+  zigbee_cc_comm_auto_init_default();
   if (g_zigbee_cc_handle == NULL) {
     ESP_LOGE(TAG, "CC2530 handle is NULL! Init failed");
     return ESP_FAIL;

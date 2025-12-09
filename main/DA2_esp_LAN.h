@@ -20,6 +20,8 @@
 #include "mcu_wan_handler.h"
 #include "fota_lan_handler.h"
 #include "can_handler.h"
+#include "zigbee_nostack_connect.h"
+#include "lora_tdma_connect.h"
 
 void lan_ppp_connect(void);
 
