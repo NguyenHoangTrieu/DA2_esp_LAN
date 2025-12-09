@@ -80,6 +80,10 @@ struct lora_e32_comm_handle_s {
   e32_mode_t                current_mode;
   bool                      is_initialized;
 };
+//==Pre declarations==
+static 
+lora_e32_comm_status_t lora_e32_comm_wait_aux_high(
+    lora_e32_comm_handle_t handle, uint32_t timeout_ms);
 
 // ===== UART Interface Implementation =====
 
@@ -403,7 +407,7 @@ lora_e32_comm_status_t lora_e32_comm_get_mode(lora_e32_comm_handle_t handle,
   return LORA_E32_COMM_OK;
 }
 
-lora_e32_comm_status_t
+static lora_e32_comm_status_t
 lora_e32_comm_wait_aux_high(lora_e32_comm_handle_t handle,
                             uint32_t timeout_ms) {
   if (handle == NULL || LORA_E32_AUX_GPIO < 0) {
@@ -422,13 +426,6 @@ lora_e32_comm_wait_aux_high(lora_e32_comm_handle_t handle,
   // Wait additional 2ms after AUX goes high
   vTaskDelay(pdMS_TO_TICKS(E32_AUX_HIGH_TIME_MS));
   return LORA_E32_COMM_OK;
-}
-
-bool lora_e32_comm_is_aux_high(lora_e32_comm_handle_t handle) {
-  if (handle == NULL || !handle->is_initialized) {
-    return false;
-  }
-  return is_aux_high_internal(handle);
 }
 
 lora_e32_comm_status_t

@@ -203,23 +203,7 @@ lora_e32_comm_status_t lora_e32_comm_set_mode(lora_e32_comm_handle_t handle,
  */
 lora_e32_comm_status_t lora_e32_comm_get_mode(lora_e32_comm_handle_t handle,
                                               e32_mode_t *mode);
-
-/**
- * @brief Wait until AUX pin is high (module ready)
- * @param handle Communication handle
- * @param timeout_ms Timeout in milliseconds
- * @return lora_e32_comm_status_t Status code
- */
-lora_e32_comm_status_t lora_e32_comm_wait_aux_high(
-    lora_e32_comm_handle_t handle, uint32_t timeout_ms);
-
-/**
- * @brief Check if AUX pin is high (module ready)
- * @param handle Communication handle
- * @return true if AUX is high, false otherwise
- */
-bool lora_e32_comm_is_aux_high(lora_e32_comm_handle_t handle);
-
+                                              
 /**
  * @brief Send data in broadcast mode
  *
