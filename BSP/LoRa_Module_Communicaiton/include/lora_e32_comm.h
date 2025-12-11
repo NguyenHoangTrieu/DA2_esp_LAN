@@ -49,7 +49,7 @@ extern "C" {
 #endif
 
 #ifndef LORA_E32_UART_TX_PIN
-#define LORA_E32_UART_TX_PIN (6)
+#define LORA_E32_UART_TX_PIN (8)
 #endif
 
 #ifndef LORA_E32_UART_RX_PIN

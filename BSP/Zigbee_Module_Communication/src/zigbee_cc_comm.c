@@ -129,7 +129,7 @@ esp_err_t zigbee_cc_comm_init(const zigbee_cc_uart_config_t *config,
     h->is_initialized = true;
 
     *handle = h;
-
+    uart_flush_input(ZIGBEE_CC_UART_PORT);
     ESP_LOGI(TAG, "CC2530 UART initialized: port=%d, baud=%d, TX=%d, RX=%d",
              ZIGBEE_CC_UART_PORT, baud, ZIGBEE_CC_UART_TX_PIN, ZIGBEE_CC_UART_RX_PIN);
 
