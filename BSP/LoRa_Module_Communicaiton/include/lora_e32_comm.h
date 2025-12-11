@@ -49,11 +49,11 @@ extern "C" {
 #endif
 
 #ifndef LORA_E32_UART_TX_PIN
-#define LORA_E32_UART_TX_PIN (17)
+#define LORA_E32_UART_TX_PIN (6)
 #endif
 
 #ifndef LORA_E32_UART_RX_PIN
-#define LORA_E32_UART_RX_PIN (16)
+#define LORA_E32_UART_RX_PIN (7)
 #endif
 
 /* Default UART baud rate for the E32 driver (config / normal mode). */

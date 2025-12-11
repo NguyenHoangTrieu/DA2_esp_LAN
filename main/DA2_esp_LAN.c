@@ -56,7 +56,7 @@ void app_main(void)
 void lan_ppp_connect(void) {
   // Initialize networking
   ESP_ERROR_CHECK(esp_netif_init());
-
+  esp_log_level_set("*", ESP_LOG_NONE);
   eppp_config_t config = EPPP_DEFAULT_CLIENT_CONFIG();
   config.transport = EPPP_TRANSPORT_UART;
   config.uart.port = PPP_UART_PORT;

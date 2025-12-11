@@ -231,7 +231,7 @@ wan_comm_status_t wan_comm_send_command(wan_comm_handle_t handle,
     return WAN_COMM_ERR_BUS_BUSY;
   }
 
-  ESP_LOGD(TAG, "Command sent: %d bytes", length);
+  ESP_LOGI(TAG, "Command sent: %d bytes", length);
   return WAN_COMM_OK;
 }
 
@@ -283,7 +283,7 @@ wan_comm_status_t wan_comm_send_data(wan_comm_handle_t handle,
     return WAN_COMM_ERR_BUS_BUSY;
   }
 
-  ESP_LOGD(TAG, "Data sent: %d bytes", length);
+  ESP_LOGI(TAG, "Data sent: %d bytes", length);
   return WAN_COMM_OK;
 }
 
@@ -293,52 +293,60 @@ wan_comm_status_t wan_comm_send_data(wan_comm_handle_t handle,
 wan_comm_status_t wan_comm_request_data(wan_comm_handle_t handle,
                                         uint8_t *rx_buffer,
                                         uint16_t length_to_read) {
-  if (handle == NULL || !handle->is_initialized) {
-    return WAN_COMM_ERR_NOT_INITIALIZED;
-  }
+    if (handle == NULL || !handle->is_initialized) {
+        return WAN_COMM_ERR_NOT_INITIALIZED;
+    }
 
-  if (rx_buffer == NULL || length_to_read == 0) {
-    return WAN_COMM_ERR_INVALID_ARG;
-  }
+    if (rx_buffer == NULL || length_to_read == 0) {
+        return WAN_COMM_ERR_INVALID_ARG;
+    }
 
-  wan_comm_status_t status =
-      wan_comm_validate_transaction(handle, length_to_read);
-  if (status != WAN_COMM_OK) {
-    return status;
-  }
+    wan_comm_status_t status =
+        wan_comm_validate_transaction(handle, length_to_read);
+    if (status != WAN_COMM_OK) {
+        return status;
+    }
 
-  // Take mutex
-  if (xSemaphoreTake(handle->transfer_mutex,
-                     pdMS_TO_TICKS(WAN_COMM_TIMEOUT_MS)) != pdTRUE) {
-    wan_comm_report_error(handle, WAN_COMM_ERR_TIMEOUT,
-                          "request_data mutex timeout");
-    return WAN_COMM_ERR_TIMEOUT;
-  }
+    // Take mutex
+    if (xSemaphoreTake(handle->transfer_mutex,
+                      pdMS_TO_TICKS(WAN_COMM_TIMEOUT_MS)) != pdTRUE) {
+        wan_comm_report_error(handle, WAN_COMM_ERR_TIMEOUT,
+                            "request_data mutex timeout");
+        return WAN_COMM_ERR_TIMEOUT;
+    }
 
-  // Prepare transaction (receive only)
-  spi_transaction_t trans = {.length = length_to_read * 8, // in bits
-                             .rxlength = length_to_read * 8,
-                             .tx_buffer = NULL,
-                             .rx_buffer = handle->rx_buffer};
+    // BUILD DUMMY TX PACKET WITH CORRECT HEADER
+    memset(handle->tx_buffer, 0, length_to_read + WAN_COMM_HEADER_SIZE);
+    handle->tx_buffer[0] = (WAN_COMM_HEADER_CF >> 8) & 0xFF;  // 'C' = 0x43
+    handle->tx_buffer[1] = WAN_COMM_HEADER_CF & 0xFF;         // 'F' = 0x46
+    // Bytes 2+ are 0x00 (no payload, just polling)
 
-  // Transmit (blocking)
-  esp_err_t ret = spi_device_transmit(handle->spi_device, &trans);
+    // PREPARE FULL-DUPLEX TRANSACTION
+    spi_transaction_t trans = {
+        .length = length_to_read * 8,       // Total bits to transfer
+        .rxlength = length_to_read * 8,     // Bits to receive
+        .tx_buffer = handle->tx_buffer,     // TX with correct header
+        .rx_buffer = handle->rx_buffer
+    };
 
-  if (ret == ESP_OK) {
-    // Copy to user buffer
-    memcpy(rx_buffer, handle->rx_buffer, length_to_read);
-  }
+    // Transmit (blocking)
+    esp_err_t ret = spi_device_transmit(handle->spi_device, &trans);
+    
+    if (ret == ESP_OK) {
+        // Copy to user buffer
+        memcpy(rx_buffer, handle->rx_buffer, length_to_read);
+    }
 
-  xSemaphoreGive(handle->transfer_mutex);
+    xSemaphoreGive(handle->transfer_mutex);
 
-  if (ret != ESP_OK) {
-    wan_comm_report_error(handle, WAN_COMM_ERR_BUS_BUSY,
-                          "request_data SPI error");
-    return WAN_COMM_ERR_BUS_BUSY;
-  }
+    if (ret != ESP_OK) {
+        wan_comm_report_error(handle, WAN_COMM_ERR_BUS_BUSY,
+                            "request_data SPI error");
+        return WAN_COMM_ERR_BUS_BUSY;
+    }
 
-  ESP_LOGD(TAG, "Data received: %d bytes", length_to_read);
-  return WAN_COMM_OK;
+    ESP_LOGI(TAG, "Data polled: %d bytes", length_to_read);
+    return WAN_COMM_OK;
 }
 
 /**

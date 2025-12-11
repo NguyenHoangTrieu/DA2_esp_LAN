@@ -98,6 +98,7 @@ esp_err_t lora_tdma_connect_start(void) {
   memset(&g_stats, 0, sizeof(g_stats));
 
   /* Create processing task */
+  g_lora_tdma_running = true;
   BaseType_t ret =
       xTaskCreate(lora_tdma_connect_task, "lora_tdma_connect",
                   LORA_TDMA_CONNECT_TASK_STACK_SIZE, NULL,
@@ -109,7 +110,6 @@ esp_err_t lora_tdma_connect_start(void) {
     return ESP_FAIL;
   }
 
-  g_lora_tdma_running = true;
   ESP_LOGI(TAG, "LoRa TDMA connect started");
   return ESP_OK;
 }

@@ -86,6 +86,7 @@ esp_err_t zigbee_nostack_connect_start(void) {
   memset(&g_stats, 0, sizeof(g_stats));
 
   /* Create processing task */
+  g_zigbee_running = true;
   BaseType_t ret = xTaskCreate(zigbee_nostack_connect_task, "zigbee_nostack",
                                ZIGBEE_CONNECT_TASK_STACK_SIZE, NULL,
                                ZIGBEE_CONNECT_TASK_PRIORITY, &g_zigbee_task);
@@ -96,7 +97,6 @@ esp_err_t zigbee_nostack_connect_start(void) {
     return ESP_FAIL;
   }
 
-  g_zigbee_running = true;
   ESP_LOGI(TAG, "Zigbee no-stack connect started");
   return ESP_OK;
 }
