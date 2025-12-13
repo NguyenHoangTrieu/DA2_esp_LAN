@@ -23,6 +23,8 @@
 typedef enum {
   CONFIG_UPDATE_FIRMWARE = 0, // "FW" - Firmware update command
   CONFIG_UPDATE_LORA = 1,
+  CONFIG_UPDATE_CAN = 2,
+  CONFIG_UPDATE_SCAN = 3, // "CQ" - Config query command
   CONFIG_TYPE_UNKNOWN = 0xFF
 } config_type_t;
 

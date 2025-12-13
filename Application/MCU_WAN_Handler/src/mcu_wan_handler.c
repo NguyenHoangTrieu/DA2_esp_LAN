@@ -9,12 +9,16 @@
  * - Transmission retry with ACK verification
  */
 #include "mcu_wan_handler.h"
+#include "can_driver.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "lora_e32_comm.h"
+#include "lora_tdma_connect.h"
+#include "lora_tdma_handler.h"
 #include "wan_comm.h"
 #include <stdlib.h>
 #include <string.h>
@@ -32,6 +36,15 @@ static const char *TAG = "MCU_WAN";
 #define MAX_RETRY_COUNT 3
 #define MAX_PAYLOAD_SIZE 512
 #define SD_CARD_MAX_FILES 100
+
+// Global configuration variables (defined in other modules)
+extern can_config_t g_can_config;
+extern uint16_t g_can_whitelist[MAX_WHITELISTED_IDS];
+extern uint16_t g_can_whitelist_count;
+extern lora_handler_config_t g_lora_handler_cfg;
+extern uint8_t g_lora_handler_crypto_key_len;
+extern e32_params_t g_lora_e32_params;
+extern int g_lora_e32_baud_rate;
 
 // ===== Uplink Queue Item =====
 typedef struct {
@@ -136,6 +149,136 @@ static esp_err_t setup_data_ready_gpio(void) {
   ESP_LOGI(TAG, "GPIO %d configured for data-ready notification",
            GPIO_DATA_READY_PIN);
   return ESP_OK;
+}
+
+/**
+ * @brief Build and send LAN configuration response to WAN MCU
+ */
+static void send_lan_config_response(void) {
+  // Build config response packet: [CQ][length(2)][config_data]
+  uint8_t config_packet[512];
+  uint16_t offset = 0;
+
+  // Prefix "CQ" (Config Query Response)
+  config_packet[offset++] = 'C';
+  config_packet[offset++] = 'Q';
+
+  // Reserve 2 bytes for length (will fill later)
+  uint16_t length_offset = offset;
+  offset += 2;
+
+  // Format: key=value separated by | for easy parsing
+
+  // ==================== CAN CONFIG ====================
+  offset +=
+      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
+               "can_baud_rate=%lu|", g_can_config.baud_rate);
+
+  const char *can_mode_str = (g_can_config.operating_mode == CAN_MODE_NORMAL)
+                                 ? "NORMAL"
+                                 : "LISTEN_ONLY";
+  offset +=
+      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
+               "can_mode=%s|", can_mode_str);
+
+  offset +=
+      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
+               "can_whitelist_count=%d|", g_can_whitelist_count);
+
+  // CAN whitelist (comma-separated)
+  if (g_can_whitelist_count > 0) {
+    offset += snprintf((char *)&config_packet[offset],
+                       sizeof(config_packet) - offset, "can_whitelist=");
+    for (uint16_t i = 0; i < g_can_whitelist_count && i < MAX_WHITELISTED_IDS;
+         i++) {
+      if (i > 0) {
+        offset += snprintf((char *)&config_packet[offset],
+                           sizeof(config_packet) - offset, ",");
+      }
+      offset += snprintf((char *)&config_packet[offset],
+                         sizeof(config_packet) - offset, "0x%03X",
+                         g_can_whitelist[i]);
+    }
+    config_packet[offset++] = '|';
+  } else {
+    offset += snprintf((char *)&config_packet[offset],
+                       sizeof(config_packet) - offset, "can_whitelist=|");
+  }
+
+  // ==================== LORA TDMA CONFIG ====================
+  const char *lora_role_str =
+      (g_lora_handler_cfg.role == LORA_HANDLER_ROLE_GATEWAY) ? "GATEWAY"
+                                                             : "NODE";
+  offset +=
+      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
+               "lora_role=%s|", lora_role_str);
+
+  offset +=
+      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
+               "lora_node_id=0x%04X|", g_lora_handler_cfg.node_id);
+
+  offset +=
+      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
+               "lora_gateway_id=0x%04X|", g_lora_handler_cfg.gateway_id);
+
+  offset +=
+      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
+               "lora_num_slots=%u|", g_lora_handler_cfg.num_slots);
+
+  offset +=
+      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
+               "lora_my_slot=%u|", g_lora_handler_cfg.my_slot);
+
+  offset += snprintf(
+      (char *)&config_packet[offset], sizeof(config_packet) - offset,
+      "lora_slot_duration_ms=%lu|", g_lora_handler_cfg.slot_duration_ms);
+
+  offset +=
+      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
+               "lora_crypto_key_len=%u|", g_lora_handler_crypto_key_len);
+
+  // ==================== LORA E32 CONFIG ====================
+  offset +=
+      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
+               "lora_e32_baud=%d|", g_lora_e32_baud_rate);
+
+  // Address High + Low
+  offset +=
+      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
+               "lora_e32_addh=0x%02X|", g_lora_e32_params.addh);
+  offset +=
+      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
+               "lora_e32_addl=0x%02X|", g_lora_e32_params.addl);
+
+  // Speed config byte
+  offset +=
+      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
+               "lora_e32_sped=0x%02X|", g_lora_e32_params.sped);
+
+  // Channel
+  offset +=
+      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
+               "lora_e32_chan=%u|", g_lora_e32_params.chan);
+
+  // Option byte
+  offset +=
+      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
+               "lora_e32_option=0x%02X|", g_lora_e32_params.option);
+
+  // Fill in the length (excluding prefix and length field itself)
+  uint16_t data_length = offset - 4;
+  config_packet[length_offset] = (data_length >> 8) & 0xFF;
+  config_packet[length_offset + 1] = data_length & 0xFF;
+
+  // Send back to WAN MCU
+  wan_comm_status_t status =
+      wan_comm_send_data(g_wan_handle, config_packet, offset);
+
+  if (status == WAN_COMM_OK) {
+    ESP_LOGI(TAG, "LAN config response sent to WAN MCU (%u bytes)", offset);
+  } else {
+    ESP_LOGE(TAG, "Failed to send LAN config response");
+  }
 }
 
 // ===== Public API =====
@@ -320,27 +463,23 @@ static void mcu_wan_handler_task(void *pvParameters) {
   while (g_handler_running) {
     TickType_t now = xTaskGetTickCount();
     uint32_t notification_value = 0;
-
-    // ===== Check A: RTC Periodic Timer (Every 1 second) =====
-    if ((now - last_rtc_request) >= pdMS_TO_TICKS(RTC_REQUEST_INTERVAL_MS)) {
-      if (request_rtc_and_status() == ESP_OK) {
-        ESP_LOGI(TAG, "RTC and Internet status updated");
-      }
-      last_rtc_request = now;
-    }
-
-    // ===== Check B: GPIO Notification - Data Ready from WAN =====
-    // Wait for notification with timeout (100ms)
+    // ===== Check A: GPIO Notification - Data Ready from WAN =====
     if (xTaskNotifyWait(0, NOTIFY_DATA_READY, &notification_value,
                         pdMS_TO_TICKS(100)) == pdTRUE) {
 
       if (notification_value & NOTIFY_DATA_READY) {
         ESP_LOGI(TAG, "Data-ready signal received from WAN MCU");
         g_data_ready_flag = false;
-
+        uint8_t dq_cmd[2] = {'D', 'Q'};
+        wan_comm_send_command(g_wan_handle, dq_cmd, sizeof(dq_cmd));
+        vTaskDelay(pdMS_TO_TICKS(50));
         // Poll data immediately
         wan_comm_status_t comm_status =
             wan_comm_request_data(g_wan_handle, rx_buffer, sizeof(rx_buffer));
+        ESP_LOGI(TAG,
+                 "Polled data: [0]=0x%02X [1]=0x%02X [2]=0x%02X [3]=0x%02X, "
+                 "checking type...",
+                 rx_buffer[0], rx_buffer[1], rx_buffer[2], rx_buffer[3]);
 
         if (comm_status == WAN_COMM_OK && rx_buffer[0] == 'D' &&
             rx_buffer[1] == 'T') {
@@ -359,6 +498,11 @@ static void mcu_wan_handler_task(void *pvParameters) {
 
         } else if (comm_status == WAN_COMM_OK && rx_buffer[0] == 'C' &&
                    rx_buffer[1] == 'F') {
+          if (rx_buffer[2] == 'C' && rx_buffer[3] == 'Q') {
+            ESP_LOGI(TAG, "Config query request received from WAN MCU");
+            send_lan_config_response();
+            continue;
+          }
           // Config Packet received: [CF][length(2)][config_data]
           uint16_t config_len = (rx_buffer[2] << 8) | rx_buffer[3];
           bool is_fota =
@@ -374,7 +518,7 @@ static void mcu_wan_handler_task(void *pvParameters) {
       }
     }
 
-    // ===== Check C: Output Queue (LAN Handler Queue) =====
+    // ===== Check B: Output Queue (LAN Handler Queue) =====
     if (xQueueReceive(g_uplink_queue, &uplink_item, 0) == pdTRUE) {
       ESP_LOGI(TAG, "Processing uplink from handler %d (%u bytes)",
                uplink_item.source_id, uplink_item.length);
@@ -410,6 +554,14 @@ static void mcu_wan_handler_task(void *pvParameters) {
       continue;
     }
 
+    // ===== Check C: RTC Periodic Timer (Every 1 second) =====
+    if ((now - last_rtc_request) >= pdMS_TO_TICKS(RTC_REQUEST_INTERVAL_MS)) {
+      if (request_rtc_and_status() == ESP_OK) {
+        ESP_LOGI(TAG, "RTC and Internet status updated");
+      }
+      last_rtc_request = now;
+    }
+
     // ===== Check C2: SD Card Backup + Internet OK =====
     if (sd_card_has_data() && g_internet_status == INTERNET_STATUS_ONLINE) {
       uint8_t sd_buffer[MAX_PAYLOAD_SIZE + DATA_PACKET_HEADER_SIZE + 20];
@@ -431,7 +583,7 @@ static void mcu_wan_handler_task(void *pvParameters) {
     }
 
     // Small delay if no events
-    vTaskDelay(pdMS_TO_TICKS(10));
+    vTaskDelay(pdMS_TO_TICKS(1));
   }
 
   ESP_LOGI(TAG, "MCU WAN Handler task exiting");
@@ -449,7 +601,7 @@ static esp_err_t perform_handshake(void) {
   }
 
   // Wait for ACK response from WAN MCU
-  vTaskDelay(pdMS_TO_TICKS(100));
+  vTaskDelay(pdMS_TO_TICKS(50));
   uint8_t response[16] = {0};
   status = wan_comm_request_data(g_wan_handle, response, sizeof(response));
 
@@ -473,7 +625,7 @@ static esp_err_t request_rtc_and_status(void) {
   }
 
   // Receive RTC response: [RT][rtc_string(20)][network_status(1)]
-  vTaskDelay(pdMS_TO_TICKS(100));
+  vTaskDelay(pdMS_TO_TICKS(50));
   uint8_t response[32] = {0};
   status = wan_comm_request_data(g_wan_handle, response, sizeof(response));
 
@@ -505,12 +657,12 @@ static esp_err_t send_data_to_wan(const uint8_t *data, uint16_t length,
 
     wan_comm_status_t status = wan_comm_send_data(g_wan_handle, data, length);
     if (status != WAN_COMM_OK) {
-      vTaskDelay(pdMS_TO_TICKS(100));
+      vTaskDelay(pdMS_TO_TICKS(50));
       continue;
     }
 
     // Wait for ACK: [ACK_TYPE][ACK_RECEIVED][INTERNET_STATUS]
-    vTaskDelay(pdMS_TO_TICKS(100));
+    vTaskDelay(pdMS_TO_TICKS(50));
     uint8_t ack_response[8] = {0};
     status =
         wan_comm_request_data(g_wan_handle, ack_response, sizeof(ack_response));

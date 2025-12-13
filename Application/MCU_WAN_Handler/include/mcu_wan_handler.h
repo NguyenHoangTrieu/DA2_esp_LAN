@@ -58,4 +58,14 @@ esp_err_t mcu_wan_handler_get_rtc(char *buffer);
  */
 void mcu_wan_handler_register_config_callback(void (*callback)(const uint8_t*, uint16_t, bool));
 
+/**
+ * @brief Request LAN configuration from LAN MCU via SPI
+ * @param buffer Output buffer to store LAN config
+ * @param length Output parameter for length of config data
+ * @param max_length Maximum size of output buffer
+ * @return esp_err_t ESP_OK on success
+ */
+esp_err_t mcu_wan_handler_get_full_config(char *wan_buffer, uint16_t wan_max,
+                                          char *lan_buffer, uint16_t lan_max);
+
 #endif // MCU_WAN_HANDLER_H
