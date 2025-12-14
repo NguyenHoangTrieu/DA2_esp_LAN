@@ -5,6 +5,7 @@
 
 #include "config_handler.h"
 #include "DA2_esp_LAN.h"
+#include "can_driver.h"
 #include "fota_lan_config.h"
 #include "fota_lan_handler.h"
 #include "lora_e32_comm.h"
@@ -37,6 +38,12 @@ config_type_t config_parse_type(const char *cmd, uint16_t len) {
     return CONFIG_UPDATE_FIRMWARE;
   } else if (cmd[2] == 'L' && cmd[3] == 'R') {
     return CONFIG_UPDATE_LORA;
+  } else if (cmd[2] == 'C' && cmd[3] == 'B') {
+    return CONFIG_UPDATE_CAN;
+  } else if (cmd[2] == 'C' && cmd[3] == 'M') {
+    return CONFIG_UPDATE_CAN;
+  } else if (cmd[2] == 'C' && cmd[3] == 'W') { // NEW: Whitelist
+    return CONFIG_UPDATE_CAN;
   }
   return CONFIG_TYPE_UNKNOWN;
 }
@@ -292,6 +299,314 @@ esp_err_t config_parse_lora(const uint8_t *data, uint16_t len) {
   ESP_LOGW(TAG, "Unknown CFLR frame (len=%u)", (unsigned)len);
   return ESP_FAIL;
 }
+/**
+ * @brief Parse CAN whitelist management commands
+ *
+ * Supported formats:
+ *
+ * 1) CFCW:ADD:0xXXX
+ *    - Add a single CAN ID to whitelist
+ *    - Example: "CFCW:ADD:0x123"
+ *
+ * 2) CFCW:REM:0xXXX
+ *    - Remove a single CAN ID from whitelist
+ *    - Example: "CFCW:REM:0x456"
+ *
+ * 3) CFCW:CLR
+ *    - Clear entire whitelist
+ *
+ * 4) CFCW:SET:0xXXX,0xYYY,0xZZZ
+ *    - Set entire whitelist (replace existing)
+ *    - Example: "CFCW:SET:0x123,0x456,0x789"
+ */
+static esp_err_t config_parse_can_whitelist(const uint8_t *data, uint16_t len) {
+  if (data == NULL || len < 8) { // Minimum: "CFCW:ADD"
+    ESP_LOGE(TAG, "CAN whitelist: invalid buffer");
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  // Check CFCW: prefix
+  if (memcmp(data, "CFCW:", 5) != 0) {
+    ESP_LOGE(TAG, "CAN whitelist: missing CFCW prefix");
+    return ESP_FAIL;
+  }
+
+  const char *ptr = (const char *)(data + 5);
+  int remaining = len - 5;
+
+  // Parse subcommand: ADD, REM, CLR, SET
+  if (remaining >= 3 && strncmp(ptr, "CLR", 3) == 0) {
+    // Clear whitelist
+    g_can_whitelist_count = 0;
+    ESP_LOGI(TAG, "CAN whitelist cleared");
+
+    esp_err_t err = save_can_config_to_nvs();
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "Failed to save CAN whitelist: %s", esp_err_to_name(err));
+      return err;
+    }
+    return ESP_OK;
+  }
+
+  if (remaining >= 4 && strncmp(ptr, "ADD:", 4) == 0) {
+    // Add single ID
+    ptr += 4;
+    remaining -= 4;
+
+    if (remaining < 3) { // At least "0x1"
+      ESP_LOGE(TAG, "CAN whitelist ADD: missing ID");
+      return ESP_FAIL;
+    }
+
+    // Parse hex ID
+    char id_str[16] = {0};
+    int id_len = remaining < 15 ? remaining : 15;
+    memcpy(id_str, ptr, id_len);
+
+    uint16_t can_id = (uint16_t)strtol(id_str, NULL, 16);
+
+    // Check if already in whitelist
+    bool exists = false;
+    for (uint8_t i = 0; i < g_can_whitelist_count; i++) {
+      if (g_can_whitelist[i] == can_id) {
+        exists = true;
+        break;
+      }
+    }
+
+    if (!exists && g_can_whitelist_count < MAX_WHITELISTED_IDS) {
+      g_can_whitelist[g_can_whitelist_count++] = can_id;
+      ESP_LOGI(TAG, "CAN whitelist: added ID 0x%03X (count: %d)", can_id,
+               g_can_whitelist_count);
+
+      esp_err_t err = save_can_config_to_nvs();
+      if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to save CAN whitelist: %s", esp_err_to_name(err));
+        return err;
+      }
+      return ESP_OK;
+    } else if (exists) {
+      ESP_LOGW(TAG, "CAN whitelist: ID 0x%03X already exists", can_id);
+      return ESP_OK;
+    } else {
+      ESP_LOGE(TAG, "CAN whitelist: full (max %d IDs)", MAX_WHITELISTED_IDS);
+      return ESP_FAIL;
+    }
+  }
+
+  if (remaining >= 4 && strncmp(ptr, "REM:", 4) == 0) {
+    // Remove single ID
+    ptr += 4;
+    remaining -= 4;
+
+    if (remaining < 3) {
+      ESP_LOGE(TAG, "CAN whitelist REM: missing ID");
+      return ESP_FAIL;
+    }
+
+    char id_str[16] = {0};
+    int id_len = remaining < 15 ? remaining : 15;
+    memcpy(id_str, ptr, id_len);
+
+    uint16_t can_id = (uint16_t)strtol(id_str, NULL, 16);
+
+    // Find and remove
+    bool found = false;
+    for (uint8_t i = 0; i < g_can_whitelist_count; i++) {
+      if (g_can_whitelist[i] == can_id) {
+        // Shift remaining IDs down
+        for (uint8_t j = i; j < g_can_whitelist_count - 1; j++) {
+          g_can_whitelist[j] = g_can_whitelist[j + 1];
+        }
+        g_can_whitelist_count--;
+        found = true;
+        ESP_LOGI(TAG, "CAN whitelist: removed ID 0x%03X (count: %d)", can_id,
+                 g_can_whitelist_count);
+        break;
+      }
+    }
+
+    if (found) {
+      esp_err_t err = save_can_config_to_nvs();
+      if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to save CAN whitelist: %s", esp_err_to_name(err));
+        return err;
+      }
+      return ESP_OK;
+    } else {
+      ESP_LOGW(TAG, "CAN whitelist: ID 0x%03X not found", can_id);
+      return ESP_FAIL;
+    }
+  }
+
+  if (remaining >= 4 && strncmp(ptr, "SET:", 4) == 0) {
+    // Set entire whitelist (comma-separated)
+    ptr += 4;
+    remaining -= 4;
+
+    if (remaining < 3) {
+      ESP_LOGE(TAG, "CAN whitelist SET: missing IDs");
+      return ESP_FAIL;
+    }
+
+    // Clear current whitelist
+    g_can_whitelist_count = 0;
+
+    // Parse comma-separated IDs
+    char id_buffer[16] = {0};
+    int id_buf_idx = 0;
+
+    for (int i = 0; i < remaining; i++) {
+      char c = ptr[i];
+
+      if (c == ',' || i == remaining - 1) {
+        // End of ID (or last character)
+        if (i == remaining - 1 && c != ',') {
+          id_buffer[id_buf_idx++] = c;
+        }
+        id_buffer[id_buf_idx] = '\0';
+
+        if (id_buf_idx > 0) {
+          uint16_t can_id = (uint16_t)strtol(id_buffer, NULL, 16);
+
+          if (g_can_whitelist_count < MAX_WHITELISTED_IDS) {
+            g_can_whitelist[g_can_whitelist_count++] = can_id;
+            ESP_LOGI(TAG, "  Added ID 0x%03X", can_id);
+          } else {
+            ESP_LOGW(TAG, "  Whitelist full, skipping ID 0x%03X", can_id);
+          }
+        }
+
+        // Reset for next ID
+        id_buf_idx = 0;
+        memset(id_buffer, 0, sizeof(id_buffer));
+      } else {
+        // Accumulate ID string
+        if (id_buf_idx < 15) {
+          id_buffer[id_buf_idx++] = c;
+        }
+      }
+    }
+
+    ESP_LOGI(TAG, "CAN whitelist SET: total %d IDs", g_can_whitelist_count);
+
+    esp_err_t err = save_can_config_to_nvs();
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "Failed to save CAN whitelist: %s", esp_err_to_name(err));
+      return err;
+    }
+    return ESP_OK;
+  }
+
+  ESP_LOGW(TAG, "Unknown CAN whitelist command");
+  return ESP_FAIL;
+}
+
+/**
+ * @brief Parse CAN configuration frames from MCU WAN
+ *
+ * Supported formats:
+ *
+ * 1) CFCB:baudrate
+ *    - Set CAN bus baud rate
+ *    - Example: "CFCB:500000"
+ *    - Valid rates: 125000, 250000, 500000, 800000, 1000000
+ *    Action:
+ *    - Update g_can_config.baud_rate
+ *    - Save to NVS via save_can_config_to_nvs()
+ *    - Reinitialize CAN driver if running
+ *
+ * 2) CFCM:mode
+ *    - Set CAN bus mode
+ *    - Example: "CFCM:NORMAL"
+ *    - Valid modes: NORMAL, LOOPBACK, NO_ACK
+ *    Action:
+ *    - Update g_can_config.operating_mode
+ *    - Save to NVS via save_can_config_to_nvs()
+ *    - Reinitialize CAN driver if running
+ */
+static esp_err_t config_parse_can(const uint8_t *data, uint16_t len) {
+  if (data == NULL || len < 5) {
+    ESP_LOGE(TAG, "CAN config: invalid buffer");
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  // Check CFCB: prefix (CAN Baud Rate)
+  if (len >= 5 && memcmp(data, "CFCB:", 5) == 0) {
+    const char *ptr = (const char *)(data + 5);
+    int value_len = len - 5;
+
+    if (value_len > 0 && value_len < 16) {
+      char baud_str[16] = {0};
+      memcpy(baud_str, ptr, value_len);
+
+      uint32_t baud_rate = atoi(baud_str);
+
+      // Validate baud rate
+      if (baud_rate != 125000 && baud_rate != 250000 && baud_rate != 500000 &&
+          baud_rate != 800000 && baud_rate != 1000000) {
+        ESP_LOGE(TAG, "CAN: Invalid baud rate %lu", (unsigned long)baud_rate);
+        return ESP_FAIL;
+      }
+
+      g_can_config.baud_rate = baud_rate;
+      ESP_LOGI(TAG, "CAN baud rate updated: %lu", (unsigned long)baud_rate);
+
+      // Save to NVS
+      esp_err_t err = save_can_config_to_nvs();
+      if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to save CAN config to NVS: %s",
+                 esp_err_to_name(err));
+        return err;
+      }
+
+      // TODO: Reinitialize CAN driver if needed
+      // can_handler_reinit();
+
+      return ESP_OK;
+    }
+  }
+
+  // Check CFCM: prefix (CAN Mode)
+  if (len >= 5 && memcmp(data, "CFCM:", 5) == 0) {
+    const char *ptr = (const char *)(data + 5);
+    int value_len = len - 5;
+
+    if (value_len >= 6) { // At least "NORMAL"
+      can_operating_mode_t new_mode;
+
+      if (strncmp(ptr, "NORMAL", 6) == 0) {
+        new_mode = CAN_MODE_NORMAL;
+      } else if (strncmp(ptr, "LOOPBACK", 8) == 0) {
+        new_mode = CAN_MODE_LOOPBACK;
+      } else if (strncmp(ptr, "NO_ACK", 6) == 0) {
+        new_mode = CAN_MODE_NO_ACK;
+      } else {
+        ESP_LOGE(TAG, "CAN: Invalid mode");
+        return ESP_FAIL;
+      }
+
+      g_can_config.operating_mode = new_mode;
+      ESP_LOGI(TAG, "CAN mode updated: %d", new_mode);
+
+      // Save to NVS
+      esp_err_t err = save_can_config_to_nvs();
+      if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to save CAN config to NVS: %s",
+                 esp_err_to_name(err));
+        return err;
+      }
+
+      // TODO: Reinitialize CAN driver if needed
+      // can_handler_reinit();
+
+      return ESP_OK;
+    }
+  }
+
+  ESP_LOGW(TAG, "Unknown CAN frame (len=%u)", (unsigned)len);
+  return ESP_FAIL;
+}
 
 /**
  * @brief Config callback from MCU WAN handler
@@ -377,6 +692,27 @@ static void config_handler_task(void *arg) {
           ESP_LOGI(TAG, "LoRa config updated from MCU WAN");
         } else {
           ESP_LOGE(TAG, "Failed to parse LoRa config frame");
+        }
+        break;
+      }
+      case CONFIG_UPDATE_CAN: {
+        // Check if it's whitelist command or config command
+        if (cmd.data_len >= 5 && memcmp(cmd.raw_data, "CFCW:", 5) == 0) {
+          // Whitelist command
+          if (config_parse_can_whitelist((const uint8_t *)cmd.raw_data,
+                                         cmd.data_len) == ESP_OK) {
+            ESP_LOGI(TAG, "CAN whitelist updated from MCU WAN");
+          } else {
+            ESP_LOGE(TAG, "Failed to parse CAN whitelist command");
+          }
+        } else {
+          // Regular CAN config (baud/mode)
+          if (config_parse_can((const uint8_t *)cmd.raw_data, cmd.data_len) ==
+              ESP_OK) {
+            ESP_LOGI(TAG, "CAN config updated from MCU WAN");
+          } else {
+            ESP_LOGE(TAG, "Failed to parse CAN config frame");
+          }
         }
         break;
       }

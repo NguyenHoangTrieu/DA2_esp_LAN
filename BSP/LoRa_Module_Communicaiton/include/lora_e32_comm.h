@@ -30,15 +30,15 @@ extern "C" {
  * Set to -1 to disable a pin if your hardware does not use it. 
  */
 #ifndef LORA_E32_M0_GPIO
-#define LORA_E32_M0_GPIO   (-1)
+#define LORA_E32_M0_GPIO   (18)
 #endif
 
 #ifndef LORA_E32_M1_GPIO
-#define LORA_E32_M1_GPIO   (-1)
+#define LORA_E32_M1_GPIO   (17)
 #endif
 
 #ifndef LORA_E32_AUX_GPIO
-#define LORA_E32_AUX_GPIO  (-1)
+#define LORA_E32_AUX_GPIO  (7)
 #endif
 
 /* UART hardware mapping used by the E32 module. 
@@ -49,11 +49,11 @@ extern "C" {
 #endif
 
 #ifndef LORA_E32_UART_TX_PIN
-#define LORA_E32_UART_TX_PIN (8)
+#define LORA_E32_UART_TX_PIN (16)
 #endif
 
 #ifndef LORA_E32_UART_RX_PIN
-#define LORA_E32_UART_RX_PIN (7)
+#define LORA_E32_UART_RX_PIN (15)
 #endif
 
 /* Default UART baud rate for the E32 driver (config / normal mode). */

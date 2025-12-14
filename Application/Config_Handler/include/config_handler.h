@@ -21,10 +21,10 @@
  * @brief Command type codes for LAN MCU
  */
 typedef enum {
-  CONFIG_UPDATE_FIRMWARE = 0, // "FW" - Firmware update command
-  CONFIG_UPDATE_LORA = 1,
-  CONFIG_UPDATE_CAN = 2,
-  CONFIG_UPDATE_SCAN = 3, // "CQ" - Config query command
+  CONFIG_UPDATE_FIRMWARE = 0,  // "CFFW" - Firmware update command
+  CONFIG_UPDATE_LORA = 1,      // "CFLR" - LoRa config command
+  CONFIG_UPDATE_CAN = 2,       // "CFCB" or "CFCM" - CAN config command
+  CONFIG_UPDATE_SCAN = 3,      // "CFSC" - Config query command (future)
   CONFIG_TYPE_UNKNOWN = 0xFF
 } config_type_t;
 

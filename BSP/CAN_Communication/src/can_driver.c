@@ -24,8 +24,8 @@ static const char *TAG = "CAN_DRV";
 #define TX_TIMEOUT_MS 100
 
 // Default GPIO pins
-#define CAN_TX_GPIO_DEFAULT GPIO_NUM_5
-#define CAN_RX_GPIO_DEFAULT GPIO_NUM_6
+#define CAN_TX_GPIO_DEFAULT GPIO_NUM_38
+#define CAN_RX_GPIO_DEFAULT GPIO_NUM_37
 
 // Queue item with embedded buffer (pattern from ESP-IDF example)
 typedef struct {
