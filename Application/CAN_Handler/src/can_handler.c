@@ -113,11 +113,6 @@ esp_err_t can_handler_stop(void) {
     
     vTaskDelay(pdMS_TO_TICKS(100));
     
-    if (g_can_handler_task != NULL) {
-        vTaskDelete(g_can_handler_task);
-        g_can_handler_task = NULL;
-    }
-    
     // Clean up downlink queue
     if (g_downlink_queue != NULL) {
         can_downlink_packet_t pkt;

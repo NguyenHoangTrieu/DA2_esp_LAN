@@ -13,6 +13,8 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include "driver/uart.h"
+#include "driver/gpio.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -21,11 +23,11 @@ extern "C" {
 /* ===== Hardware Configuration (Hard-coded) ===== */
 /* UART port and pins for CC2530 module */
 #define ZIGBEE_CC_UART_PORT         (2)
-#define ZIGBEE_CC_UART_TX_PIN       (17)
-#define ZIGBEE_CC_UART_RX_PIN       (16)
+#define ZIGBEE_CC_UART_TX_PIN       (GPIO_NUM_41)
+#define ZIGBEE_CC_UART_RX_PIN       (GPIO_NUM_42)
 
 /* Default UART configuration */
-#define ZIGBEE_CC_DEFAULT_BAUD_RATE (38400)
+#define ZIGBEE_CC_DEFAULT_BAUD_RATE (115200)
 #define ZIGBEE_CC_RX_BUFFER_SIZE    (1024)
 #define ZIGBEE_CC_TX_BUFFER_SIZE    (512)
 

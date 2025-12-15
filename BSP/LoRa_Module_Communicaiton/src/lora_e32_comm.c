@@ -203,13 +203,14 @@ static size_t uart_available_impl(void *user_ctx) {
 
 // ===== Create UART Interface =====
 lora_e32_comm_interface_t lora_e32_comm_create_uart_interface(void) {
-  lora_e32_comm_interface_t interface = {.user_ctx = (void *)(intptr_t)LORA_E32_UART_PORT,
-                                         .init = uart_init_impl,
-                                         .deinit = uart_deinit_impl,
-                                         .write = uart_write_impl,
-                                         .read = uart_read_impl,
-                                         .flush = uart_flush_impl,
-                                         .available = uart_available_impl};
+  lora_e32_comm_interface_t interface = {
+      .user_ctx = (void *)(intptr_t)LORA_E32_UART_PORT,
+      .init = uart_init_impl,
+      .deinit = uart_deinit_impl,
+      .write = uart_write_impl,
+      .read = uart_read_impl,
+      .flush = uart_flush_impl,
+      .available = uart_available_impl};
   return interface;
 }
 
@@ -477,6 +478,32 @@ size_t lora_e32_comm_available(lora_e32_comm_handle_t handle) {
   return handle->interface.available(handle->interface.user_ctx);
 }
 
+/**
+ * @brief Temporarily change UART baudrate
+ */
+static esp_err_t uart_change_baudrate(lora_e32_comm_handle_t handle,
+                                      int new_baud) {
+  if (handle == NULL)
+    return ESP_ERR_INVALID_ARG;
+
+  int uart_port = (int)(intptr_t)handle->interface.user_ctx;
+
+  // Change baudrate
+  esp_err_t ret = uart_set_baudrate(uart_port, new_baud);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to change baudrate to %d: %s", new_baud,
+             esp_err_to_name(ret));
+    return ret;
+  }
+
+  // Flush buffers after baudrate change
+  uart_flush_input(uart_port);
+  vTaskDelay(pdMS_TO_TICKS(10)); // Small delay for stabilization
+
+  ESP_LOGI(TAG, "UART baudrate changed to %d", new_baud);
+  return ESP_OK;
+}
+
 lora_e32_comm_status_t lora_e32_comm_read_params(lora_e32_comm_handle_t handle,
                                                  e32_params_t *params) {
   if (handle == NULL || !handle->is_initialized || params == NULL) {
@@ -486,6 +513,16 @@ lora_e32_comm_status_t lora_e32_comm_read_params(lora_e32_comm_handle_t handle,
   // Ensure we're in sleep mode
   if (handle->current_mode != E32_MODE_SLEEP) {
     lora_e32_comm_set_mode(handle, E32_MODE_SLEEP);
+  }
+
+  int original_baud = g_lora_e32_baud_rate;
+
+  // Switch to 9600 for config mode
+  if (original_baud != 9600) {
+    esp_err_t ret = uart_change_baudrate(handle, 9600);
+    if (ret != ESP_OK) {
+      return LORA_E32_COMM_ERR_COMM_FAILED;
+    }
   }
 
   // Flush RX buffer
@@ -512,7 +549,9 @@ lora_e32_comm_status_t lora_e32_comm_read_params(lora_e32_comm_handle_t handle,
              (int)actual_len, response[0]);
     return LORA_E32_COMM_ERR_CONFIG_FAILED;
   }
-
+  if (original_baud != 9600) {
+    uart_change_baudrate(handle, original_baud);
+  }
   memcpy(params, response, 6);
   ESP_LOGI(TAG, "Parameters read successfully");
 
@@ -535,6 +574,17 @@ lora_e32_comm_status_t lora_e32_comm_write_params(lora_e32_comm_handle_t handle,
     lora_e32_comm_set_mode(handle, E32_MODE_SLEEP);
   }
 
+  // Save current baudrate
+  int original_baud = g_lora_e32_baud_rate;
+
+  // Switch to 9600 for config mode
+  if (original_baud != 9600) {
+    esp_err_t ret = uart_change_baudrate(handle, 9600);
+    if (ret != ESP_OK) {
+      return LORA_E32_COMM_ERR_COMM_FAILED;
+    }
+  }
+
   // Prepare command with C0 header (save to flash)
   e32_params_t cmd_params;
   memcpy(&cmd_params, params, sizeof(e32_params_t));
@@ -550,7 +600,10 @@ lora_e32_comm_status_t lora_e32_comm_write_params(lora_e32_comm_handle_t handle,
   }
 
   vTaskDelay(pdMS_TO_TICKS(100)); // Wait for module to save
-
+                                  // Restore baudrate
+  if (original_baud != 9600) {
+    uart_change_baudrate(handle, original_baud);
+  }
   ESP_LOGI(TAG, "Parameters written successfully");
 
   // Update internal copies so that application / NVS can reuse them

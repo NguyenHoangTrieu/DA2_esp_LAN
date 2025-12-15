@@ -30,7 +30,7 @@ zigbee_cc_comm_handle_t g_zigbee_cc_handle = NULL;
 
 /* Default UART config */
 static zigbee_cc_uart_config_t g_default_uart_config = {
-    .baud_rate = 38400,
+    .baud_rate = ZIGBEE_CC_DEFAULT_BAUD_RATE,
     .rx_buffer_size = 1024,
     .tx_buffer_size = 512
 };

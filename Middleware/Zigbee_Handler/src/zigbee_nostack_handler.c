@@ -10,7 +10,7 @@
 static const char *TAG = "ZIGBEE_NOSTACK_HANDLER";
 
 /* ===== Global Configuration ===== */
-zigbee_nostack_config_t g_zigbee_nostack_cfg = {.node_id = 0x0001,
+zigbee_nostack_config_t g_zigbee_nostack_cfg = {.node_id = 0x0000,
                                                 .gateway_id = 0x0000};
 
 /* ===== Frame Constants ===== */
@@ -201,7 +201,7 @@ bool zigbee_nostack_handler_send(zigbee_nostack_handler_ctx_t *ctx,
 
   if (ret == ESP_OK) {
     ctx->stats.tx_ok++;
-    ESP_LOGD(TAG, "TX: dst=0x%04X, len=%d", dst_id, len);
+    ESP_LOGI(TAG, "TX: dst=0x%04X, len=%d", dst_id, len);
     return true;
   } else {
     ESP_LOGE(TAG, "TX failed");
@@ -216,10 +216,12 @@ void zigbee_nostack_handler_handle_rx(zigbee_nostack_handler_ctx_t *ctx,
   }
 
   zigbee_nostack_frame_t frame;
-
+  ESP_LOGI(TAG, "Handling RX data, len=%d", len);
+  ESP_LOGI(TAG, "RX Data: ");
+  ESP_LOG_BUFFER_HEXDUMP(TAG, buf, len, ESP_LOG_INFO);
   if (!zigbee_nostack_parse_raw(&frame, buf, len)) {
     ctx->stats.rx_error++;
-    ESP_LOGD(TAG, "RX parse error (len=%d)", len);
+    ESP_LOGI(TAG, "RX parse error (len=%d)", len);
     return;
   }
 
@@ -234,7 +236,7 @@ void zigbee_nostack_handler_handle_rx(zigbee_nostack_handler_ctx_t *ctx,
   }
 
   if (!for_me) {
-    ESP_LOGD(TAG, "RX not for us: dst=0x%04X", frame.dst_id);
+    ESP_LOGI(TAG, "RX not for us: dst=0x%04X", frame.dst_id);
     return;
   }
 

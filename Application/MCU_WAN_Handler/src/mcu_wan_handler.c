@@ -10,6 +10,7 @@
  */
 #include "mcu_wan_handler.h"
 #include "can_driver.h"
+#include "can_handler.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -19,6 +20,7 @@
 #include "lora_e32_comm.h"
 #include "lora_tdma_connect.h"
 #include "lora_tdma_handler.h"
+#include "zigbee_nostack_connect.h"
 #include "wan_comm.h"
 #include <stdlib.h>
 #include <string.h>
@@ -241,7 +243,11 @@ static void send_lan_config_response(void) {
   offset +=
       snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
                "lora_e32_baud=%d|", g_lora_e32_baud_rate);
-
+  
+  // Header byte
+  offset +=
+      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
+               "lora_e32_header=0x%02X|", g_lora_e32_params.head);
   // Address High + Low
   offset +=
       snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
@@ -446,6 +452,9 @@ static void mcu_wan_handler_task(void *pvParameters) {
   while (g_handler_running) {
     if (perform_handshake() == ESP_OK) {
       ESP_LOGI(TAG, "Handshake successful, entering Data Mode");
+      can_handler_start();
+      zigbee_nostack_connect_start();
+      lora_tdma_connect_start();
       break;
     }
     ESP_LOGW(TAG, "Handshake failed, retrying in 1s");

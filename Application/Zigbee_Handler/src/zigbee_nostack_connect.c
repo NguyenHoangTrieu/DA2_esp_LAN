@@ -23,7 +23,7 @@
 static const char *TAG = "ZIGBEE_NOSTACK_CONNECT";
 
 /* ===== Configuration ===== */
-#define ZIGBEE_CONNECT_TASK_STACK_SIZE 4096
+#define ZIGBEE_CONNECT_TASK_STACK_SIZE 1024 * 5
 #define ZIGBEE_CONNECT_TASK_PRIORITY 4
 #define ZIGBEE_POLL_DELAY_MS 10
 #define ZIGBEE_STATS_LOG_INTERVAL_MS 30000
@@ -110,11 +110,6 @@ esp_err_t zigbee_nostack_connect_stop(void) {
   g_zigbee_running = false;
 
   vTaskDelay(pdMS_TO_TICKS(100));
-
-  if (g_zigbee_task != NULL) {
-    vTaskDelete(g_zigbee_task);
-    g_zigbee_task = NULL;
-  }
 
   /* Clean up downlink queue */
   if (g_downlink_queue != NULL) {
@@ -297,7 +292,7 @@ static void zigbee_nostack_connect_rx_cb(const zigbee_nostack_frame_t *frame) {
   if (mcu_wan_enqueue_uplink(HANDLER_ZIGBEE, uplink_buf,
                              (uint16_t)(4 + payload_len))) {
     g_stats.uplink_forwarded++;
-    ESP_LOGD(TAG, "Forwarded Zigbee uplink from node 0x%04X (%u bytes)",
+    ESP_LOGI(TAG, "Forwarded Zigbee uplink from node 0x%04X (%u bytes)",
              sensor_addr, payload_len);
   } else {
     g_stats.uplink_queue_full++;

@@ -125,11 +125,6 @@ esp_err_t lora_tdma_connect_stop(void) {
   /* Give the task some time to exit its loop */
   vTaskDelay(pdMS_TO_TICKS(100));
 
-  if (g_lora_tdma_task != NULL) {
-    vTaskDelete(g_lora_tdma_task);
-    g_lora_tdma_task = NULL;
-  }
-
   /* Clean up downlink queue and free any pending payloads */
   if (g_downlink_queue != NULL) {
     lora_downlink_packet_t pkt;

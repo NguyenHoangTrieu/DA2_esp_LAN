@@ -23,7 +23,7 @@ extern "C" {
 /**
  * @brief Maximum payload size for Zigbee frame
  */
-#define ZIGBEE_NOSTACK_MAX_PAYLOAD (100)
+#define ZIGBEE_NOSTACK_MAX_PAYLOAD (1024)
 
 /**
  * @brief Frame header size
@@ -34,7 +34,7 @@ extern "C" {
 /**
  * @brief Broadcast address
  */
-#define ZIGBEE_NOSTACK_ADDR_BROADCAST (0xFFFF)
+#define ZIGBEE_NOSTACK_ADDR_BROADCAST (0x0000)
 
 /* ===== Frame Types ===== */
 

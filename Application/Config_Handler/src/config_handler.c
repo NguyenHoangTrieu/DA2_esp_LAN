@@ -679,6 +679,10 @@ static void config_handler_task(void *arg) {
             ESP_OK) {
           ESP_LOGI(TAG, "Starting FOTA process...");
           // Start FOTA handler task
+          can_handler_stop();
+          lora_tdma_connect_stop();
+          zigbee_nostack_connect_stop();
+          mcu_wan_handler_stop();
           lan_ppp_connect();
           fota_lan_handler_task_start();
         } else {
