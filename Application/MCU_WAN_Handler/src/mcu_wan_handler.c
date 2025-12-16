@@ -20,8 +20,8 @@
 #include "lora_e32_comm.h"
 #include "lora_tdma_connect.h"
 #include "lora_tdma_handler.h"
-#include "zigbee_nostack_connect.h"
 #include "wan_comm.h"
+#include "zigbee_nostack_connect.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -243,7 +243,7 @@ static void send_lan_config_response(void) {
   offset +=
       snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
                "lora_e32_baud=%d|", g_lora_e32_baud_rate);
-  
+
   // Header byte
   offset +=
       snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
@@ -452,9 +452,6 @@ static void mcu_wan_handler_task(void *pvParameters) {
   while (g_handler_running) {
     if (perform_handshake() == ESP_OK) {
       ESP_LOGI(TAG, "Handshake successful, entering Data Mode");
-      can_handler_start();
-      zigbee_nostack_connect_start();
-      lora_tdma_connect_start();
       break;
     }
     ESP_LOGW(TAG, "Handshake failed, retrying in 1s");
@@ -469,6 +466,10 @@ static void mcu_wan_handler_task(void *pvParameters) {
   uplink_item_t uplink_item;
   uint8_t rx_buffer[256];
 
+  can_handler_start();
+  zigbee_nostack_connect_start();
+  lora_tdma_connect_start();
+
   while (g_handler_running) {
     TickType_t now = xTaskGetTickCount();
     uint32_t notification_value = 0;
@@ -481,7 +482,7 @@ static void mcu_wan_handler_task(void *pvParameters) {
         g_data_ready_flag = false;
         uint8_t dq_cmd[2] = {'D', 'Q'};
         wan_comm_send_command(g_wan_handle, dq_cmd, sizeof(dq_cmd));
-        vTaskDelay(pdMS_TO_TICKS(50));
+        vTaskDelay(pdMS_TO_TICKS(100));
         // Poll data immediately
         wan_comm_status_t comm_status =
             wan_comm_request_data(g_wan_handle, rx_buffer, sizeof(rx_buffer));
@@ -610,7 +611,7 @@ static esp_err_t perform_handshake(void) {
   }
 
   // Wait for ACK response from WAN MCU
-  vTaskDelay(pdMS_TO_TICKS(50));
+  vTaskDelay(pdMS_TO_TICKS(100));
   uint8_t response[16] = {0};
   status = wan_comm_request_data(g_wan_handle, response, sizeof(response));
 
@@ -661,32 +662,55 @@ static esp_err_t request_rtc_and_status(void) {
 // ===== Send Data with Retry & ACK =====
 static esp_err_t send_data_to_wan(const uint8_t *data, uint16_t length,
                                   ack_type_t *ack_out) {
+  if (!data || length == 0 || !ack_out)
+    return ESP_ERR_INVALID_ARG;
+
   for (int retry = 0; retry < MAX_RETRY_COUNT; retry++) {
     ESP_LOGI(TAG, "Transmit attempt %d/%d", retry + 1, MAX_RETRY_COUNT);
 
     wan_comm_status_t status = wan_comm_send_data(g_wan_handle, data, length);
     if (status != WAN_COMM_OK) {
-      vTaskDelay(pdMS_TO_TICKS(50));
+      vTaskDelay(pdMS_TO_TICKS(20));
       continue;
     }
 
-    // Wait for ACK: [ACK_TYPE][ACK_RECEIVED][INTERNET_STATUS]
-    vTaskDelay(pdMS_TO_TICKS(50));
-    uint8_t ack_response[8] = {0};
-    status =
-        wan_comm_request_data(g_wan_handle, ack_response, sizeof(ack_response));
+    // Poll ACK within ACK_TIMEOUT_MS (no fixed initial delay)
+    const TickType_t start = xTaskGetTickCount();
+    const TickType_t timeout_ticks = pdMS_TO_TICKS(ACK_TIMEOUT_MS);
 
-    if (status == WAN_COMM_OK && ack_response[0] == FRAME_TYPE_ACK) {
-      uint8_t ack_type = ack_response[1];
-      uint8_t internet_flag = ack_response[2];
+    uint32_t backoff_ms = 0;            // first poll immediately (0ms)
+    const uint32_t max_backoff_ms = 10; // limit to avoid excessive SPI polling
 
-      if (ack_type == ACK_TYPE_RECEIVED_OK) {
-        *ack_out = (ack_type_t)internet_flag;
+    while ((xTaskGetTickCount() - start) < timeout_ticks) {
+      uint8_t ack_response[8] = {0};
+      status = wan_comm_request_data(g_wan_handle, ack_response,
+                                     sizeof(ack_response));
+
+      // ACK format: [0]=FRAME_TYPE_ACK, [1]=ACK_TYPE_RECEIVED_OK,
+      // [2]=internet_flag
+      if (status == WAN_COMM_OK && ack_response[0] == FRAME_TYPE_ACK &&
+          ack_response[1] == ACK_TYPE_RECEIVED_OK) {
+        *ack_out = (ack_type_t)ack_response[2];
+        ESP_LOGI(TAG, "ACK received");
         return ESP_OK;
+      }
+
+      // Yield/backoff lightly and poll again
+      if (backoff_ms == 0) {
+        taskYIELD(); // yield CPU, do not wait by tick
+        backoff_ms = 1;
+      } else {
+        vTaskDelay(pdMS_TO_TICKS(backoff_ms));
+        if (backoff_ms < max_backoff_ms) {
+          backoff_ms <<= 1; // 1,2,4,8,16...
+          if (backoff_ms > max_backoff_ms)
+            backoff_ms = max_backoff_ms;
+        }
       }
     }
 
-    vTaskDelay(pdMS_TO_TICKS(ACK_TIMEOUT_MS));
+    ESP_LOGW(TAG, "ACK timeout on attempt %d", retry + 1);
+    vTaskDelay(pdMS_TO_TICKS(20)); // short delay before resend
   }
 
   ESP_LOGW(TAG, "Max retries reached");

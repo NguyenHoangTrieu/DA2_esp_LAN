@@ -51,7 +51,7 @@ wan_comm_status_t wan_comm_init(const wan_comm_config_t *config,
     return WAN_COMM_ERR_INVALID_ARG;
   }
 
-  ESP_LOGI(TAG,
+  ESP_LOGD(TAG,
            "Initializing WAN communication library (Master mode for LAN MCU)");
 
   // Allocate handle
@@ -231,7 +231,7 @@ wan_comm_status_t wan_comm_send_command(wan_comm_handle_t handle,
     return WAN_COMM_ERR_BUS_BUSY;
   }
 
-  ESP_LOGI(TAG, "Command sent: %d bytes", length);
+  ESP_LOGD(TAG, "Command sent: %d bytes", length);
   return WAN_COMM_OK;
 }
 
@@ -283,7 +283,7 @@ wan_comm_status_t wan_comm_send_data(wan_comm_handle_t handle,
     return WAN_COMM_ERR_BUS_BUSY;
   }
 
-  ESP_LOGI(TAG, "Data sent: %d bytes", length);
+  ESP_LOGD(TAG, "Data sent: %d bytes", length);
   return WAN_COMM_OK;
 }
 
@@ -345,7 +345,7 @@ wan_comm_status_t wan_comm_request_data(wan_comm_handle_t handle,
         return WAN_COMM_ERR_BUS_BUSY;
     }
 
-    ESP_LOGI(TAG, "Data polled: %d bytes", length_to_read);
+    ESP_LOGD(TAG, "Data polled: %d bytes", length_to_read);
     return WAN_COMM_OK;
 }
 

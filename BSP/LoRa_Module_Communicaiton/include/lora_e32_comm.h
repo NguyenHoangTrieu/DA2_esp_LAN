@@ -58,7 +58,7 @@ extern "C" {
 
 /* Default UART baud rate for the E32 driver (config / normal mode). */
 #ifndef LORA_E32_DEFAULT_BAUD_RATE
-#define LORA_E32_DEFAULT_BAUD_RATE (57600)
+#define LORA_E32_DEFAULT_BAUD_RATE (9600)
 #endif
 
 // ===== Status Codes =====

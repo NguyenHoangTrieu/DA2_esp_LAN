@@ -483,24 +483,25 @@ size_t lora_e32_comm_available(lora_e32_comm_handle_t handle) {
  */
 static esp_err_t uart_change_baudrate(lora_e32_comm_handle_t handle,
                                       int new_baud) {
-  if (handle == NULL)
+  if (!handle)
     return ESP_ERR_INVALID_ARG;
 
   int uart_port = (int)(intptr_t)handle->interface.user_ctx;
 
-  // Change baudrate
+  uart_wait_tx_done(uart_port, pdMS_TO_TICKS(100));
   esp_err_t ret = uart_set_baudrate(uart_port, new_baud);
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to change baudrate to %d: %s", new_baud,
-             esp_err_to_name(ret));
+  if (ret != ESP_OK)
     return ret;
-  }
 
-  // Flush buffers after baudrate change
   uart_flush_input(uart_port);
-  vTaskDelay(pdMS_TO_TICKS(10)); // Small delay for stabilization
+  vTaskDelay(pdMS_TO_TICKS(10));
 
-  ESP_LOGI(TAG, "UART baudrate changed to %d", new_baud);
+  // sync global
+  g_lora_e32_baud_rate = new_baud;
+
+  uint32_t b = 0;
+  uart_get_baudrate(uart_port, &b);
+  ESP_LOGI(TAG, "UART baudrate changed to %lu", (unsigned long)b);
   return ESP_OK;
 }
 
@@ -514,13 +515,16 @@ lora_e32_comm_status_t lora_e32_comm_read_params(lora_e32_comm_handle_t handle,
   if (handle->current_mode != E32_MODE_SLEEP) {
     lora_e32_comm_set_mode(handle, E32_MODE_SLEEP);
   }
+  vTaskDelay(pdMS_TO_TICKS(50)); // Wait before write
 
-  int original_baud = g_lora_e32_baud_rate;
+  int uart_port = (int)(intptr_t)handle->interface.user_ctx;
+  uint32_t cur_baud_u32 = 0;
+  uart_get_baudrate(uart_port, &cur_baud_u32);
+  int original_baud = (int)cur_baud_u32;
 
-  // Switch to 9600 for config mode
+  // Config mode requires 9600 bps
   if (original_baud != 9600) {
-    esp_err_t ret = uart_change_baudrate(handle, 9600);
-    if (ret != ESP_OK) {
+    if (uart_change_baudrate(handle, 9600) != ESP_OK) {
       return LORA_E32_COMM_ERR_COMM_FAILED;
     }
   }
@@ -552,6 +556,7 @@ lora_e32_comm_status_t lora_e32_comm_read_params(lora_e32_comm_handle_t handle,
   if (original_baud != 9600) {
     uart_change_baudrate(handle, original_baud);
   }
+  lora_e32_comm_set_mode(handle, E32_MODE_NORMAL);
   memcpy(params, response, 6);
   ESP_LOGI(TAG, "Parameters read successfully");
 
@@ -564,52 +569,70 @@ lora_e32_comm_status_t lora_e32_comm_read_params(lora_e32_comm_handle_t handle,
 
 lora_e32_comm_status_t lora_e32_comm_write_params(lora_e32_comm_handle_t handle,
                                                   const e32_params_t *params) {
-  if (handle == NULL || params == NULL) {
-    ESP_LOGE(TAG, "Invalid argument to write_params");
+  if (!handle || !handle->is_initialized || !params) {
     return LORA_E32_COMM_ERR_INVALID_ARG;
   }
 
-  // Ensure we're in sleep mode
   if (handle->current_mode != E32_MODE_SLEEP) {
     lora_e32_comm_set_mode(handle, E32_MODE_SLEEP);
   }
+  vTaskDelay(pdMS_TO_TICKS(50)); // Wait before write
 
-  // Save current baudrate
-  int original_baud = g_lora_e32_baud_rate;
+  // Get actual baudrate from driver
+  int uart_port = (int)(intptr_t)handle->interface.user_ctx;
+  uint32_t cur_baud_u32 = 0;
+  uart_get_baudrate(uart_port, &cur_baud_u32);
+  int original_baud = (int)cur_baud_u32;
 
-  // Switch to 9600 for config mode
+  // Config mode requires 9600 bps
   if (original_baud != 9600) {
-    esp_err_t ret = uart_change_baudrate(handle, 9600);
-    if (ret != ESP_OK) {
+    if (uart_change_baudrate(handle, 9600) != ESP_OK) {
       return LORA_E32_COMM_ERR_COMM_FAILED;
     }
   }
 
-  // Prepare command with C0 header (save to flash)
-  e32_params_t cmd_params;
-  memcpy(&cmd_params, params, sizeof(e32_params_t));
-  cmd_params.head = E32_CMD_SET_PARAM_SAVE;
+  handle->interface.flush(handle->interface.user_ctx);
 
-  esp_err_t ret = handle->interface.write(handle->interface.user_ctx,
-                                          (uint8_t *)&cmd_params,
-                                          sizeof(e32_params_t), 1000);
+  // Send write command
+  uint8_t cmd[6] = {E32_CMD_SET_PARAM_SAVE, params->addh, params->addl,
+                    params->sped,           params->chan, params->option};
 
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to write parameters");
+  if (handle->interface.write(handle->interface.user_ctx, cmd, sizeof(cmd),
+                              1000) != ESP_OK) {
+    return LORA_E32_COMM_ERR_CONFIG_FAILED;
+  }
+  // Read-back to verify
+  e32_params_t rb = {0};
+  if (lora_e32_comm_read_params(handle, &rb) != LORA_E32_COMM_OK) {
+    if (original_baud != 9600)
+      uart_change_baudrate(handle, original_baud);
     return LORA_E32_COMM_ERR_CONFIG_FAILED;
   }
 
-  vTaskDelay(pdMS_TO_TICKS(100)); // Wait for module to save
-                                  // Restore baudrate
-  if (original_baud != 9600) {
-    uart_change_baudrate(handle, original_baud);
+  // Verify: mismatch => FAIL
+  if (rb.addh != params->addh || rb.addl != params->addl ||
+      rb.sped != params->sped || rb.chan != params->chan ||
+      rb.option != params->option) {
+
+    ESP_LOGE(TAG,
+             "E32 verify mismatch! want: %02X %02X %02X %02X %02X, got: %02X "
+             "%02X %02X %02X %02X",
+             params->addh, params->addl, params->sped, params->chan,
+             params->option, rb.addh, rb.addl, rb.sped, rb.chan, rb.option);
+
+    if (original_baud != 9600)
+      uart_change_baudrate(handle, original_baud);
+    return LORA_E32_COMM_ERR_CONFIG_FAILED;
   }
-  ESP_LOGI(TAG, "Parameters written successfully");
 
-  // Update internal copies so that application / NVS can reuse them
-  handle->config.module_params = *params;
-  g_lora_e32_params = *params;
+  if (original_baud != 9600)
+    uart_change_baudrate(handle, original_baud);
+  lora_e32_comm_set_mode(handle, E32_MODE_NORMAL);
+  // Update internal based on verified params
+  handle->config.module_params = rb;
+  g_lora_e32_params = rb;
 
+  ESP_LOGI(TAG, "Parameters written & verified OK");
   return LORA_E32_COMM_OK;
 }
 
@@ -623,24 +646,63 @@ lora_e32_comm_write_params_temp(lora_e32_comm_handle_t handle,
   if (handle->current_mode != E32_MODE_SLEEP) {
     lora_e32_comm_set_mode(handle, E32_MODE_SLEEP);
   }
+  vTaskDelay(pdMS_TO_TICKS(50)); // Wait before write
 
-  e32_params_t cmd_params;
-  memcpy(&cmd_params, params, sizeof(e32_params_t));
-  cmd_params.head = E32_CMD_SET_PARAM_TEMP;
+  int uart_port = (int)(intptr_t)handle->interface.user_ctx;
+  uint32_t cur_baud_u32 = 0;
+  uart_get_baudrate(uart_port, &cur_baud_u32);
+  int original_baud = (int)cur_baud_u32;
 
-  esp_err_t ret = handle->interface.write(handle->interface.user_ctx,
-                                          (uint8_t *)&cmd_params,
-                                          sizeof(e32_params_t), 1000);
-
-  if (ret == ESP_OK) {
-    // Temporary write still affects current runtime parameters,
-    // so keep the internal copies in sync.
-    handle->config.module_params = *params;
-    g_lora_e32_params = *params;
-    return LORA_E32_COMM_OK;
+  // Config mode requires 9600 bps
+  if (original_baud != 9600) {
+    if (uart_change_baudrate(handle, 9600) != ESP_OK) {
+      return LORA_E32_COMM_ERR_COMM_FAILED;
+    }
   }
 
-  return LORA_E32_COMM_ERR_CONFIG_FAILED;
+  // Flush RX buffer
+  handle->interface.flush(handle->interface.user_ctx);
+
+  // Send temp write command
+  uint8_t frame[6] = {E32_CMD_SET_PARAM_TEMP, params->addh, params->addl,
+                      params->sped,           params->chan, params->option};
+
+  esp_err_t ret = handle->interface.write(handle->interface.user_ctx, frame,
+                                          sizeof(frame), 1000);
+  if (ret != ESP_OK) {
+    if (original_baud != 9600)
+      uart_change_baudrate(handle, original_baud);
+    return LORA_E32_COMM_ERR_CONFIG_FAILED;
+  }
+
+  // Verify: read back actual params from module
+  e32_params_t rb = {0};
+  lora_e32_comm_status_t st = lora_e32_comm_read_params(handle, &rb);
+
+  if (original_baud != 9600)
+    uart_change_baudrate(handle, original_baud);
+  lora_e32_comm_set_mode(handle, E32_MODE_NORMAL);
+  if (st != LORA_E32_COMM_OK)
+    return st;
+
+  // Compare contents (ignore header)
+  if (rb.addh != params->addh || rb.addl != params->addl ||
+      rb.sped != params->sped || rb.chan != params->chan ||
+      rb.option != params->option) {
+    ESP_LOGE(TAG,
+             "Temp write verify mismatch: "
+             "W[ADDH=%02X ADDL=%02X SPED=%02X CHAN=%02X OPT=%02X] "
+             "R[ADDH=%02X ADDL=%02X SPED=%02X CHAN=%02X OPT=%02X]",
+             params->addh, params->addl, params->sped, params->chan,
+             params->option, rb.addh, rb.addl, rb.sped, rb.chan, rb.option);
+    return LORA_E32_COMM_ERR_CONFIG_FAILED;
+  }
+
+  // update internal state based on "verified" params
+  handle->config.module_params = rb;
+  g_lora_e32_params = rb;
+
+  return LORA_E32_COMM_OK;
 }
 
 lora_e32_comm_status_t lora_e32_comm_read_version(lora_e32_comm_handle_t handle,
@@ -651,6 +713,19 @@ lora_e32_comm_status_t lora_e32_comm_read_version(lora_e32_comm_handle_t handle,
 
   if (handle->current_mode != E32_MODE_SLEEP) {
     lora_e32_comm_set_mode(handle, E32_MODE_SLEEP);
+  }
+  vTaskDelay(pdMS_TO_TICKS(50)); // Wait before write
+  // Switch to 9600 for config mode
+  int uart_port = (int)(intptr_t)handle->interface.user_ctx;
+  uint32_t cur_baud_u32 = 0;
+  uart_get_baudrate(uart_port, &cur_baud_u32);
+  int original_baud = (int)cur_baud_u32;
+
+  // Config mode requires 9600 bps
+  if (original_baud != 9600) {
+    if (uart_change_baudrate(handle, 9600) != ESP_OK) {
+      return LORA_E32_COMM_ERR_COMM_FAILED;
+    }
   }
 
   // Flush RX buffer
@@ -679,6 +754,10 @@ lora_e32_comm_status_t lora_e32_comm_read_version(lora_e32_comm_handle_t handle,
 
   ESP_LOGI(TAG, "Version: Model=0x%02X, Ver=0x%02X, Features=0x%02X",
            version->model, version->version, version->features);
+  if (original_baud != 9600) {
+    uart_change_baudrate(handle, original_baud);
+  }
+  lora_e32_comm_set_mode(handle, E32_MODE_NORMAL);
 
   return LORA_E32_COMM_OK;
 }
@@ -691,6 +770,19 @@ lora_e32_comm_status_t lora_e32_comm_reset(lora_e32_comm_handle_t handle) {
   if (handle->current_mode != E32_MODE_SLEEP) {
     lora_e32_comm_set_mode(handle, E32_MODE_SLEEP);
   }
+  vTaskDelay(pdMS_TO_TICKS(50)); // Wait before write
+
+  int uart_port = (int)(intptr_t)handle->interface.user_ctx;
+  uint32_t cur_baud_u32 = 0;
+  uart_get_baudrate(uart_port, &cur_baud_u32);
+  int original_baud = (int)cur_baud_u32;
+
+  // Config mode requires 9600 bps
+  if (original_baud != 9600) {
+    if (uart_change_baudrate(handle, 9600) != ESP_OK) {
+      return LORA_E32_COMM_ERR_COMM_FAILED;
+    }
+  }
 
   uint8_t cmd[3] = {E32_CMD_RESET, E32_CMD_RESET, E32_CMD_RESET};
   esp_err_t ret =
@@ -702,6 +794,11 @@ lora_e32_comm_status_t lora_e32_comm_reset(lora_e32_comm_handle_t handle) {
 
   vTaskDelay(pdMS_TO_TICKS(E32_RESET_TIME_MS));
   ESP_LOGI(TAG, "Module reset");
+
+  if (original_baud != 9600) {
+    uart_change_baudrate(handle, original_baud);
+  }
+  lora_e32_comm_set_mode(handle, E32_MODE_NORMAL);
 
   return LORA_E32_COMM_OK;
 }
@@ -742,7 +839,7 @@ esp_err_t lora_e32_auto_init_default(void) {
     return ESP_FAIL;
   }
 
-  // Optionally: set mode NORMAL luôn
+  // Optionally: set mode NORMAL
   lora_e32_comm_set_mode(g_lora_e32_handle, E32_MODE_NORMAL);
 
   s_inited = true;
