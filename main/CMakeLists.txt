@@ -1,3 +1,4 @@
+file(GLOB I2C_DEVICES "../BSP/i2c_dev_support/src/*.c")
 idf_component_register(SRCS "DA2_esp_LAN.c"
                             "../rbg_led_ws_handler/rbg_handler.c"
                             "../Application/FOTA_LAN/src/fota_lan_handler.c"
@@ -11,6 +12,7 @@ idf_component_register(SRCS "DA2_esp_LAN.c"
                             "../BSP/LoRa_Module_Communicaiton/src/lora_e32_comm.c"
                             "../BSP/Zigbee_Module_Communication/src/zigbee_cc_comm.c"
                             "../BSP/CAN_Communication/src/can_driver.c"
+                            ${I2C_DEVICES}
                             "../Middleware/LoRa_Handler/src/lora_tdma_handler.c"
                             "../Middleware/Zigbee_Handler/src/zigbee_nostack_handler.c"
                     PRIV_REQUIRES 
@@ -44,6 +46,7 @@ idf_component_register(SRCS "DA2_esp_LAN.c"
                                 "../BSP/LoRa_Module_Communicaiton/include"
                                 "../BSP/CAN_Communication/include"
                                 "../BSP/Zigbee_Module_Communication/include"
+                                "../BSP/i2c_dev_support/include"
                                 "../Middleware/LoRa_Handler/include"
                                 "../Middleware/Zigbee_Handler/include"
                                 "../rbg_led_ws_handler"

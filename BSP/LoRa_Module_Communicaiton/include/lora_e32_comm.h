@@ -24,25 +24,51 @@
 extern "C" {
 #endif
 
-/* ===== Default hardware configuration (override these at compile time if needed) ===== */
+/* ===== Default hardware configuration (override these at compile time if
+ * needed) ===== */
+#define USE_ESP_GPIO 1 // 1 = Use ESP32 GPIO, 0 = Use TCA6424A
 
-/* GPIO pins for E32 mode control and AUX. 
- * Set to -1 to disable a pin if your hardware does not use it. 
+/* GPIO pins for E32 mode control and AUX.
+ * Set to -1 to disable a pin if your hardware does not use it.
  */
+#if USE_ESP_GPIO
+// Use ESP32 GPIO directly
 #ifndef LORA_E32_M0_GPIO
-#define LORA_E32_M0_GPIO   (18)
+#define LORA_E32_M0_GPIO (18)
 #endif
 
 #ifndef LORA_E32_M1_GPIO
-#define LORA_E32_M1_GPIO   (17)
+#define LORA_E32_M1_GPIO (17)
 #endif
 
 #ifndef LORA_E32_AUX_GPIO
-#define LORA_E32_AUX_GPIO  (7)
+#define LORA_E32_AUX_GPIO (7)
+#endif
+#else
+// Use TCA6424A I/O Expander
+#ifndef LORA_E32_M0_TCA_PORT
+#define LORA_E32_M0_TCA_PORT 0 // TCA Port 0
+#endif
+#ifndef LORA_E32_M0_TCA_PIN
+#define LORA_E32_M0_TCA_PIN 0 // Pin 0
 #endif
 
-/* UART hardware mapping used by the E32 module. 
- * These are board-specific and can be overridden from Kconfig or build flags. 
+#ifndef LORA_E32_M1_TCA_PORT
+#define LORA_E32_M1_TCA_PORT 0 // TCA Port 0
+#endif
+#ifndef LORA_E32_M1_TCA_PIN
+#define LORA_E32_M1_TCA_PIN 1 // Pin 1
+#endif
+
+#ifndef LORA_E32_AUX_TCA_PORT
+#define LORA_E32_AUX_TCA_PORT 0 // TCA Port 0
+#endif
+#ifndef LORA_E32_AUX_TCA_PIN
+#define LORA_E32_AUX_TCA_PIN 2 // Pin 2
+#endif
+#endif
+/* UART hardware mapping used by the E32 module.
+ * These are board-specific and can be overridden from Kconfig or build flags.
  */
 #ifndef LORA_E32_UART_PORT
 #define LORA_E32_UART_PORT (1)
@@ -150,24 +176,24 @@ typedef struct {
 
 // ===== Main Configuration =====
 typedef struct {
-  lora_e32_comm_type_t comm_type;            // Communication type
-  lora_e32_comm_interface_t interface;       // Communication interface
-  void *interface_config;                    // Interface-specific config
-  e32_params_t module_params;                // E32 module parameters
+  lora_e32_comm_type_t comm_type;      // Communication type
+  lora_e32_comm_interface_t interface; // Communication interface
+  void *interface_config;              // Interface-specific config
+  e32_params_t module_params;          // E32 module parameters
 } lora_e32_comm_config_t;
 
 /* ===== Global E32 configuration context ===== */
-/* 
- * These globals hold the current E32 module parameters and UART baud rate. 
- * They are initialized with default values in the driver and can be updated 
- * at runtime by the application, and persisted to NVS if desired. 
+/*
+ * These globals hold the current E32 module parameters and UART baud rate.
+ * They are initialized with default values in the driver and can be updated
+ * at runtime by the application, and persisted to NVS if desired.
  */
 extern e32_params_t g_lora_e32_params;
 extern int g_lora_e32_baud_rate;
 
 // ===== API Functions =====
 
-//First call this function to auto-initialize the default E32 driver
+// First call this function to auto-initialize the default E32 driver
 esp_err_t lora_e32_auto_init_default(void);
 
 /**
@@ -176,8 +202,8 @@ esp_err_t lora_e32_auto_init_default(void);
  * @param handle Output handle pointer
  * @return lora_e32_comm_status_t Status code
  */
-lora_e32_comm_status_t lora_e32_comm_init(
-    const lora_e32_comm_config_t *config, lora_e32_comm_handle_t *handle);
+lora_e32_comm_status_t lora_e32_comm_init(const lora_e32_comm_config_t *config,
+                                          lora_e32_comm_handle_t *handle);
 
 /**
  * @brief Deinitialize LoRa communication driver
@@ -203,7 +229,7 @@ lora_e32_comm_status_t lora_e32_comm_set_mode(lora_e32_comm_handle_t handle,
  */
 lora_e32_comm_status_t lora_e32_comm_get_mode(lora_e32_comm_handle_t handle,
                                               e32_mode_t *mode);
-                                              
+
 /**
  * @brief Send data in broadcast mode
  *
@@ -217,8 +243,9 @@ lora_e32_comm_status_t lora_e32_comm_get_mode(lora_e32_comm_handle_t handle,
  * @param length Data length
  * @return lora_e32_comm_status_t Status code
  */
-lora_e32_comm_status_t lora_e32_comm_send_broadcast(
-    lora_e32_comm_handle_t handle, const uint8_t *data, size_t length);
+lora_e32_comm_status_t
+lora_e32_comm_send_broadcast(lora_e32_comm_handle_t handle, const uint8_t *data,
+                             size_t length);
 
 /**
  * @brief Receive data (blocking)
@@ -229,10 +256,11 @@ lora_e32_comm_status_t lora_e32_comm_send_broadcast(
  * @param timeout_ms Timeout in milliseconds
  * @return lora_e32_comm_status_t Status code
  */
-lora_e32_comm_status_t
-lora_e32_comm_receive(lora_e32_comm_handle_t handle, uint8_t *buffer,
-                      size_t buffer_size, size_t *actual_length,
-                      uint32_t timeout_ms);
+lora_e32_comm_status_t lora_e32_comm_receive(lora_e32_comm_handle_t handle,
+                                             uint8_t *buffer,
+                                             size_t buffer_size,
+                                             size_t *actual_length,
+                                             uint32_t timeout_ms);
 
 /**
  * @brief Check available bytes in RX buffer
@@ -247,8 +275,8 @@ size_t lora_e32_comm_available(lora_e32_comm_handle_t handle);
  * @param params Output parameters structure
  * @return lora_e32_comm_status_t Status code
  */
-lora_e32_comm_status_t
-lora_e32_comm_read_params(lora_e32_comm_handle_t handle, e32_params_t *params);
+lora_e32_comm_status_t lora_e32_comm_read_params(lora_e32_comm_handle_t handle,
+                                                 e32_params_t *params);
 
 /**
  * @brief Write module parameters (save to flash)
@@ -256,8 +284,8 @@ lora_e32_comm_read_params(lora_e32_comm_handle_t handle, e32_params_t *params);
  * @param params Parameters structure
  * @return lora_e32_comm_status_t Status code
  */
-lora_e32_comm_status_t lora_e32_comm_write_params(
-    lora_e32_comm_handle_t handle, const e32_params_t *params);
+lora_e32_comm_status_t lora_e32_comm_write_params(lora_e32_comm_handle_t handle,
+                                                  const e32_params_t *params);
 
 /**
  * @brief Write module parameters (temporary, no save)
@@ -265,8 +293,9 @@ lora_e32_comm_status_t lora_e32_comm_write_params(
  * @param params Parameters structure
  * @return lora_e32_comm_status_t Status code
  */
-lora_e32_comm_status_t lora_e32_comm_write_params_temp(
-    lora_e32_comm_handle_t handle, const e32_params_t *params);
+lora_e32_comm_status_t
+lora_e32_comm_write_params_temp(lora_e32_comm_handle_t handle,
+                                const e32_params_t *params);
 
 /**
  * @brief Read module version information
@@ -274,8 +303,8 @@ lora_e32_comm_status_t lora_e32_comm_write_params_temp(
  * @param version Output version structure
  * @return lora_e32_comm_status_t Status code
  */
-lora_e32_comm_status_t lora_e32_comm_read_version(
-    lora_e32_comm_handle_t handle, e32_version_t *version);
+lora_e32_comm_status_t lora_e32_comm_read_version(lora_e32_comm_handle_t handle,
+                                                  e32_version_t *version);
 
 /**
  * @brief Reset module

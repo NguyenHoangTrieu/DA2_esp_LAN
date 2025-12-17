@@ -16,7 +16,9 @@
 #include "freertos/task.h"
 #include <stdlib.h>
 #include <string.h>
-
+#if !USE_ESP_GPIO
+#include "tca_handler.h"
+#endif
 static const char *TAG = "LORA_E32_COMM";
 
 /* ===== Default E32 parameter bytes (compile‑time constants) =====
@@ -219,30 +221,65 @@ lora_e32_comm_interface_t lora_e32_comm_uart_interface;
 
 // ===== Internal Helper Functions =====
 
-static esp_err_t set_gpio_mode_pins(lora_e32_comm_handle_t handle,
-                                    e32_mode_t mode) {
-  (void)handle; // handle not needed once pins are compile‑time
-
-  if (LORA_E32_M0_GPIO < 0 || LORA_E32_M1_GPIO < 0) {
-    return ESP_OK; // No mode pins defined
-  }
-
-  uint8_t m0 = (mode & 0x01) ? 1 : 0;
-  uint8_t m1 = (mode & 0x02) ? 1 : 0;
-
-  gpio_set_level(LORA_E32_M0_GPIO, m0);
-  gpio_set_level(LORA_E32_M1_GPIO, m1);
-
-  return ESP_OK;
+static esp_err_t set_gpio_mode_pins(lora_e32_comm_handle_t handle, e32_mode_t mode) {
+    (void)handle; // handle not needed once pins are compile‑time
+    
+#if USE_ESP_GPIO
+    // Using ESP32 GPIO
+    if (LORA_E32_M0_GPIO < 0 || LORA_E32_M1_GPIO < 0) {
+        return ESP_OK; // No mode pins defined
+    }
+    
+    uint8_t m0 = (mode & 0x01) ? 1 : 0;
+    uint8_t m1 = (mode & 0x02) ? 1 : 0;
+    
+    gpio_set_level(LORA_E32_M0_GPIO, m0);
+    gpio_set_level(LORA_E32_M1_GPIO, m1);
+    ESP_LOGD(TAG, "Set mode pins (GPIO): M0=%d, M1=%d", m0, m1);
+#else
+    // Using TCA6424A I/O Expander
+    uint8_t m0 = (mode & 0x01) ? 1 : 0;
+    uint8_t m1 = (mode & 0x02) ? 1 : 0;
+    
+    esp_err_t ret = tca_set_pin(LORA_E32_M0_TCA_PORT, LORA_E32_M0_TCA_PIN, m0);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set M0 pin on TCA");
+        return ret;
+    }
+    
+    ret = tca_set_pin(LORA_E32_M1_TCA_PORT, LORA_E32_M1_TCA_PIN, m1);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set M1 pin on TCA");
+        return ret;
+    }
+    
+    ESP_LOGD(TAG, "Set mode pins (TCA): M0=%d, M1=%d", m0, m1);
+#endif
+    
+    return ESP_OK;
 }
 
 static bool is_aux_high_internal(lora_e32_comm_handle_t handle) {
-  (void)handle; // handle unused, AUX pin is global
-
-  if (LORA_E32_AUX_GPIO < 0) {
-    return true; // Assume ready if no AUX pin
-  }
-  return gpio_get_level(LORA_E32_AUX_GPIO) == 1;
+    (void)handle; // handle unused
+    
+#if USE_ESP_GPIO
+    // Using ESP32 GPIO
+    if (LORA_E32_AUX_GPIO < 0) {
+        return true; // Assume ready if no AUX pin
+    }
+    
+    return gpio_get_level(LORA_E32_AUX_GPIO) == 1;
+#else
+    // Using TCA6424A I/O Expander
+    bool level = false;
+    esp_err_t ret = tca_read_pin(LORA_E32_AUX_TCA_PORT, LORA_E32_AUX_TCA_PIN, &level);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to read AUX pin from TCA");
+        return true; // Assume ready on error
+    }
+    
+    return level;
+#endif
 }
 
 // ===== API Implementation =====
@@ -264,45 +301,82 @@ lora_e32_comm_status_t lora_e32_comm_init(const lora_e32_comm_config_t *config,
   }
 
   // Copy configuration from application
-  memcpy(&h->config, config, sizeof(lora_e32_comm_config_t));
-  h->interface = config->interface;
-  h->current_mode = E32_MODE_SLEEP;
-  h->is_initialized = false;
+    memcpy(&h->config, config, sizeof(lora_e32_comm_config_t));
+    h->interface = config->interface;
+    h->current_mode = E32_MODE_SLEEP;
+    h->is_initialized = false;
 
-#if (LORA_E32_M0_GPIO >= 0)
-  {
-    gpio_config_t io_conf = {0};
-    io_conf.pin_bit_mask = (1ULL << LORA_E32_M0_GPIO);
-    io_conf.mode = GPIO_MODE_OUTPUT;
-    io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
-    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
-    io_conf.intr_type = GPIO_INTR_DISABLE;
-    gpio_config(&io_conf);
-  }
-#endif
+#if USE_ESP_GPIO
+    // Using ESP32 GPIO - Configure M0, M1, AUX pins
+    #if (LORA_E32_M0_GPIO >= 0)
+    {
+        gpio_config_t io_conf = {0};
+        io_conf.pin_bit_mask = (1ULL << LORA_E32_M0_GPIO);
+        io_conf.mode = GPIO_MODE_OUTPUT;
+        io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+        io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+        io_conf.intr_type = GPIO_INTR_DISABLE;
+        gpio_config(&io_conf);
+        ESP_LOGI(TAG, "M0 configured on ESP GPIO %d", LORA_E32_M0_GPIO);
+    }
+    #endif
 
-#if (LORA_E32_M1_GPIO >= 0)
-  {
-    gpio_config_t io_conf = {0};
-    io_conf.pin_bit_mask = (1ULL << LORA_E32_M1_GPIO);
-    io_conf.mode = GPIO_MODE_OUTPUT;
-    io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
-    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
-    io_conf.intr_type = GPIO_INTR_DISABLE;
-    gpio_config(&io_conf);
-  }
-#endif
+    #if (LORA_E32_M1_GPIO >= 0)
+    {
+        gpio_config_t io_conf = {0};
+        io_conf.pin_bit_mask = (1ULL << LORA_E32_M1_GPIO);
+        io_conf.mode = GPIO_MODE_OUTPUT;
+        io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+        io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+        io_conf.intr_type = GPIO_INTR_DISABLE;
+        gpio_config(&io_conf);
+        ESP_LOGI(TAG, "M1 configured on ESP GPIO %d", LORA_E32_M1_GPIO);
+    }
+    #endif
 
-#if (LORA_E32_AUX_GPIO >= 0)
-  {
-    gpio_config_t io_conf = {0};
-    io_conf.pin_bit_mask = (1ULL << LORA_E32_AUX_GPIO);
-    io_conf.mode = GPIO_MODE_INPUT;
-    io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
-    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
-    io_conf.intr_type = GPIO_INTR_DISABLE;
-    gpio_config(&io_conf);
-  }
+    #if (LORA_E32_AUX_GPIO >= 0)
+    {
+        gpio_config_t io_conf = {0};
+        io_conf.pin_bit_mask = (1ULL << LORA_E32_AUX_GPIO);
+        io_conf.mode = GPIO_MODE_INPUT;
+        io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
+        io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+        io_conf.intr_type = GPIO_INTR_DISABLE;
+        gpio_config(&io_conf);
+        ESP_LOGI(TAG, "AUX configured on ESP GPIO %d", LORA_E32_AUX_GPIO);
+    }
+    #endif
+#else
+    // Using TCA6424A I/O Expander - Configure M0, M1 as outputs, AUX as input
+    // M0 pin
+    {
+        uint8_t config;
+        tca_read_port(LORA_E32_M0_TCA_PORT, &config);
+        config &= ~(1 << LORA_E32_M0_TCA_PIN); // Set as output
+        tca_configure_port(LORA_E32_M0_TCA_PORT, config);
+        ESP_LOGI(TAG, "M0 configured on TCA Port%d Pin%d", 
+                 LORA_E32_M0_TCA_PORT, LORA_E32_M0_TCA_PIN);
+    }
+    
+    // M1 pin
+    {
+        uint8_t config;
+        tca_read_port(LORA_E32_M1_TCA_PORT, &config);
+        config &= ~(1 << LORA_E32_M1_TCA_PIN); // Set as output
+        tca_configure_port(LORA_E32_M1_TCA_PORT, config);
+        ESP_LOGI(TAG, "M1 configured on TCA Port%d Pin%d", 
+                 LORA_E32_M1_TCA_PORT, LORA_E32_M1_TCA_PIN);
+    }
+    
+    // AUX pin
+    {
+        uint8_t config;
+        tca_read_port(LORA_E32_AUX_TCA_PORT, &config);
+        config |= (1 << LORA_E32_AUX_TCA_PIN); // Set as input
+        tca_configure_port(LORA_E32_AUX_TCA_PORT, config);
+        ESP_LOGI(TAG, "AUX configured on TCA Port%d Pin%d", 
+                 LORA_E32_AUX_TCA_PORT, LORA_E32_AUX_TCA_PIN);
+    }
 #endif
 
   // Initialize communication interface (UART or others)

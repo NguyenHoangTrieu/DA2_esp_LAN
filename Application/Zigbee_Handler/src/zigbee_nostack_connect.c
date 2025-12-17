@@ -233,7 +233,7 @@ static void zigbee_nostack_connect_task(void *pvParameters) {
       if (send_len > 0) {
         sent =
             zigbee_nostack_handler_send(&g_zigbee_nostack_ctx, pkt.sensor_addr,
-                                        pkt.data_payload, (uint8_t)send_len);
+                                        pkt.data_payload, send_len);
       }
 
       if (!sent) {

@@ -167,7 +167,7 @@ void zigbee_nostack_handler_register_rx_callback(
 
 bool zigbee_nostack_handler_send(zigbee_nostack_handler_ctx_t *ctx,
                                  uint16_t dst_id, const uint8_t *payload,
-                                 uint8_t len) {
+                                 uint16_t len) {
   if (!ctx || !ctx->radio || !payload) {
     return false;
   }

@@ -45,7 +45,7 @@ typedef struct {
   uint8_t preamble;                            /**< Frame preamble (0xA5) */
   uint16_t src_id;                             /**< Source node ID */
   uint16_t dst_id;                             /**< Destination node ID */
-  uint8_t len;                                 /**< Payload length */
+  uint16_t len;                                 /**< Payload length */
   uint8_t payload[ZIGBEE_NOSTACK_MAX_PAYLOAD]; /**< Payload data */
 } zigbee_nostack_frame_t;
 
@@ -129,7 +129,7 @@ void zigbee_nostack_handler_register_rx_callback(
  */
 bool zigbee_nostack_handler_send(zigbee_nostack_handler_ctx_t *ctx,
                                  uint16_t dst_id, const uint8_t *payload,
-                                 uint8_t len);
+                                 uint16_t len);
 
 /**
  * @brief Handle received raw bytes from CC2530
