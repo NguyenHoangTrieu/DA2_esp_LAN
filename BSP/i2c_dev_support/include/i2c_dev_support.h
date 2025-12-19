@@ -97,6 +97,11 @@ esp_err_t i2c_dev_support_write_read(i2c_master_dev_handle_t dev_handle,
                                      const uint8_t *write_data, size_t write_len,
                                      uint8_t *read_data, size_t read_len, 
                                      uint32_t timeout_ms);
+                                    
+/**
+ * @brief Scan I2C bus and print found devices (debug only)
+ */
+void i2c_dev_support_scan(void);
 
 #ifdef __cplusplus
 }

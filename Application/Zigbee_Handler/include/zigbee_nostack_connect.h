@@ -77,13 +77,6 @@ esp_err_t zigbee_nostack_connect_stop(void);
  */
 bool zigbee_nostack_connect_enqueue_downlink(uint8_t *data, uint16_t len);
 
-/**
- * @brief Get statistics snapshot
- *
- * @param out Output statistics structure (must not be NULL)
- */
-void zigbee_nostack_connect_get_stat(zigbee_nostack_connect_stats_t *out);
-
 #ifdef __cplusplus
 }
 #endif

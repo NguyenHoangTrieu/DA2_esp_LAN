@@ -14,11 +14,10 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "stack_handler.h"
 #include <stdlib.h>
 #include <string.h>
-#if !USE_ESP_GPIO
-#include "tca_handler.h"
-#endif
+
 static const char *TAG = "LORA_E32_COMM";
 
 /* ===== Default E32 parameter bytes (compile‑time constants) =====
@@ -79,10 +78,73 @@ struct lora_e32_comm_handle_s {
   lora_e32_comm_interface_t interface;
   e32_mode_t current_mode;
   bool is_initialized;
+  uint8_t stack_id;
 };
 //==Pre declarations==
 static lora_e32_comm_status_t
 lora_e32_comm_wait_aux_high(lora_e32_comm_handle_t handle, uint32_t timeout_ms);
+
+// ===== Stack‑based Pin Mapping Helpers =====
+/**
+ * @brief Get current active stack ID based on global stack types
+ * @return uint8_t Stack ID (0 or 1), default to 0 if no LoRa stack found
+ */
+static uint8_t get_active_lora_stack(void) {
+  if (g_stack_1_type == STACK_COMM_TYPE_LORA) {
+    return 0; // Stack 1
+  } else if (g_stack_2_type == STACK_COMM_TYPE_LORA) {
+    return 1; // Stack 2
+  }
+  return 0; // Default to Stack 1 if not initialized
+}
+
+/**
+ * @brief Get UART port for current stack
+ */
+static int get_lora_uart_port(void) {
+  return (get_active_lora_stack() == 0) ? LORA_E32_UART_PORT_STACK_1
+                                        : LORA_E32_UART_PORT_STACK_2;
+}
+
+/**
+ * @brief Get UART TX pin for current stack
+ */
+static int get_lora_uart_tx_pin(void) {
+  return (get_active_lora_stack() == 0) ? LORA_E32_UART_TX_PIN_STACK_1
+                                        : LORA_E32_UART_TX_PIN_STACK_2;
+}
+
+/**
+ * @brief Get UART RX pin for current stack
+ */
+static int get_lora_uart_rx_pin(void) {
+  return (get_active_lora_stack() == 0) ? LORA_E32_UART_RX_PIN_STACK_1
+                                        : LORA_E32_UART_RX_PIN_STACK_2;
+}
+
+/**
+ * @brief Get M0 GPIO pin for current stack
+ */
+static stack_gpio_pin_num_t get_lora_m0_gpio(void) {
+  return (get_active_lora_stack() == 0) ? LORA_E32_M0_GPIO_STACK_1
+                                        : LORA_E32_M0_GPIO_STACK_2;
+}
+
+/**
+ * @brief Get M1 GPIO pin for current stack
+ */
+static stack_gpio_pin_num_t get_lora_m1_gpio(void) {
+  return (get_active_lora_stack() == 0) ? LORA_E32_M1_GPIO_STACK_1
+                                        : LORA_E32_M1_GPIO_STACK_2;
+}
+
+/**
+ * @brief Get AUX GPIO pin for current stack
+ */
+static stack_gpio_pin_num_t get_lora_aux_gpio(void) {
+  return (get_active_lora_stack() == 0) ? LORA_E32_AUX_GPIO_STACK_1
+                                        : LORA_E32_AUX_GPIO_STACK_2;
+}
 
 // ===== UART Interface Implementation =====
 
@@ -94,9 +156,10 @@ static esp_err_t uart_init_impl(void *config_ptr, void **user_ctx) {
   lora_e32_comm_uart_config_t *uart_cfg =
       (lora_e32_comm_uart_config_t *)config_ptr;
 
-  int uart_port = LORA_E32_UART_PORT;
-
-  /* If baud_rate is zero, fall back to the global default. */
+  // Get UART config based on active stack
+  int uart_port = get_lora_uart_port();
+  int tx_pin = get_lora_uart_tx_pin();
+  int rx_pin = get_lora_uart_rx_pin();
   int baud =
       (uart_cfg->baud_rate > 0) ? uart_cfg->baud_rate : g_lora_e32_baud_rate;
 
@@ -113,8 +176,8 @@ static esp_err_t uart_init_impl(void *config_ptr, void **user_ctx) {
     return ret;
   }
 
-  ret = uart_set_pin(uart_port, LORA_E32_UART_TX_PIN, LORA_E32_UART_RX_PIN,
-                     UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+  ret = uart_set_pin(uart_port, tx_pin, rx_pin, UART_PIN_NO_CHANGE,
+                     UART_PIN_NO_CHANGE);
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "UART set pin failed: %s", esp_err_to_name(ret));
     return ret;
@@ -127,12 +190,9 @@ static esp_err_t uart_init_impl(void *config_ptr, void **user_ctx) {
     return ret;
   }
 
-  // Store UART port in user context
   *user_ctx = (void *)(intptr_t)uart_port;
-
-  ESP_LOGI(TAG, "UART initialized: port=%d, baud=%d, TX=%d, RX=%d", uart_port,
-           baud, LORA_E32_UART_TX_PIN, LORA_E32_UART_RX_PIN);
-
+  ESP_LOGI(TAG, "UART initialized: Stack%d, port=%d, baud=%d, TX=%d, RX=%d",
+           get_active_lora_stack() + 1, uart_port, baud, tx_pin, rx_pin);
   return ESP_OK;
 }
 
@@ -206,7 +266,7 @@ static size_t uart_available_impl(void *user_ctx) {
 // ===== Create UART Interface =====
 lora_e32_comm_interface_t lora_e32_comm_create_uart_interface(void) {
   lora_e32_comm_interface_t interface = {
-      .user_ctx = (void *)(intptr_t)LORA_E32_UART_PORT,
+      .user_ctx = (void *)(intptr_t)get_lora_uart_port(),
       .init = uart_init_impl,
       .deinit = uart_deinit_impl,
       .write = uart_write_impl,
@@ -221,65 +281,44 @@ lora_e32_comm_interface_t lora_e32_comm_uart_interface;
 
 // ===== Internal Helper Functions =====
 
-static esp_err_t set_gpio_mode_pins(lora_e32_comm_handle_t handle, e32_mode_t mode) {
-    (void)handle; // handle not needed once pins are compile‑time
-    
-#if USE_ESP_GPIO
-    // Using ESP32 GPIO
-    if (LORA_E32_M0_GPIO < 0 || LORA_E32_M1_GPIO < 0) {
-        return ESP_OK; // No mode pins defined
-    }
-    
-    uint8_t m0 = (mode & 0x01) ? 1 : 0;
-    uint8_t m1 = (mode & 0x02) ? 1 : 0;
-    
-    gpio_set_level(LORA_E32_M0_GPIO, m0);
-    gpio_set_level(LORA_E32_M1_GPIO, m1);
-    ESP_LOGD(TAG, "Set mode pins (GPIO): M0=%d, M1=%d", m0, m1);
-#else
-    // Using TCA6424A I/O Expander
-    uint8_t m0 = (mode & 0x01) ? 1 : 0;
-    uint8_t m1 = (mode & 0x02) ? 1 : 0;
-    
-    esp_err_t ret = tca_set_pin(LORA_E32_M0_TCA_PORT, LORA_E32_M0_TCA_PIN, m0);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to set M0 pin on TCA");
-        return ret;
-    }
-    
-    ret = tca_set_pin(LORA_E32_M1_TCA_PORT, LORA_E32_M1_TCA_PIN, m1);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to set M1 pin on TCA");
-        return ret;
-    }
-    
-    ESP_LOGD(TAG, "Set mode pins (TCA): M0=%d, M1=%d", m0, m1);
-#endif
-    
-    return ESP_OK;
+static esp_err_t set_gpio_mode_pins(lora_e32_comm_handle_t handle,
+                                    e32_mode_t mode) {
+  (void)handle;
+
+  uint8_t stack_id = get_active_lora_stack();
+  uint8_t m0 = (mode & 0x01) ? 1 : 0;
+  uint8_t m1 = (mode & 0x02) ? 1 : 0;
+
+  esp_err_t ret = stack_handler_gpio_write(stack_id, get_lora_m0_gpio(), m0);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to set M0");
+    return ret;
+  }
+
+  ret = stack_handler_gpio_write(stack_id, get_lora_m1_gpio(), m1);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to set M1");
+    return ret;
+  }
+
+  ESP_LOGD(TAG, "Set mode pins: M0=%d, M1=%d (Stack %d)", m0, m1, stack_id + 1);
+  return ESP_OK;
 }
 
 static bool is_aux_high_internal(lora_e32_comm_handle_t handle) {
-    (void)handle; // handle unused
-    
-#if USE_ESP_GPIO
-    // Using ESP32 GPIO
-    if (LORA_E32_AUX_GPIO < 0) {
-        return true; // Assume ready if no AUX pin
-    }
-    
-    return gpio_get_level(LORA_E32_AUX_GPIO) == 1;
-#else
-    // Using TCA6424A I/O Expander
-    bool level = false;
-    esp_err_t ret = tca_read_pin(LORA_E32_AUX_TCA_PORT, LORA_E32_AUX_TCA_PIN, &level);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to read AUX pin from TCA");
-        return true; // Assume ready on error
-    }
-    
-    return level;
-#endif
+  (void)handle;
+
+  uint8_t stack_id = get_active_lora_stack();
+  bool level = false;
+
+  esp_err_t ret =
+      stack_handler_gpio_read(stack_id, get_lora_aux_gpio(), &level);
+  if (ret != ESP_OK) {
+    ESP_LOGW(TAG, "Failed to read AUX");
+    return true;
+  }
+
+  return level;
 }
 
 // ===== API Implementation =====
@@ -301,83 +340,40 @@ lora_e32_comm_status_t lora_e32_comm_init(const lora_e32_comm_config_t *config,
   }
 
   // Copy configuration from application
-    memcpy(&h->config, config, sizeof(lora_e32_comm_config_t));
-    h->interface = config->interface;
-    h->current_mode = E32_MODE_SLEEP;
-    h->is_initialized = false;
+  memcpy(&h->config, config, sizeof(lora_e32_comm_config_t));
+  h->interface = config->interface;
+  h->current_mode = E32_MODE_SLEEP;
+  h->is_initialized = false;
+  h->stack_id = get_active_lora_stack();
+  esp_err_t gpio_ret;
+  gpio_ret =
+      stack_handler_gpio_set_direction(h->stack_id, get_lora_m0_gpio(), true);
+  if (gpio_ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to configure M0");
+    free(h);
+    return LORA_E32_COMM_ERR_COMM_FAILED;
+  }
 
-#if USE_ESP_GPIO
-    // Using ESP32 GPIO - Configure M0, M1, AUX pins
-    #if (LORA_E32_M0_GPIO >= 0)
-    {
-        gpio_config_t io_conf = {0};
-        io_conf.pin_bit_mask = (1ULL << LORA_E32_M0_GPIO);
-        io_conf.mode = GPIO_MODE_OUTPUT;
-        io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
-        io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
-        io_conf.intr_type = GPIO_INTR_DISABLE;
-        gpio_config(&io_conf);
-        ESP_LOGI(TAG, "M0 configured on ESP GPIO %d", LORA_E32_M0_GPIO);
-    }
-    #endif
+  gpio_ret =
+      stack_handler_gpio_set_direction(h->stack_id, get_lora_m1_gpio(), true);
+  if (gpio_ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to configure M1");
+    free(h);
+    return LORA_E32_COMM_ERR_COMM_FAILED;
+  }
 
-    #if (LORA_E32_M1_GPIO >= 0)
-    {
-        gpio_config_t io_conf = {0};
-        io_conf.pin_bit_mask = (1ULL << LORA_E32_M1_GPIO);
-        io_conf.mode = GPIO_MODE_OUTPUT;
-        io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
-        io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
-        io_conf.intr_type = GPIO_INTR_DISABLE;
-        gpio_config(&io_conf);
-        ESP_LOGI(TAG, "M1 configured on ESP GPIO %d", LORA_E32_M1_GPIO);
-    }
-    #endif
+  gpio_ret =
+      stack_handler_gpio_set_direction(h->stack_id, get_lora_aux_gpio(), false);
+  if (gpio_ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to configure AUX");
+    free(h);
+    return LORA_E32_COMM_ERR_COMM_FAILED;
+  }
 
-    #if (LORA_E32_AUX_GPIO >= 0)
-    {
-        gpio_config_t io_conf = {0};
-        io_conf.pin_bit_mask = (1ULL << LORA_E32_AUX_GPIO);
-        io_conf.mode = GPIO_MODE_INPUT;
-        io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
-        io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
-        io_conf.intr_type = GPIO_INTR_DISABLE;
-        gpio_config(&io_conf);
-        ESP_LOGI(TAG, "AUX configured on ESP GPIO %d", LORA_E32_AUX_GPIO);
-    }
-    #endif
-#else
-    // Using TCA6424A I/O Expander - Configure M0, M1 as outputs, AUX as input
-    // M0 pin
-    {
-        uint8_t config;
-        tca_read_port(LORA_E32_M0_TCA_PORT, &config);
-        config &= ~(1 << LORA_E32_M0_TCA_PIN); // Set as output
-        tca_configure_port(LORA_E32_M0_TCA_PORT, config);
-        ESP_LOGI(TAG, "M0 configured on TCA Port%d Pin%d", 
-                 LORA_E32_M0_TCA_PORT, LORA_E32_M0_TCA_PIN);
-    }
-    
-    // M1 pin
-    {
-        uint8_t config;
-        tca_read_port(LORA_E32_M1_TCA_PORT, &config);
-        config &= ~(1 << LORA_E32_M1_TCA_PIN); // Set as output
-        tca_configure_port(LORA_E32_M1_TCA_PORT, config);
-        ESP_LOGI(TAG, "M1 configured on TCA Port%d Pin%d", 
-                 LORA_E32_M1_TCA_PORT, LORA_E32_M1_TCA_PIN);
-    }
-    
-    // AUX pin
-    {
-        uint8_t config;
-        tca_read_port(LORA_E32_AUX_TCA_PORT, &config);
-        config |= (1 << LORA_E32_AUX_TCA_PIN); // Set as input
-        tca_configure_port(LORA_E32_AUX_TCA_PORT, config);
-        ESP_LOGI(TAG, "AUX configured on TCA Port%d Pin%d", 
-                 LORA_E32_AUX_TCA_PORT, LORA_E32_AUX_TCA_PIN);
-    }
-#endif
+  ESP_LOGI(TAG,
+           "GPIO configured for Stack %d (M0=GPIO%d, M1=GPIO%d, AUX=GPIO%d)",
+           h->stack_id + 1, get_lora_m0_gpio() + 1, get_lora_m1_gpio() + 1,
+           get_lora_aux_gpio() + 1);
 
   // Initialize communication interface (UART or others)
   esp_err_t ret =
@@ -407,6 +403,7 @@ lora_e32_comm_status_t lora_e32_comm_init(const lora_e32_comm_config_t *config,
   }
 
   h->is_initialized = true;
+  h->stack_id = get_active_lora_stack();
   *handle = h;
   vTaskDelay(pdMS_TO_TICKS(50)); // Wait before flushing
   h->interface.flush(h->interface.user_ctx);
@@ -441,11 +438,9 @@ lora_e32_comm_status_t lora_e32_comm_set_mode(lora_e32_comm_handle_t handle,
   ESP_LOGI(TAG, "Setting mode: %d", mode);
 
   // Wait for AUX to go high before mode switch
-  if (LORA_E32_AUX_GPIO >= 0) {
-    lora_e32_comm_status_t status = lora_e32_comm_wait_aux_high(handle, 1000);
-    if (status != LORA_E32_COMM_OK) {
-      ESP_LOGW(TAG, "AUX not high before mode switch");
-    }
+  lora_e32_comm_status_t status = lora_e32_comm_wait_aux_high(handle, 1000);
+  if (status != LORA_E32_COMM_OK) {
+    ESP_LOGW(TAG, "AUX not high before mode switch");
   }
 
   // Set mode pins
@@ -456,9 +451,7 @@ lora_e32_comm_status_t lora_e32_comm_set_mode(lora_e32_comm_handle_t handle,
   vTaskDelay(pdMS_TO_TICKS(E32_MODE_SWITCH_TIME_MS));
 
   // Wait for AUX high after mode switch
-  if (LORA_E32_AUX_GPIO >= 0) {
-    lora_e32_comm_wait_aux_high(handle, 1000);
-  }
+  lora_e32_comm_wait_aux_high(handle, 1000);
 
   return LORA_E32_COMM_OK;
 }
@@ -476,7 +469,7 @@ lora_e32_comm_status_t lora_e32_comm_get_mode(lora_e32_comm_handle_t handle,
 static lora_e32_comm_status_t
 lora_e32_comm_wait_aux_high(lora_e32_comm_handle_t handle,
                             uint32_t timeout_ms) {
-  if (handle == NULL || LORA_E32_AUX_GPIO < 0) {
+  if (handle == NULL) {
     return LORA_E32_COMM_OK; // No AUX pin configured
   }
 

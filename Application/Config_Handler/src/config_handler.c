@@ -11,6 +11,7 @@
 #include "lora_e32_comm.h"
 #include "lora_tdma_handler.h"
 #include "mcu_wan_handler.h"
+#include "stack_handler.h"
 #include <string.h>
 
 static const char *TAG = "config_handler";
@@ -44,6 +45,8 @@ config_type_t config_parse_type(const char *cmd, uint16_t len) {
     return CONFIG_UPDATE_CAN;
   } else if (cmd[2] == 'C' && cmd[3] == 'W') { // NEW: Whitelist
     return CONFIG_UPDATE_CAN;
+  } else if (cmd[2] == 'S' && cmd[3] == 'T') {
+    return CONFIG_UPDATE_STACK;
   }
   return CONFIG_TYPE_UNKNOWN;
 }
@@ -609,6 +612,86 @@ static esp_err_t config_parse_can(const uint8_t *data, uint16_t len) {
 }
 
 /**
+ * @brief Parse stack type configuration
+ *
+ * Format: CFST:ST_1:LORA or CFST:ST_2:RS485
+ * Valid types: NONE, LORA, RS485, ZIGBEE, CAN
+ */
+static esp_err_t config_parse_stack_type(const uint8_t *data, uint16_t len) {
+  if (data == NULL || len < 10) { // Minimum: "CFST:ST_1:X"
+    ESP_LOGE(TAG, "Stack type: invalid buffer");
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  // Check CFST: prefix
+  if (memcmp(data, "CFST:", 5) != 0) {
+    ESP_LOGE(TAG, "Stack type: missing CFST prefix");
+    return ESP_FAIL;
+  }
+
+  const char *ptr = (const char *)(data + 5);
+  int remaining = len - 5;
+
+  // Parse stack ID
+  uint8_t stack_id;
+  if (remaining >= 4 && strncmp(ptr, "ST_1:", 5) == 0) {
+    stack_id = 0;
+    ptr += 5;
+    remaining -= 5;
+  } else if (remaining >= 4 && strncmp(ptr, "ST_2:", 5) == 0) {
+    stack_id = 1;
+    ptr += 5;
+    remaining -= 5;
+  } else if (remaining >= 3 && strncmp(ptr, "ST1:", 4) == 0) {
+    stack_id = 0;
+    ptr += 4;
+    remaining -= 4;
+  } else if (remaining >= 3 && strncmp(ptr, "ST2:", 4) == 0) {
+    stack_id = 1;
+    ptr += 4;
+    remaining -= 4;
+  } else {
+    ESP_LOGE(TAG, "Stack type: invalid stack ID format");
+    return ESP_FAIL;
+  }
+
+  // Parse type
+  stack_comm_type_t stack_type;
+  if (remaining >= 4 && strncasecmp(ptr, "NONE", 4) == 0) {
+    stack_type = STACK_COMM_TYPE_NONE;
+  } else if (remaining >= 4 && strncasecmp(ptr, "LORA", 4) == 0) {
+    stack_type = STACK_COMM_TYPE_LORA;
+  } else if (remaining >= 5 && strncasecmp(ptr, "RS485", 5) == 0) {
+    stack_type = STACK_COMM_TYPE_RS485;
+  } else if (remaining >= 6 && strncasecmp(ptr, "ZIGBEE", 6) == 0) {
+    stack_type = STACK_COMM_TYPE_ZIGBEE;
+  } else if (remaining >= 3 && strncasecmp(ptr, "CAN", 3) == 0) {
+    stack_type = STACK_COMM_TYPE_CAN;
+  } else {
+    ESP_LOGE(TAG, "Stack type: invalid type");
+    return ESP_FAIL;
+  }
+
+  // Update global stack type
+  if (stack_id == 0) {
+    g_stack_1_type = stack_type;
+  } else {
+    g_stack_2_type = stack_type;
+  }
+
+  ESP_LOGI(TAG, "Stack %d type set to: %d", stack_id + 1, stack_type);
+
+  // Save to NVS
+  esp_err_t err = config_save_stack_type(stack_id, stack_type);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to save stack type to NVS: %s", esp_err_to_name(err));
+    return err;
+  }
+
+  return ESP_OK;
+}
+
+/**
  * @brief Config callback from MCU WAN handler
  * @param data    Pointer to config data buffer (starts with "CF...")
  * @param len     Length of config data
@@ -717,6 +800,15 @@ static void config_handler_task(void *arg) {
           } else {
             ESP_LOGE(TAG, "Failed to parse CAN config frame");
           }
+        }
+        break;
+      }
+      case CONFIG_UPDATE_STACK: {
+        if (config_parse_stack_type((const uint8_t *)cmd.raw_data,
+                                    cmd.data_len) == ESP_OK) {
+          ESP_LOGI(TAG, "Stack type updated from MCU WAN");
+        } else {
+          ESP_LOGE(TAG, "Failed to parse stack type command");
         }
         break;
       }

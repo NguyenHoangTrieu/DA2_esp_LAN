@@ -13,19 +13,13 @@
 #include "freertos/task.h"
 #include <stdatomic.h>
 #include <string.h>
+#include "stack_handler.h"
 
 static const char *TAG = "CAN_DRV";
-
-// Debug GPIO for TX callback visualization
-#define DEBUG_TX_GPIO GPIO_NUM_8
 
 // Queue configuration
 #define RX_QUEUE_LEN 20
 #define TX_TIMEOUT_MS 100
-
-// Default GPIO pins
-#define CAN_TX_GPIO_DEFAULT GPIO_NUM_5
-#define CAN_RX_GPIO_DEFAULT GPIO_NUM_6
 
 // Queue item with embedded buffer (pattern from ESP-IDF example)
 typedef struct {
@@ -48,6 +42,33 @@ static can_driver_ctx_t g_can_ctx = {0};
 uint16_t g_can_whitelist[MAX_WHITELISTED_IDS] = {0};
 uint16_t g_can_whitelist_count = 0;
 volatile uint32_t g_counter = 0;
+
+/**
+ * @brief Get current active stack ID based on global stack types
+ */
+static uint8_t get_active_can_stack(void) {
+    if (g_stack_1_type == STACK_COMM_TYPE_CAN) {
+        return 0;  // Stack 1
+    } else if (g_stack_2_type == STACK_COMM_TYPE_CAN) {
+        return 1;  // Stack 2
+    }
+    return 0;  // Default to Stack 1
+}
+
+/**
+ * @brief Get TWAI TX pin for current stack
+ */
+static int get_can_twai_tx_pin(void) {
+    return (get_active_can_stack() == 0) ? CAN_TWAI_TX_PIN_STACK_1 : CAN_TWAI_TX_PIN_STACK_2;
+}
+
+/**
+ * @brief Get TWAI RX pin for current stack
+ */
+static int get_can_twai_rx_pin(void) {
+    return (get_active_can_stack() == 0) ? CAN_TWAI_RX_PIN_STACK_1 : CAN_TWAI_RX_PIN_STACK_2;
+}
+
 
 /**
  * @brief Error callback - logs TWAI bus errors
@@ -131,11 +152,6 @@ can_tx_done_callback(twai_node_handle_t handle,
   // Increment global counter
   g_counter++;
 
-  // Toggle debug LED for visualization
-  static bool led_state = false;
-  led_state = !led_state;
-  gpio_set_level(DEBUG_TX_GPIO, led_state);
-
   // Log failed transmissions
   if (!edata->is_tx_success) {
     ESP_EARLY_LOGW(TAG, "TX failed for ID: 0x%X",
@@ -151,10 +167,6 @@ can_tx_done_callback(twai_node_handle_t handle,
  */
 can_status_t can_driver_init(void) {
   esp_err_t ret = ESP_OK;
-
-  // Configure debug GPIO for TX callback visualization
-  gpio_set_direction(DEBUG_TX_GPIO, GPIO_MODE_OUTPUT);
-  gpio_set_level(DEBUG_TX_GPIO, 0);
 
   // Check if already initialized
   if (atomic_load(&g_can_ctx.is_initialized)) {
@@ -174,8 +186,8 @@ can_status_t can_driver_init(void) {
   g_can_ctx.driver_config = (twai_onchip_node_config_t){
       .io_cfg =
           {
-              .tx = CAN_TX_GPIO_DEFAULT,
-              .rx = CAN_RX_GPIO_DEFAULT,
+              .tx = get_can_twai_tx_pin(),
+              .rx = get_can_twai_rx_pin(),
               .quanta_clk_out = GPIO_NUM_NC,
               .bus_off_indicator = GPIO_NUM_NC,
           },

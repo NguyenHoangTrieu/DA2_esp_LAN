@@ -22,6 +22,8 @@
 #include "lora_tdma_handler.h"
 #include "wan_comm.h"
 #include "zigbee_nostack_connect.h"
+#include "stack_handler.h"
+#include "rs485_handler.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -206,6 +208,17 @@ static void send_lan_config_response(void) {
     offset += snprintf((char *)&config_packet[offset],
                        sizeof(config_packet) - offset, "can_whitelist=|");
   }
+
+  // stack handlers configuration
+  offset +=
+      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
+               "stack_1_type=%s|",
+               stack_handler_type_to_string(g_stack_1_type));
+
+  offset +=
+      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
+               "stack_2_type=%s|",
+               stack_handler_type_to_string(g_stack_2_type));
 
   // ==================== LORA TDMA CONFIG ====================
   const char *lora_role_str =
@@ -440,6 +453,27 @@ void mcu_wan_handler_register_config_callback(void (*callback)(const uint8_t *,
   g_config_callback = callback;
 }
 
+// ===== Stack Handler Starter =====
+static void stack_handler_start(stack_comm_type_t stack_type) {
+  switch (stack_type) {
+  case STACK_COMM_TYPE_CAN:
+    can_handler_start();
+    break;
+  case STACK_COMM_TYPE_ZIGBEE:
+    zigbee_nostack_connect_start();
+    break;
+  case STACK_COMM_TYPE_LORA:
+    lora_tdma_connect_start();
+    break;
+  case STACK_COMM_TYPE_RS485:
+    rs485_handler_start();
+    break;
+  default:
+    ESP_LOGW(TAG, "Unknown stack type: %d", stack_type);
+    break;
+  }
+}
+
 // ===== Main Task (Diagram 1 Implementation) =====
 
 static void mcu_wan_handler_task(void *pvParameters) {
@@ -465,10 +499,8 @@ static void mcu_wan_handler_task(void *pvParameters) {
   TickType_t last_rtc_request = xTaskGetTickCount();
   uplink_item_t uplink_item;
   uint8_t rx_buffer[256];
-
-  can_handler_start();
-  zigbee_nostack_connect_start();
-  lora_tdma_connect_start();
+  stack_handler_start(g_stack_1_type);
+  stack_handler_start(g_stack_2_type);
 
   while (g_handler_running) {
     TickType_t now = xTaskGetTickCount();
@@ -784,6 +816,8 @@ static const char *handler_id_to_string(handler_id_t id) {
     return "LOR";
   case HANDLER_ZIGBEE:
     return "ZIG";
+  case HANDLER_RS485:
+    return "RS4";
   default:
     return "UNK";
   }

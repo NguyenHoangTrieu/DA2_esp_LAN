@@ -6,9 +6,9 @@
 #include "can_driver.h"
 #include "config_handler.h"
 #include "esp_log.h"
-#include "lora_tdma_handler.h"
 #include "lora_e32_comm.h"
 #include "lora_tdma_connect.h"
+#include "lora_tdma_handler.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include <string.h>
@@ -25,8 +25,9 @@ static const char *TAG = "CONFIG_NVS";
 #define NVS_KEY_LORA_CONFIG "lora_cfg"
 #define NVS_KEY_LORA_CRYPTO "lora_crypto"
 #define NVS_KEY_LORA_E32_PARAMS "lora_e32_params"
-#define NVS_KEY_LORA_E32_BAUD   "lora_e32_baud"
-
+#define NVS_KEY_LORA_E32_BAUD "lora_e32_baud"
+#define NVS_KEY_STACK_1_TYPE "stack1_type"
+#define NVS_KEY_STACK_2_TYPE "stack2_type"
 
 /* CAN Whitelist Size */
 #define CAN_MAX_WHITELIST_SIZE MAX_WHITELISTED_IDS
@@ -317,7 +318,9 @@ static esp_err_t load_lora_e32_config_from_nvs(void) {
   if (err == ESP_OK) {
     ESP_LOGI(TAG, "E32 params loaded from NVS");
   } else if (err == ESP_ERR_NVS_NOT_FOUND) {
-    ESP_LOGI(TAG, "E32 params not found in NVS, using defaults in g_lora_e32_params");
+    ESP_LOGI(
+        TAG,
+        "E32 params not found in NVS, using defaults in g_lora_e32_params");
     err = ESP_OK; /* Not an error, keep defaults */
   } else {
     ESP_LOGE(TAG, "Error reading E32 params: %s", esp_err_to_name(err));
@@ -370,7 +373,8 @@ static esp_err_t save_lora_e32_config_to_nvs_internal(void) {
   }
 
   /* Store baud rate as signed 32-bit integer */
-  err = nvs_set_i32(nvs_handle, NVS_KEY_LORA_E32_BAUD, (int32_t)g_lora_e32_baud_rate);
+  err = nvs_set_i32(nvs_handle, NVS_KEY_LORA_E32_BAUD,
+                    (int32_t)g_lora_e32_baud_rate);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Error writing E32 baud: %s", esp_err_to_name(err));
     nvs_close(nvs_handle);
@@ -379,7 +383,8 @@ static esp_err_t save_lora_e32_config_to_nvs_internal(void) {
 
   err = nvs_commit(nvs_handle);
   if (err != ESP_OK) {
-    ESP_LOGE(TAG, "Error committing E32 config to NVS: %s", esp_err_to_name(err));
+    ESP_LOGE(TAG, "Error committing E32 config to NVS: %s",
+             esp_err_to_name(err));
   } else {
     ESP_LOGI(TAG, "E32 config saved (baud=%d)", g_lora_e32_baud_rate);
   }
@@ -472,12 +477,86 @@ esp_err_t save_lora_handler_config_to_nvs(void) {
   return err;
 }
 
-
 /**
- * @brief Save only the E32 radio configuration (g_lora_e32_params + baud) to NVS.
+ * @brief Save only the E32 radio configuration (g_lora_e32_params + baud) to
+ * NVS.
  */
 esp_err_t save_lora_e32_config_to_nvs(void) {
   return save_lora_e32_config_to_nvs_internal();
+}
+
+/**
+ * @brief Load stack type from NVS
+ */
+esp_err_t config_load_stack_type(uint8_t stack_id, stack_comm_type_t *type) {
+  if (stack_id >= STACK_HANDLER_MAX_STACKS || type == NULL) {
+    ESP_LOGE(TAG, "Invalid arguments");
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  nvs_handle_t nvs_handle;
+  esp_err_t ret = nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs_handle);
+  if (ret != ESP_OK) {
+    ESP_LOGW(TAG, "Failed to open NVS: %s", esp_err_to_name(ret));
+    *type = STACK_COMM_TYPE_NONE;
+    return ret;
+  }
+
+  const char *key =
+      (stack_id == 0) ? NVS_KEY_STACK_1_TYPE : NVS_KEY_STACK_2_TYPE;
+  uint8_t value = 0;
+  ret = nvs_get_u8(nvs_handle, key, &value);
+
+  if (ret == ESP_OK) {
+    *type = (stack_comm_type_t)value;
+    ESP_LOGI(TAG, "Stack %d type loaded: %d", stack_id + 1, *type);
+  } else if (ret == ESP_ERR_NVS_NOT_FOUND) {
+    ESP_LOGI(TAG, "Stack %d type not found, using NONE", stack_id + 1);
+    *type = STACK_COMM_TYPE_NONE;
+    ret = ESP_OK;
+  } else {
+    ESP_LOGE(TAG, "Failed to load stack type: %s", esp_err_to_name(ret));
+    *type = STACK_COMM_TYPE_NONE;
+  }
+
+  nvs_close(nvs_handle);
+  return ret;
+}
+
+/**
+ * @brief Save stack type to NVS
+ */
+esp_err_t config_save_stack_type(uint8_t stack_id, stack_comm_type_t type) {
+  if (stack_id >= STACK_HANDLER_MAX_STACKS) {
+    ESP_LOGE(TAG, "Invalid stack ID: %d", stack_id);
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  nvs_handle_t nvs_handle;
+  esp_err_t ret = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to open NVS: %s", esp_err_to_name(ret));
+    return ret;
+  }
+
+  const char *key =
+      (stack_id == 0) ? NVS_KEY_STACK_1_TYPE : NVS_KEY_STACK_2_TYPE;
+  ret = nvs_set_u8(nvs_handle, key, (uint8_t)type);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to save stack type: %s", esp_err_to_name(ret));
+    nvs_close(nvs_handle);
+    return ret;
+  }
+
+  ret = nvs_commit(nvs_handle);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to commit NVS: %s", esp_err_to_name(ret));
+  } else {
+    ESP_LOGI(TAG, "Stack %d type saved: %d", stack_id + 1, type);
+  }
+
+  nvs_close(nvs_handle);
+  return ret;
 }
 
 /**
@@ -505,9 +584,15 @@ static esp_err_t load_all_configs_from_nvs(void) {
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "Failed to load LoRa TDMA config");
   }
+  
+  esp_err_t ret1 = config_load_stack_type(0, &g_stack_1_type);
+  esp_err_t ret2 = config_load_stack_type(1, &g_stack_2_type);
 
-  // TODO: Add Thread config loading here when implemented
-  // TODO: Add Zigbee config loading here when implemented
+  if (ret1 == ESP_OK && ret2 == ESP_OK) {
+    ESP_LOGI(TAG, "Stack types loaded: ST1=%d, ST2=%d", g_stack_1_type,
+             g_stack_2_type);
+    return ESP_OK;
+  }
 
   ESP_LOGI(TAG, "Configuration loading complete");
   return ESP_OK;

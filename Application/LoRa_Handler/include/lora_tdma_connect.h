@@ -90,13 +90,6 @@ esp_err_t lora_tdma_connect_stop(void);
  */
 bool lora_tdma_connect_enqueue_downlink(uint8_t *data, uint16_t len);
 
-/**
- * @brief Get a snapshot of current statistics.
- *
- * @param out Pointer to stats structure (must not be NULL)
- */
-void lora_tdma_connect_get_stat(lora_tdma_connect_stats_t *out);
-
 #ifdef __cplusplus
 }
 #endif

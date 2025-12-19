@@ -19,70 +19,30 @@
 #include "esp_err.h"
 #include <stdbool.h>
 #include <stdint.h>
+#include "stack_handler.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* ===== Default hardware configuration (override these at compile time if
- * needed) ===== */
-#define USE_ESP_GPIO 1 // 1 = Use ESP32 GPIO, 0 = Use TCA6424A
+/* ===== Hardware Configuration - Stack-based ===== */
+// Stack 1 configuration
+#define LORA_E32_UART_PORT_STACK_1      1
+#define LORA_E32_UART_TX_PIN_STACK_1    17
+#define LORA_E32_UART_RX_PIN_STACK_1    18
+#define LORA_E32_M0_GPIO_STACK_1        STACK_GPIO_PIN_1
+#define LORA_E32_M1_GPIO_STACK_1        STACK_GPIO_PIN_2
+#define LORA_E32_AUX_GPIO_STACK_1       STACK_GPIO_PIN_3
 
-/* GPIO pins for E32 mode control and AUX.
- * Set to -1 to disable a pin if your hardware does not use it.
- */
-#if USE_ESP_GPIO
-// Use ESP32 GPIO directly
-#ifndef LORA_E32_M0_GPIO
-#define LORA_E32_M0_GPIO (18)
-#endif
+// Stack 2 configuration
+#define LORA_E32_UART_PORT_STACK_2      2
+#define LORA_E32_UART_TX_PIN_STACK_2    15
+#define LORA_E32_UART_RX_PIN_STACK_2    16
+#define LORA_E32_M0_GPIO_STACK_2        STACK_GPIO_PIN_1
+#define LORA_E32_M1_GPIO_STACK_2        STACK_GPIO_PIN_2
+#define LORA_E32_AUX_GPIO_STACK_2       STACK_GPIO_PIN_3
 
-#ifndef LORA_E32_M1_GPIO
-#define LORA_E32_M1_GPIO (17)
-#endif
-
-#ifndef LORA_E32_AUX_GPIO
-#define LORA_E32_AUX_GPIO (7)
-#endif
-#else
-// Use TCA6424A I/O Expander
-#ifndef LORA_E32_M0_TCA_PORT
-#define LORA_E32_M0_TCA_PORT 0 // TCA Port 0
-#endif
-#ifndef LORA_E32_M0_TCA_PIN
-#define LORA_E32_M0_TCA_PIN 0 // Pin 0
-#endif
-
-#ifndef LORA_E32_M1_TCA_PORT
-#define LORA_E32_M1_TCA_PORT 0 // TCA Port 0
-#endif
-#ifndef LORA_E32_M1_TCA_PIN
-#define LORA_E32_M1_TCA_PIN 1 // Pin 1
-#endif
-
-#ifndef LORA_E32_AUX_TCA_PORT
-#define LORA_E32_AUX_TCA_PORT 0 // TCA Port 0
-#endif
-#ifndef LORA_E32_AUX_TCA_PIN
-#define LORA_E32_AUX_TCA_PIN 2 // Pin 2
-#endif
-#endif
-/* UART hardware mapping used by the E32 module.
- * These are board-specific and can be overridden from Kconfig or build flags.
- */
-#ifndef LORA_E32_UART_PORT
-#define LORA_E32_UART_PORT (1)
-#endif
-
-#ifndef LORA_E32_UART_TX_PIN
-#define LORA_E32_UART_TX_PIN (16)
-#endif
-
-#ifndef LORA_E32_UART_RX_PIN
-#define LORA_E32_UART_RX_PIN (15)
-#endif
-
-/* Default UART baud rate for the E32 driver (config / normal mode). */
+/* Default UART baud rate */
 #ifndef LORA_E32_DEFAULT_BAUD_RATE
 #define LORA_E32_DEFAULT_BAUD_RATE (9600)
 #endif

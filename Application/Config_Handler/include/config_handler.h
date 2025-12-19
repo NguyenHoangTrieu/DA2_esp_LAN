@@ -10,6 +10,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "stack_handler.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -24,7 +25,8 @@ typedef enum {
   CONFIG_UPDATE_FIRMWARE = 0,  // "CFFW" - Firmware update command
   CONFIG_UPDATE_LORA = 1,      // "CFLR" - LoRa config command
   CONFIG_UPDATE_CAN = 2,       // "CFCB" or "CFCM" - CAN config command
-  CONFIG_UPDATE_SCAN = 3,      // "CFSC" - Config query command (future)
+  CONFIG_UPDATE_SCAN = 3,      // "CFSC" - Config query command1
+  CONFIG_UPDATE_STACK = 4,    // "CFST" - Stack config command
   CONFIG_TYPE_UNKNOWN = 0xFF
 } config_type_t;
 
@@ -84,6 +86,11 @@ esp_err_t save_lora_handler_config_to_nvs(void);
  * NVS
  */
 esp_err_t save_lora_e32_config_to_nvs(void);
+
+/**
+ * @brief Save stack type to NVS
+ */
+esp_err_t config_save_stack_type(uint8_t stack_id, stack_comm_type_t type);
 
 /**
  * @brief Erase all gateway configurations from NVS

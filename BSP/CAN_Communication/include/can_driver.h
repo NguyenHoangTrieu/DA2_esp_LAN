@@ -9,6 +9,20 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "stack_handler.h"
+
+/* ===== Hardware Configuration - Dual Stack Support ===== */
+
+// Stack 1 configuration (TWAI)
+#define CAN_TWAI_TX_PIN_STACK_1     17
+#define CAN_TWAI_RX_PIN_STACK_1     18
+
+// Stack 2 configuration (TWAI)
+#define CAN_TWAI_TX_PIN_STACK_2     15
+#define CAN_TWAI_RX_PIN_STACK_2     16
+
+/* ===== Default Configuration ===== */
+#define CAN_DEFAULT_BITRATE         500000  // 500 kbps
 
 #define MAX_WHITELISTED_IDS 500
 /* Return Status Codes */

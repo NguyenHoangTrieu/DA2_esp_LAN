@@ -177,7 +177,12 @@ bool zigbee_nostack_connect_enqueue_downlink(uint8_t *data, uint16_t len) {
   return true;
 }
 
-void zigbee_nostack_connect_get_stat(zigbee_nostack_connect_stats_t *out) {
+/**
+ * @brief Get statistics snapshot
+ *
+ * @param out Output statistics structure (must not be NULL)
+ */
+static void zigbee_nostack_connect_get_stat(zigbee_nostack_connect_stats_t *out) {
   if (!out) {
     return;
   }
@@ -221,7 +226,7 @@ static void zigbee_nostack_connect_task(void *pvParameters) {
       }
     }
 
-    /* ===== Process Downlink Queue ===== */
+    /* ===== Process Downlink Queue ===== */    
     zigbee_downlink_packet_t pkt;
     if (xQueueReceive(g_downlink_queue, &pkt, 0) == pdTRUE) {
       uint16_t send_len = pkt.data_length;

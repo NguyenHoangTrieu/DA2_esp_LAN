@@ -11,6 +11,46 @@ static const char *TAG = "I2C_SUPPORT";
 static i2c_master_bus_handle_t i2c_bus_handle = NULL;
 static bool is_initialized = false;
 
+void i2c_dev_support_scan(void) {
+    if (!is_initialized || !i2c_bus_handle) {
+        ESP_LOGE(TAG, "I2C not initialized. Call i2c_dev_support_init() first");
+        return;
+    }
+    
+    ESP_LOGI(TAG, "Scanning I2C bus...");
+    ESP_LOGI(TAG, "     0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f");
+    
+    uint8_t device_count = 0;
+    
+    for (uint8_t addr = 0x00; addr < 0x80; addr++) {
+        if (addr % 16 == 0) {
+            printf("%02x: ", addr);
+        }
+        
+        if (addr < 0x08 || addr > 0x77) {
+            printf("   ");
+        } else {
+            esp_err_t ret = i2c_master_probe(i2c_bus_handle, addr, 100);
+            if (ret == ESP_OK) {
+                printf("%02x ", addr);
+                device_count++;
+            } else {
+                printf("-- ");
+            }
+        }
+        
+        if ((addr + 1) % 16 == 0) {
+            printf("\n");
+        }
+    }
+    
+    if (device_count > 0) {
+        ESP_LOGI(TAG, "Found %d device(s)", device_count);
+    } else {
+        ESP_LOGW(TAG, "No devices found!");
+    }
+}
+
 esp_err_t i2c_dev_support_init(void) {
     if (is_initialized) {
         ESP_LOGW(TAG, "I2C already initialized");
