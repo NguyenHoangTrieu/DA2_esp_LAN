@@ -118,9 +118,9 @@ esp_err_t tca_deinit(void) {
 esp_err_t tca_reset(void) {
   ESP_LOGI(TAG, "Performing hardware reset");
   gpio_set_level(TCA6424A_RESET_PIN, 1);
-  vTaskDelay(pdMS_TO_TICKS(10));
+  vTaskDelay(pdMS_TO_TICKS(100));
   gpio_set_level(TCA6424A_RESET_PIN, 0);
-  vTaskDelay(pdMS_TO_TICKS(10));
+  vTaskDelay(pdMS_TO_TICKS(100));
   return ESP_OK;
 }
 
@@ -257,4 +257,12 @@ esp_err_t tca_read_pin(tca_port_t port, uint8_t pin, bool *level) {
 esp_err_t tca_register_interrupt_callback(tca_interrupt_callback_t callback) {
   interrupt_callback = callback;
   return ESP_OK;
+}
+
+esp_err_t tca_read_config_register(tca_port_t port, uint8_t *value) {
+    if (!tca_handle || port > TCA_PORT_2 || !value) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    uint8_t reg = TCA6424A_CONFIG_PORT0 + port;
+    return tca_read_register(reg, value);
 }

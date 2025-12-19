@@ -574,7 +574,7 @@ static esp_err_t uart_change_baudrate(lora_e32_comm_handle_t handle,
 
 lora_e32_comm_status_t lora_e32_comm_read_params(lora_e32_comm_handle_t handle,
                                                  e32_params_t *params) {
-  if (handle == NULL || !handle->is_initialized || params == NULL) {
+  if (handle == NULL || params == NULL) {
     return LORA_E32_COMM_ERR_INVALID_ARG;
   }
 
@@ -636,7 +636,7 @@ lora_e32_comm_status_t lora_e32_comm_read_params(lora_e32_comm_handle_t handle,
 
 lora_e32_comm_status_t lora_e32_comm_write_params(lora_e32_comm_handle_t handle,
                                                   const e32_params_t *params) {
-  if (!handle || !handle->is_initialized || !params) {
+  if (!handle || !params) {
     return LORA_E32_COMM_ERR_INVALID_ARG;
   }
 
@@ -668,27 +668,26 @@ lora_e32_comm_status_t lora_e32_comm_write_params(lora_e32_comm_handle_t handle,
                               1000) != ESP_OK) {
     return LORA_E32_COMM_ERR_CONFIG_FAILED;
   }
-  // Read-back to verify
+  // Verify: read back actual params from module
   e32_params_t rb = {0};
-  if (lora_e32_comm_read_params(handle, &rb) != LORA_E32_COMM_OK) {
-    if (original_baud != 9600)
-      uart_change_baudrate(handle, original_baud);
-    return LORA_E32_COMM_ERR_CONFIG_FAILED;
-  }
+  lora_e32_comm_status_t st = lora_e32_comm_read_params(handle, &rb);
 
-  // Verify: mismatch => FAIL
+  if (original_baud != 9600)
+    uart_change_baudrate(handle, original_baud);
+  lora_e32_comm_set_mode(handle, E32_MODE_NORMAL);
+  if (st != LORA_E32_COMM_OK)
+    return st;
+
+  // Compare contents (ignore header)
   if (rb.addh != params->addh || rb.addl != params->addl ||
       rb.sped != params->sped || rb.chan != params->chan ||
       rb.option != params->option) {
-
     ESP_LOGE(TAG,
-             "E32 verify mismatch! want: %02X %02X %02X %02X %02X, got: %02X "
-             "%02X %02X %02X %02X",
+             "Temp write verify mismatch: "
+             "W[ADDH=%02X ADDL=%02X SPED=%02X CHAN=%02X OPT=%02X] "
+             "R[ADDH=%02X ADDL=%02X SPED=%02X CHAN=%02X OPT=%02X]",
              params->addh, params->addl, params->sped, params->chan,
              params->option, rb.addh, rb.addl, rb.sped, rb.chan, rb.option);
-
-    if (original_baud != 9600)
-      uart_change_baudrate(handle, original_baud);
     return LORA_E32_COMM_ERR_CONFIG_FAILED;
   }
 

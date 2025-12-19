@@ -90,47 +90,21 @@ static esp_err_t rs485_set_mode_internal(rs485_comm_handle_t handle,
     return ESP_ERR_INVALID_STATE;
   }
 
-  esp_err_t ret = ESP_OK;
+  esp_err_t ret;
   uint8_t stack_id = handle->stack_id;
+  
+  // Logic: TX (1) -> Pin High. RX (0) -> Pin Low.
+  bool level = (mode == RS485_MODE_ONLY_SEND) ? true : false; 
 
-  switch (mode) {
-  case RS485_MODE_ONLY_RECEIVE:
-    // DE=LOW (disable transmitter), RE=LOW (enable receiver)
-    ret = stack_handler_gpio_write(stack_id, get_rs485_de_gpio(), false);
-    if (ret == ESP_OK) {
-      ret = stack_handler_gpio_write(stack_id, get_rs485_re_gpio(), false);
-    }
-    ESP_LOGD(TAG, "Mode: ONLY_RECEIVE (DE=LOW, RE=LOW)");
-    break;
+  // Set DE
+  ret = stack_handler_gpio_write(stack_id, get_rs485_de_gpio(), level);
+  if (ret != ESP_OK) return ret;
 
-  case RS485_MODE_ONLY_SEND:
-    // DE=HIGH (enable transmitter), RE=HIGH (disable receiver)
-    ret = stack_handler_gpio_write(stack_id, get_rs485_de_gpio(), true);
-    if (ret == ESP_OK) {
-      ret = stack_handler_gpio_write(stack_id, get_rs485_re_gpio(), true);
-    }
-    ESP_LOGD(TAG, "Mode: ONLY_SEND (DE=HIGH, RE=HIGH)");
-    break;
-
-  case RS485_MODE_SEND_AND_RECEIVE:
-    // DE=HIGH (enable transmitter), RE=LOW (enable receiver)
-    ret = stack_handler_gpio_write(stack_id, get_rs485_de_gpio(), true);
-    if (ret == ESP_OK) {
-      ret = stack_handler_gpio_write(stack_id, get_rs485_re_gpio(), false);
-    }
-    ESP_LOGD(TAG, "Mode: SEND_AND_RECEIVE (DE=HIGH, RE=LOW)");
-    break;
-
-  default:
-    ESP_LOGE(TAG, "Invalid RS485 mode: %d", mode);
-    return ESP_ERR_INVALID_ARG;
-  }
-
+  // Set RE (Cùng mức logic với DE)
+  ret = stack_handler_gpio_write(stack_id, get_rs485_re_gpio(), level);
+  
   if (ret == ESP_OK) {
     handle->current_mode = mode;
-    vTaskDelay(pdMS_TO_TICKS(1)); // Small delay for transceiver switching
-  } else {
-    ESP_LOGE(TAG, "Failed to set RS485 mode");
   }
 
   return ret;
@@ -300,8 +274,7 @@ esp_err_t rs485_comm_read(rs485_comm_handle_t handle, uint8_t *buffer,
   }
 
   // Ensure we're in receive mode
-  if (handle->current_mode != RS485_MODE_ONLY_RECEIVE &&
-      handle->current_mode != RS485_MODE_SEND_AND_RECEIVE) {
+  if (handle->current_mode != RS485_MODE_ONLY_RECEIVE) {
     rs485_set_mode_internal(handle, RS485_MODE_ONLY_RECEIVE);
   }
 

@@ -23,15 +23,15 @@ extern "C" {
 #define RS485_UART_PORT_STACK_1     1
 #define RS485_UART_TX_PIN_STACK_1   17
 #define RS485_UART_RX_PIN_STACK_1   18
-#define RS485_DE_GPIO_STACK_1       STACK_GPIO_PIN_4
-#define RS485_RE_GPIO_STACK_1       STACK_GPIO_PIN_5
+#define RS485_DE_GPIO_STACK_1       STACK_GPIO_PIN_1
+#define RS485_RE_GPIO_STACK_1       STACK_GPIO_PIN_2
 
 // Stack 2 configuration
 #define RS485_UART_PORT_STACK_2     2
 #define RS485_UART_TX_PIN_STACK_2   15
 #define RS485_UART_RX_PIN_STACK_2   16
-#define RS485_DE_GPIO_STACK_2       STACK_GPIO_PIN_4
-#define RS485_RE_GPIO_STACK_2       STACK_GPIO_PIN_5
+#define RS485_DE_GPIO_STACK_2       STACK_GPIO_PIN_1
+#define RS485_RE_GPIO_STACK_2       STACK_GPIO_PIN_2
 
 /* ===== Default Configuration ===== */
 #define RS485_DEFAULT_BAUD_RATE     9600
@@ -42,7 +42,6 @@ extern "C" {
 typedef enum {
     RS485_MODE_ONLY_RECEIVE = 1,        /**< Only receive mode (DE=LOW, RE=LOW) */
     RS485_MODE_ONLY_SEND = 2,           /**< Only transmit mode (DE=HIGH, RE=HIGH) */
-    RS485_MODE_SEND_AND_RECEIVE = 3     /**< Both TX and RX enabled (DE=HIGH, RE=LOW) */
 } rs485_mode_t;
 
 /* ===== Data Types ===== */

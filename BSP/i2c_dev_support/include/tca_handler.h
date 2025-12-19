@@ -118,7 +118,8 @@ esp_err_t tca_set_polarity(tca_port_t port, uint8_t polarity);
  * @param verify Enable verification (true=verify, false=no verify)
  * @return ESP_OK on success
  */
-esp_err_t tca_set_pin_verified(tca_port_t port, uint8_t pin, bool level, bool verify);
+esp_err_t tca_set_pin_verified(tca_port_t port, uint8_t pin, bool level,
+                               bool verify);
 
 /**
  * @brief Read single pin
@@ -135,6 +136,14 @@ esp_err_t tca_read_pin(tca_port_t port, uint8_t pin, bool *level);
  * @return ESP_OK on success
  */
 esp_err_t tca_register_interrupt_callback(tca_interrupt_callback_t callback);
+
+/**
+ * @brief Read configuration register of a port
+ * @param port Port number (0-2)
+ * @param value Output value pointer
+ * @return esp_err_t ESP_OK on success
+ */
+esp_err_t tca_read_config_register(tca_port_t port, uint8_t *value);
 
 #ifdef __cplusplus
 }

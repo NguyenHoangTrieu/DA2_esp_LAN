@@ -44,6 +44,7 @@ void app_main(void)
     led_on();
     ESP_ERROR_CHECK(i2c_dev_support_init());
     ESP_ERROR_CHECK(tca_init());
+    ESP_ERROR_CHECK(stack_handler_init());
     config_init();
     config_handler_task_start();
     mcu_wan_handler_start();

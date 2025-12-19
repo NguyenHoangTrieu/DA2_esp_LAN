@@ -500,7 +500,7 @@ static void mcu_wan_handler_task(void *pvParameters) {
   uplink_item_t uplink_item;
   uint8_t rx_buffer[256];
   stack_handler_start(g_stack_1_type);
-  stack_handler_start(g_stack_2_type);
+  stack_handler_start(STACK_COMM_TYPE_NONE);
 
   while (g_handler_running) {
     TickType_t now = xTaskGetTickCount();

@@ -27,20 +27,20 @@ extern "C" {
 
 /* ===== Hardware Configuration - Stack-based ===== */
 // Stack 1 configuration
-#define LORA_E32_UART_PORT_STACK_1      1
+#define LORA_E32_UART_PORT_STACK_1      2
 #define LORA_E32_UART_TX_PIN_STACK_1    17
 #define LORA_E32_UART_RX_PIN_STACK_1    18
-#define LORA_E32_M0_GPIO_STACK_1        STACK_GPIO_PIN_1
-#define LORA_E32_M1_GPIO_STACK_1        STACK_GPIO_PIN_2
-#define LORA_E32_AUX_GPIO_STACK_1       STACK_GPIO_PIN_3
+#define LORA_E32_M0_GPIO_STACK_1        STACK_GPIO_PIN_4
+#define LORA_E32_M1_GPIO_STACK_1        STACK_GPIO_PIN_5
+#define LORA_E32_AUX_GPIO_STACK_1       STACK_GPIO_PIN_6
 
 // Stack 2 configuration
-#define LORA_E32_UART_PORT_STACK_2      2
+#define LORA_E32_UART_PORT_STACK_2      1
 #define LORA_E32_UART_TX_PIN_STACK_2    15
 #define LORA_E32_UART_RX_PIN_STACK_2    16
-#define LORA_E32_M0_GPIO_STACK_2        STACK_GPIO_PIN_1
-#define LORA_E32_M1_GPIO_STACK_2        STACK_GPIO_PIN_2
-#define LORA_E32_AUX_GPIO_STACK_2       STACK_GPIO_PIN_3
+#define LORA_E32_M0_GPIO_STACK_2        STACK_GPIO_PIN_4
+#define LORA_E32_M1_GPIO_STACK_2        STACK_GPIO_PIN_5
+#define LORA_E32_AUX_GPIO_STACK_2       STACK_GPIO_PIN_6
 
 /* Default UART baud rate */
 #ifndef LORA_E32_DEFAULT_BAUD_RATE

@@ -511,12 +511,12 @@ esp_err_t config_load_stack_type(uint8_t stack_id, stack_comm_type_t *type) {
     *type = (stack_comm_type_t)value;
     ESP_LOGI(TAG, "Stack %d type loaded: %d", stack_id + 1, *type);
   } else if (ret == ESP_ERR_NVS_NOT_FOUND) {
-    ESP_LOGI(TAG, "Stack %d type not found, using NONE", stack_id + 1);
-    *type = STACK_COMM_TYPE_NONE;
+    ESP_LOGI(TAG, "Stack %d type not found, using DEFAULT", stack_id + 1);
+    *type = (stack_id == 0) ? g_stack_1_type : g_stack_2_type;
     ret = ESP_OK;
   } else {
     ESP_LOGE(TAG, "Failed to load stack type: %s", esp_err_to_name(ret));
-    *type = STACK_COMM_TYPE_NONE;
+    *type = (stack_id == 0) ? g_stack_1_type : g_stack_2_type;
   }
 
   nvs_close(nvs_handle);
@@ -676,7 +676,9 @@ esp_err_t config_init(void) {
     // Save default LoRa TDMA config to NVS
     save_lora_handler_config_to_nvs();
 
-    // TODO: Add other default configs here (Thread, Zigbee)
+    // Save stack config to NVS
+    config_save_stack_type(0, g_stack_1_type);
+    config_save_stack_type(1, g_stack_2_type);
 
     mark_initialized();
     ESP_LOGI(TAG, "Default configuration saved");

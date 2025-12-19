@@ -75,6 +75,14 @@ esp_err_t rs485_handler_start(void) {
     return ret;
   }
 
+  // Set initial mode to RX
+  ret = rs485_comm_set_mode(g_rs485_ctx.comm_handle, RS485_MODE_ONLY_RECEIVE);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to set RX mode: %s", esp_err_to_name(ret));
+    return ret;
+  }
+  ESP_LOGI(TAG, "RS485 set to RX mode");
+
   // Create downlink queue
   g_rs485_ctx.downlink_queue =
       xQueueCreate(RS485_DOWNLINK_QUEUE_SIZE, sizeof(rs485_downlink_msg_t));
@@ -143,7 +151,6 @@ bool rs485_handler_enqueue_downlink(uint8_t *data, uint16_t len) {
   }
 
   memcpy(msg_data, data, len);
-
   rs485_downlink_msg_t msg = {.data = msg_data, .len = len};
 
   if (xQueueSend(g_rs485_ctx.downlink_queue, &msg, 0) != pdTRUE) {
@@ -170,9 +177,11 @@ static void rs485_handler_task(void *arg) {
   while (g_rs485_ctx.is_running) {
     // Handle downlink (WAN -> RS485)
     if (xQueueReceive(g_rs485_ctx.downlink_queue, &downlink_msg, 0) == pdTRUE) {
+      // rs485_comm_write automatically handles TX mode switching
       esp_err_t ret =
           rs485_comm_write(g_rs485_ctx.comm_handle, downlink_msg.data,
                            downlink_msg.len, RS485_TX_TIMEOUT_MS);
+
       if (ret == ESP_OK) {
         g_rs485_ctx.stats.tx_ok++;
         ESP_LOGD(TAG, "Sent downlink: %u bytes", downlink_msg.len);
@@ -180,7 +189,15 @@ static void rs485_handler_task(void *arg) {
         g_rs485_ctx.stats.tx_error++;
         ESP_LOGE(TAG, "Failed to send downlink");
       }
+
       free(downlink_msg.data);
+
+      // Explicitly ensure we're back in RX mode after transmission
+      ret =
+          rs485_comm_set_mode(g_rs485_ctx.comm_handle, RS485_MODE_ONLY_RECEIVE);
+      if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to return to RX mode after TX");
+      }
     }
 
     // Handle uplink (RS485 -> WAN)

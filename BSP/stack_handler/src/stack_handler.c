@@ -17,36 +17,36 @@ static const char *TAG = "STACK_HANDLER";
 
 /* ===== GPIO Pin Mapping Tables ===== */
 
-// Stack 1 GPIO mapping: GPIO number -> {TCA_PORT, TCA_PIN}
+// Stack 1 GPIO mapping (LAN1): GPIO number -> {TCA_PORT, TCA_PIN}
 static const struct {
   tca_port_t port;
   uint8_t pin;
 } stack1_gpio_map[STACK_GPIO_PIN_COUNT] = {
-    {TCA_PORT_0, 2}, // GPIO 1 -> P02
-    {TCA_PORT_0, 3}, // GPIO 2 -> P03
-    {TCA_PORT_0, 4}, // GPIO 3 -> P04
-    {TCA_PORT_0, 5}, // GPIO 4 -> P05
-    {TCA_PORT_0, 6}, // GPIO 5 -> P06
-    {TCA_PORT_0, 7}, // GPIO 6 -> P07
-    {TCA_PORT_1, 0}, // GPIO 7 -> P10 (P08 if continue on Port 0)
-    {TCA_PORT_1, 2}, // GPIO 8 -> P12
-    {TCA_PORT_1, 3}  // GPIO 9 -> P13
+    {TCA_PORT_2, 1}, // GPIO 1 -> P21
+    {TCA_PORT_2, 2}, // GPIO 2 -> P22
+    {TCA_PORT_2, 3}, // GPIO 3 -> P23
+    {TCA_PORT_2, 4}, // GPIO 4 -> P24
+    {TCA_PORT_2, 5}, // GPIO 5 -> P25
+    {TCA_PORT_1, 3}, // GPIO 6 -> P13
+    {TCA_PORT_1, 4}, // GPIO 7 -> P14
+    {TCA_PORT_1, 5}, // GPIO 8 -> P15
+    {TCA_PORT_1, 6}  // GPIO 9 -> P16
 };
 
-// Stack 2 GPIO mapping: GPIO number -> {TCA_PORT, TCA_PIN}
+// Stack 2 GPIO mapping (LAN2): GPIO number -> {TCA_PORT, TCA_PIN}
 static const struct {
   tca_port_t port;
   uint8_t pin;
 } stack2_gpio_map[STACK_GPIO_PIN_COUNT] = {
-    {TCA_PORT_1, 5}, // GPIO 1 -> P15
-    {TCA_PORT_1, 6}, // GPIO 2 -> P16
-    {TCA_PORT_1, 7}, // GPIO 3 -> P17
-    {TCA_PORT_2, 0}, // GPIO 4 -> P20
-    {TCA_PORT_2, 1}, // GPIO 5 -> P21
-    {TCA_PORT_2, 2}, // GPIO 6 -> P22
-    {TCA_PORT_2, 3}, // GPIO 7 -> P23
-    {TCA_PORT_2, 4}, // GPIO 8 -> P24
-    {TCA_PORT_2, 5}  // GPIO 9 -> P25
+    {TCA_PORT_0, 6}, // GPIO 1 -> P06
+    {TCA_PORT_0, 7}, // GPIO 2 -> P07
+    {TCA_PORT_1, 0}, // GPIO 3 -> P10
+    {TCA_PORT_1, 1}, // GPIO 4 -> P11
+    {TCA_PORT_1, 2}, // GPIO 5 -> P12
+    {TCA_PORT_0, 0}, // GPIO 6 -> P00
+    {TCA_PORT_0, 1}, // GPIO 7 -> P01
+    {TCA_PORT_0, 2}, // GPIO 8 -> P02
+    {TCA_PORT_0, 3}  // GPIO 9 -> P03
 };
 
 /* ===== Global Variables ===== */
@@ -130,7 +130,7 @@ esp_err_t stack_handler_init(void) {
   g_initialized = true;
 
   ESP_LOGI(TAG, "Stack handler initialized");
-  ESP_LOGI(TAG, "  Stack 1 GPIO mapping: P02-P07, P10, P12-P13");
+  ESP_LOGI(TAG, "  Stack 1 GPIO mapping: P02-P07, P10-P12");
   ESP_LOGI(TAG, "  Stack 2 GPIO mapping: P15-P17, P20-P25");
 
   return ESP_OK;
@@ -183,7 +183,7 @@ esp_err_t stack_handler_gpio_write(uint8_t stack_id, stack_gpio_pin_num_t pin,
   uint8_t pin_num;
   get_tca_mapping(stack_id, pin, &port, &pin_num);
 
-  esp_err_t ret = tca_set_pin_verified(port, pin_num, level, false);
+  esp_err_t ret = tca_set_pin_verified(port, pin_num, level, true);
 
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "Failed to write Stack%d GPIO%d (P%d%d)", stack_id + 1,
@@ -263,26 +263,40 @@ esp_err_t stack_handler_gpio_set_direction(uint8_t stack_id,
   uint8_t pin_num;
   get_tca_mapping(stack_id, pin, &port, &pin_num);
 
-  // Read current port configuration
+  // Read current CONFIGURATION register
   uint8_t port_cfg;
-  esp_err_t ret = tca_read_port(port, &port_cfg);
+  esp_err_t ret = tca_read_config_register(port, &port_cfg);
   if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to read port config");
+    ESP_LOGE(TAG, "Failed to read config register P%d", port);
     return ret;
   }
 
-  // Modify pin direction (1=input, 0=output)
+  ESP_LOGI(TAG, "Before: Stack%d GPIO%d (P%d.%d) config=0x%02X", stack_id + 1,
+           pin + 1, port, pin_num, port_cfg);
+
+  // Modify pin direction (TCA6424A: 1=input, 0=output)
   if (is_output) {
-    port_cfg &= ~(1 << pin_num);
+    port_cfg &= ~(1 << pin_num); // Clear bit = output
   } else {
-    port_cfg |= (1 << pin_num);
+    port_cfg |= (1 << pin_num); // Set bit = input
   }
 
   // Write back configuration
   ret = tca_configure_port(port, port_cfg);
-
   if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to configure Stack%d GPIO%d", stack_id + 1, pin + 1);
+    ESP_LOGE(TAG, "Failed to write config P%d", port);
+    return ret;
+  }
+
+  // Verify
+  uint8_t verify_cfg;
+  ret = tca_read_config_register(port, &verify_cfg);
+  if (ret == ESP_OK) {
+    bool actual_is_output = !(verify_cfg & (1 << pin_num));
+    ESP_LOGI(TAG, "After: Stack%d GPIO%d (P%d.%d) config=0x%02X - %s %s",
+             stack_id + 1, pin + 1, port, pin_num, verify_cfg,
+             actual_is_output ? "OUTPUT" : "INPUT",
+             (actual_is_output == is_output) ? "OK" : "FAILED");
   }
 
   return ret;
