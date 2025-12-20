@@ -149,8 +149,8 @@ typedef struct {
 #define E32_GET_ADDL(addr) ((uint8_t)((addr) & 0xFF))
 
 // ===== Special Addresses =====
-#define E32_ADDR_BROADCAST 0xFFFF // Broadcast address
-#define E32_ADDR_MONITOR 0xFFFF   // Monitor address
+#define E32_ADDR_BROADCAST 0x0202 // Broadcast address
+#define E32_ADDR_MONITOR 0x0202   // Monitor address
 
 // ===== Timing Constants (ms) =====
 #define E32_RESET_TIME_MS 50
@@ -162,14 +162,14 @@ typedef struct {
 // ===== Default Configuration =====
 #define E32_DEFAULT_ADDH 0x00
 #define E32_DEFAULT_ADDL 0x00
-#define E32_DEFAULT_CHANNEL 0x35 // 433MHz
+#define E32_DEFAULT_CHANNEL 0x1F // 433MHz
 #define E32_DEFAULT_UART_PARITY E32_UART_PARITY_8N1
-#define E32_DEFAULT_UART_BAUD E32_UART_BAUD_9600
-#define E32_DEFAULT_AIR_RATE E32_AIR_RATE_2_4K
+#define E32_DEFAULT_UART_BAUD E32_UART_BAUD_57600
+#define E32_DEFAULT_AIR_RATE E32_AIR_RATE_19_2K
 #define E32_DEFAULT_TRANS_MODE E32_TRANS_TRANSPARENT
 #define E32_DEFAULT_IO_DRIVE E32_IO_PUSH_PULL
 #define E32_DEFAULT_WAKEUP_TIME E32_WAKEUP_250MS
-#define E32_DEFAULT_FEC E32_FEC_ON
+#define E32_DEFAULT_FEC E32_FEC_OFF
 #define E32_DEFAULT_TX_POWER E32_POWER_30DBM
 
 // ===== Helper Functions =====

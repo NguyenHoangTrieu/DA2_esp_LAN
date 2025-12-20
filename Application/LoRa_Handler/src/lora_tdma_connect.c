@@ -194,7 +194,7 @@ bool lora_tdma_connect_enqueue_downlink(uint8_t *data, uint16_t len) {
   }
 
   g_stats.downlink_enqueued++;
-  ESP_LOGD(TAG, "Downlink enqueued: sensor=0x%04X, len=%u", sensor_addr,
+  ESP_LOGI(TAG, "Downlink enqueued: sensor=0x%04X, len=%u", sensor_addr,
            payload_len);
   return true;
 }
@@ -242,7 +242,8 @@ static void lora_tdma_connect_task(void *pvParameters) {
         lora_e32_comm_status_t rx_status =
             lora_e32_comm_receive(g_lora_e32_handle, rx_buf, sizeof(rx_buf),
                                   &rx_len, 0 /* timeout_ms */);
-
+        ESP_LOGI(TAG, "Polled LoRa RX: status=%d, len=%u", rx_status,
+                 (unsigned)rx_len);
         if (rx_status != LORA_E32_COMM_OK || rx_len == 0) {
           break;
         }
@@ -252,7 +253,7 @@ static void lora_tdma_connect_task(void *pvParameters) {
         lora_handler_handle_rx(&g_lora_tdma_ctx, rx_buf, frame_len, now_ms);
       }
     }
-    /* Run TDMA scheduler (no RTOS inside lora_handler) */
+    /* Run TDMA scheduler */
     lora_handler_process(&g_lora_tdma_ctx, now_ms);
 
     /* Process pending downlink packets (one per loop to keep latency low) */
@@ -276,7 +277,7 @@ static void lora_tdma_connect_task(void *pvParameters) {
                  "Failed to queue downlink to LoRa TDMA (addr=0x%04X, len=%u)",
                  pkt.sensor_addr, send_len);
       } else {
-        ESP_LOGD(TAG, "Downlink passed to LoRa TDMA (addr=0x%04X, len=%u)",
+        ESP_LOGI(TAG, "Downlink passed to LoRa TDMA (addr=0x%04X, len=%u)",
                  pkt.sensor_addr, send_len);
       }
 
@@ -330,7 +331,7 @@ static void lora_tdma_connect_rx_cb(const lora_handler_frame_t *frame) {
   if (mcu_wan_enqueue_uplink(HANDLER_LORA, uplink_buf,
                              (uint16_t)(4 + payload_len))) {
     g_stats.uplink_forwarded++;
-    ESP_LOGD(TAG, "Forwarded LoRa uplink from sensor 0x%04X (%u bytes)",
+    ESP_LOGI(TAG, "Forwarded LoRa uplink from sensor 0x%04X (%u bytes)",
              sensor_addr, payload_len);
   } else {
     g_stats.uplink_queue_full++;

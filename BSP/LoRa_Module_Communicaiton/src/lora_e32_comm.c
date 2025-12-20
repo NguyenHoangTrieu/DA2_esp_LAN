@@ -668,6 +668,7 @@ lora_e32_comm_status_t lora_e32_comm_write_params(lora_e32_comm_handle_t handle,
                               1000) != ESP_OK) {
     return LORA_E32_COMM_ERR_CONFIG_FAILED;
   }
+  vTaskDelay(pdMS_TO_TICKS(100)); // Wait after write
   // Verify: read back actual params from module
   e32_params_t rb = {0};
   lora_e32_comm_status_t st = lora_e32_comm_read_params(handle, &rb);
@@ -677,7 +678,11 @@ lora_e32_comm_status_t lora_e32_comm_write_params(lora_e32_comm_handle_t handle,
   lora_e32_comm_set_mode(handle, E32_MODE_NORMAL);
   if (st != LORA_E32_COMM_OK)
     return st;
-
+  ESP_LOGI(TAG, "Read back parameters: ADDH=%02X ADDL=%02X SPED=%02X CHAN=%02X OPT=%02X",
+           rb.addh, rb.addl, rb.sped, rb.chan, rb.option); 
+  ESP_LOGI(TAG, "Written parameters:   ADDH=%02X ADDL=%02X SPED=%02X CHAN=%02X OPT=%02X",
+           params->addh, params->addl, params->sped, params->chan,
+           params->option);
   // Compare contents (ignore header)
   if (rb.addh != params->addh || rb.addl != params->addl ||
       rb.sped != params->sped || rb.chan != params->chan ||
@@ -881,7 +886,7 @@ lora_e32_comm_status_t lora_e32_comm_flush(lora_e32_comm_handle_t handle) {
 lora_e32_comm_handle_t g_lora_e32_handle = NULL;
 
 static lora_e32_comm_uart_config_t g_default_uart_cfg = {
-    .baud_rate = 9600, .rx_buffer_size = 512, .tx_buffer_size = 512};
+    .baud_rate = LORA_E32_DEFAULT_BAUD_RATE, .rx_buffer_size = 512, .tx_buffer_size = 512};
 
 static lora_e32_comm_config_t g_default_comm_cfg;
 

@@ -675,6 +675,7 @@ esp_err_t config_init(void) {
 
     // Save default LoRa TDMA config to NVS
     save_lora_handler_config_to_nvs();
+    save_lora_e32_config_to_nvs();
 
     // Save stack config to NVS
     config_save_stack_type(0, g_stack_1_type);
