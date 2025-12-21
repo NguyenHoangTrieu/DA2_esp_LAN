@@ -10,6 +10,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "stack_handler.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -21,7 +22,11 @@
  * @brief Command type codes for LAN MCU
  */
 typedef enum {
-  CONFIG_UPDATE_FIRMWARE = 0, // "FW" - Firmware update command
+  CONFIG_UPDATE_FIRMWARE = 0,  // "CFFW" - Firmware update command
+  CONFIG_UPDATE_LORA = 1,      // "CFLR" - LoRa config command
+  CONFIG_UPDATE_CAN = 2,       // "CFCB" or "CFCM" - CAN config command
+  CONFIG_UPDATE_SCAN = 3,      // "CFSC" - Config query command1
+  CONFIG_UPDATE_STACK = 4,    // "CFST" - Stack config command
   CONFIG_TYPE_UNKNOWN = 0xFF
 } config_type_t;
 
@@ -66,16 +71,35 @@ void config_handler_task_stop(void);
 config_type_t config_parse_type(const char *cmd, uint16_t len);
 
 /**
- * @brief Parse firmware update command
- *
- * Format: "FW" or "FW:URL" or "FW:URL:FORCE"
- *
- * @param data Raw command data
- * @param len Command length
- * @param cfg Output FOTA config structure
- * @return esp_err_t ESP_OK on success
+ * @brief Save CAN configuration to NVS
  */
-esp_err_t config_parse_fota(const char *data, uint16_t len,
-                                fota_lan_command_t *cfg);
+esp_err_t save_can_config_to_nvs(void);
+
+/**
+ * @brief Save LoRa TDMA configuration (g_lora_handler_cfg and crypto key) to
+ * NVS
+ */
+esp_err_t save_lora_handler_config_to_nvs(void);
+
+/**
+ * @brief Save LoRa E32 radio configuration (g_lora_e32_params and baud rate) to
+ * NVS
+ */
+esp_err_t save_lora_e32_config_to_nvs(void);
+
+/**
+ * @brief Save stack type to NVS
+ */
+esp_err_t config_save_stack_type(uint8_t stack_id, stack_comm_type_t type);
+
+/**
+ * @brief Erase all gateway configurations from NVS
+ */
+esp_err_t erase_all_configs_from_nvs(void);
+
+/**
+ * @brief Initialize configuration system (load or save defaults)
+ */
+esp_err_t config_init(void);
 
 #endif // CONFIG_HANDLER_H

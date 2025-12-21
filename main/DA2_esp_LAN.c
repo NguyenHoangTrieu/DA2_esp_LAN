@@ -2,37 +2,85 @@
 * ESP32 S3 LAN Application
 */
 
-#include "rbg_handler.h"
-#include "config_handler.h"
-#include "mcu_wan_handler.h"
-#include "fota_lan_handler.h"
+#include "DA2_esp_LAN.h"
 
 static const char *TAG = "MAIN APP";
 
 TaskHandle_t main_task_handle = NULL;
 
+// Transport Selection
+#define PPP_USE_UART_TRANSPORT         1
 
+// UART Configuration
+#define PPP_UART_PORT                  UART_NUM_0
+#define PPP_UART_TX_PIN                GPIO_NUM_43
+#define PPP_UART_RX_PIN                GPIO_NUM_44
+#define PPP_UART_BAUDRATE              256000
+#define PPP_UART_QUEUE_SIZE            20
+#define PPP_UART_RX_BUFFER_SIZE        16*1024
 
-// =============================================================================
-// Main Application Entry Point
-// =============================================================================
+// // Global DNS Server (8.8.8.8)
+// #define PPP_GLOBAL_DNS                 0x08080808
 
 /**
  * @brief Main application entry point
  */
 void app_main(void)
 {
-    ESP_LOGI(TAG, "USB host library example");
+    ESP_LOGI(TAG, "LAN MCU Application Starting... V1.0.1");
+    main_task_handle = xTaskGetCurrentTaskHandle();
+
+     // Initialize NVS
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
     init_led_strip();
     led_on();
-    main_task_handle = xTaskGetCurrentTaskHandle();
+    ESP_ERROR_CHECK(i2c_dev_support_init());
+    ESP_ERROR_CHECK(tca_init());
+    ESP_ERROR_CHECK(stack_handler_init());
+    config_init();
     config_handler_task_start();
     mcu_wan_handler_start();
-    // fota_lan_handler_task_start();
     while (1) {
-        led_on();
-        vTaskDelay(pdMS_TO_TICKS(500));
-        led_show_green();
-        vTaskDelay(pdMS_TO_TICKS(500));
+      vTaskDelay(pdMS_TO_TICKS(1000));
     }
+}
+
+void lan_ppp_connect(void) {
+  // Initialize networking
+  ESP_ERROR_CHECK(esp_netif_init());
+  eppp_config_t config = EPPP_DEFAULT_CLIENT_CONFIG();
+  config.transport = EPPP_TRANSPORT_UART;
+  config.uart.port = PPP_UART_PORT;
+  config.uart.tx_io = PPP_UART_TX_PIN;
+  config.uart.rx_io = PPP_UART_RX_PIN;
+  config.uart.baud = PPP_UART_BAUDRATE;
+  config.uart.rx_buffer_size = PPP_UART_RX_BUFFER_SIZE;
+  config.uart.queue_size = PPP_UART_QUEUE_SIZE;
+
+  esp_netif_t *eppp_netif = eppp_connect(&config);
+
+  // Get IP info
+  esp_netif_ip_info_t ip_info;
+  if (esp_netif_get_ip_info(eppp_netif, &ip_info) == ESP_OK) {
+    ESP_LOGI(TAG, "IP:      " IPSTR, IP2STR(&ip_info.ip));
+    ESP_LOGI(TAG, "Netmask: " IPSTR, IP2STR(&ip_info.netmask));
+    ESP_LOGI(TAG, "Gateway: " IPSTR, IP2STR(&ip_info.gw));
+  }
+
+  // Setup DNS
+  esp_netif_dns_info_t dns;
+  dns.ip.u_addr.ip4.addr = esp_netif_htonl(PPP_GLOBAL_DNS);
+  dns.ip.type = ESP_IPADDR_TYPE_V4;
+  ESP_ERROR_CHECK(esp_netif_set_dns_info(eppp_netif, ESP_NETIF_DNS_MAIN, &dns));
+  ESP_LOGI(TAG, "DNS:     " IPSTR, IP2STR(&dns.ip.u_addr.ip4));
+
+  vTaskDelay(1000);
 }
