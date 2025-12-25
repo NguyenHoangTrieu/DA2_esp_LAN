@@ -9,6 +9,7 @@
  * - Transmission retry with ACK verification
  */
 #include "mcu_wan_handler.h"
+#include "SDCard_comm.h"
 #include "can_driver.h"
 #include "can_handler.h"
 #include "esp_log.h"
@@ -20,10 +21,10 @@
 #include "lora_e32_comm.h"
 #include "lora_tdma_connect.h"
 #include "lora_tdma_handler.h"
+#include "rs485_handler.h"
+#include "stack_handler.h"
 #include "wan_comm.h"
 #include "zigbee_nostack_connect.h"
-#include "stack_handler.h"
-#include "rs485_handler.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -75,9 +76,6 @@ static bool g_handler_running = false;
 static internet_status_t g_internet_status = INTERNET_STATUS_OFFLINE;
 static rtc_cache_t g_rtc_cache = {{0}, false};
 
-// SD Card backup management
-static uint32_t g_sd_card_file_count = 0;
-
 // Config callback
 static void (*g_config_callback)(const uint8_t *, uint16_t, bool) = NULL;
 
@@ -89,7 +87,6 @@ static esp_err_t send_data_to_wan(const uint8_t *data, uint16_t length,
                                   ack_type_t *ack_out);
 static esp_err_t save_to_sd_card(const uint8_t *data, uint16_t length);
 static esp_err_t read_oldest_from_sd_card(uint8_t *buffer, uint16_t *length);
-static bool sd_card_has_data(void);
 static void delete_oldest_from_sd_card(void);
 static void build_data_packet(const uplink_item_t *item, uint8_t *packet,
                               uint16_t *packet_len);
@@ -210,15 +207,13 @@ static void send_lan_config_response(void) {
   }
 
   // stack handlers configuration
-  offset +=
-      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
-               "stack_1_type=%s|",
-               stack_handler_type_to_string(g_stack_1_type));
+  offset += snprintf((char *)&config_packet[offset],
+                     sizeof(config_packet) - offset, "stack_1_type=%s|",
+                     stack_handler_type_to_string(g_stack_1_type));
 
-  offset +=
-      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
-               "stack_2_type=%s|",
-               stack_handler_type_to_string(g_stack_2_type));
+  offset += snprintf((char *)&config_packet[offset],
+                     sizeof(config_packet) - offset, "stack_2_type=%s|",
+                     stack_handler_type_to_string(g_stack_2_type));
 
   // ==================== LORA TDMA CONFIG ====================
   const char *lora_role_str =
@@ -314,6 +309,11 @@ esp_err_t mcu_wan_handler_start(void) {
   }
 
   ESP_LOGI(TAG, "Starting MCU WAN Handler (SPI Master - LAN Side)");
+  // Initalize SD card for data backup
+  sd_card_config_t sd_config = SD_CARD_CONFIG_DEFAULT();
+  if (sd_card_init(&sd_config) != ESP_OK) {
+    ESP_LOGW(TAG, "Failed to initialize SD card, continuing without backup");
+  }
 
   // Initialize WAN communication (SPI Master)
   wan_comm_config_t wan_config = {.gpio_sck = 12,
@@ -835,24 +835,12 @@ static handler_id_t string_to_handler_id(const uint8_t *type_str) {
 
 // ===== SD Card Stub Functions (TODO: Implement with actual driver) =====
 static esp_err_t save_to_sd_card(const uint8_t *data, uint16_t length) {
-  ESP_LOGI(TAG, "SD Card: Saving %u bytes (file_%lu)", length,
-           g_sd_card_file_count);
-  g_sd_card_file_count++;
-  // TODO: Implement actual SD card write
-  return ESP_OK;
+  return sd_card_save(data, length);
 }
 
 static esp_err_t read_oldest_from_sd_card(uint8_t *buffer, uint16_t *length) {
-  // TODO: Implement actual SD card read
-  *length = 0;
-  return ESP_ERR_NOT_FOUND;
+  return sd_card_read_oldest(buffer, length,
+                             MAX_PAYLOAD_SIZE + DATA_PACKET_HEADER_SIZE + 20);
 }
 
-static bool sd_card_has_data(void) { return (g_sd_card_file_count > 0); }
-
-static void delete_oldest_from_sd_card(void) {
-  if (g_sd_card_file_count > 0) {
-    g_sd_card_file_count--;
-  }
-  ESP_LOGI(TAG, "SD Card: Deleted oldest file");
-}
+static void delete_oldest_from_sd_card(void) { sd_card_delete_oldest(); }

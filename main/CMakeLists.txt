@@ -15,6 +15,7 @@ idf_component_register(SRCS "DA2_esp_LAN.c"
                             "../BSP/CAN_Communication/src/can_driver.c"
                             "../BSP/stack_handler/src/stack_handler.c"
                             "../BSP/RS485_Communication/src/rs485_comm.c"
+                            "../BSP/SDCard_Communication/src/SDCard_comm.c"
                             ${I2C_DEVICES}
                             "../Middleware/LoRa_Handler/src/lora_tdma_handler.c"
                             "../Middleware/Zigbee_Handler/src/zigbee_nostack_handler.c"
@@ -38,6 +39,8 @@ idf_component_register(SRCS "DA2_esp_LAN.c"
                                 esp_https_ota
                                 esp_netif
                                 esp_psram
+                                fatfs
+                                esp_driver_sdmmc
                     INCLUDE_DIRS "."
                                 "../Application/FOTA_LAN/include"
                                 "../Application/MCU_WAN_Handler/include"
@@ -53,6 +56,7 @@ idf_component_register(SRCS "DA2_esp_LAN.c"
                                 "../BSP/i2c_dev_support/include"
                                 "../BSP/stack_handler/include"
                                 "../BSP/RS485_Communication/include"
+                                "../BSP/SDCard_Communication/include"
                                 "../Middleware/LoRa_Handler/include"
                                 "../Middleware/Zigbee_Handler/include"
                                 "../rbg_led_ws_handler"
