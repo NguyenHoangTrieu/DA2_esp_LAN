@@ -20,18 +20,18 @@ extern "C" {
 /* ===== Hardware Configuration - Dual Stack Support ===== */
 
 // Stack 1 configuration
-#define RS485_UART_PORT_STACK_1     1
+#define RS485_UART_PORT_STACK_1     2
 #define RS485_UART_TX_PIN_STACK_1   17
 #define RS485_UART_RX_PIN_STACK_1   18
-#define RS485_DE_GPIO_STACK_1       STACK_GPIO_PIN_1
-#define RS485_RE_GPIO_STACK_1       STACK_GPIO_PIN_2
+#define RS485_DE_GPIO_STACK_1       STACK_GPIO_PIN_2
+#define RS485_RE_GPIO_STACK_1       STACK_GPIO_PIN_1
 
 // Stack 2 configuration
-#define RS485_UART_PORT_STACK_2     2
+#define RS485_UART_PORT_STACK_2     1
 #define RS485_UART_TX_PIN_STACK_2   15
 #define RS485_UART_RX_PIN_STACK_2   16
-#define RS485_DE_GPIO_STACK_2       STACK_GPIO_PIN_1
-#define RS485_RE_GPIO_STACK_2       STACK_GPIO_PIN_2
+#define RS485_DE_GPIO_STACK_2       STACK_GPIO_PIN_2
+#define RS485_RE_GPIO_STACK_2       STACK_GPIO_PIN_1
 
 /* ===== Default Configuration ===== */
 #define RS485_DEFAULT_BAUD_RATE     9600

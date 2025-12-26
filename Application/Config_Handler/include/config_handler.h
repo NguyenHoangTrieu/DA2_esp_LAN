@@ -27,6 +27,7 @@ typedef enum {
   CONFIG_UPDATE_CAN = 2,       // "CFCB" or "CFCM" - CAN config command
   CONFIG_UPDATE_SCAN = 3,      // "CFSC" - Config query command1
   CONFIG_UPDATE_STACK = 4,    // "CFST" - Stack config command
+  CONFIG_UPDATE_RS485 = 5, // "CFRS" - RS485 config command
   CONFIG_TYPE_UNKNOWN = 0xFF
 } config_type_t;
 
@@ -73,24 +74,29 @@ config_type_t config_parse_type(const char *cmd, uint16_t len);
 /**
  * @brief Save CAN configuration to NVS
  */
-esp_err_t save_can_config_to_nvs(void);
+esp_err_t config_save_can_config_to_nvs(void);
 
 /**
  * @brief Save LoRa TDMA configuration (g_lora_handler_cfg and crypto key) to
  * NVS
  */
-esp_err_t save_lora_handler_config_to_nvs(void);
+esp_err_t config_save_lora_handler_config_to_nvs(void);
 
 /**
  * @brief Save LoRa E32 radio configuration (g_lora_e32_params and baud rate) to
  * NVS
  */
-esp_err_t save_lora_e32_config_to_nvs(void);
+esp_err_t config_save_lora_e32_config_to_nvs(void);
 
 /**
  * @brief Save stack type to NVS
  */
 esp_err_t config_save_stack_type(uint8_t stack_id, stack_comm_type_t type);
+
+/**
+ * @brief Save RS485 baud rate to NVS
+ */
+esp_err_t config_save_rs485_baud(uint32_t baud_rate);
 
 /**
  * @brief Erase all gateway configurations from NVS

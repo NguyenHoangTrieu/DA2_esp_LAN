@@ -22,12 +22,12 @@ extern "C" {
 /* ===== Hardware Configuration - Dual Stack Support ===== */
 
 // Stack 1 configuration
-#define ZIGBEE_CC_UART_PORT_STACK_1     1
+#define ZIGBEE_CC_UART_PORT_STACK_1     2
 #define ZIGBEE_CC_UART_TX_PIN_STACK_1   17
 #define ZIGBEE_CC_UART_RX_PIN_STACK_1   18
 
 // Stack 2 configuration
-#define ZIGBEE_CC_UART_PORT_STACK_2     2
+#define ZIGBEE_CC_UART_PORT_STACK_2     1
 #define ZIGBEE_CC_UART_TX_PIN_STACK_2   15
 #define ZIGBEE_CC_UART_RX_PIN_STACK_2   16
 

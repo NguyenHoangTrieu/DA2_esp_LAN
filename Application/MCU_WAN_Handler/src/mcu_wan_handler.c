@@ -279,6 +279,11 @@ static void send_lan_config_response(void) {
       snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
                "lora_e32_option=0x%02X|", g_lora_e32_params.option);
 
+  // ==================== RS485 CONFIG ====================
+  offset +=
+      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
+               "rs485_baud_rate=%lu|", (unsigned long)g_rs485_baud_rate);
+
   // Fill in the length (excluding prefix and length field itself)
   uint16_t data_length = offset - 4;
   config_packet[length_offset] = (data_length >> 8) & 0xFF;
@@ -500,7 +505,7 @@ static void mcu_wan_handler_task(void *pvParameters) {
   uplink_item_t uplink_item;
   uint8_t rx_buffer[256];
   stack_handler_start(g_stack_1_type);
-  stack_handler_start(STACK_COMM_TYPE_NONE);
+  stack_handler_start(g_stack_2_type);
 
   while (g_handler_running) {
     TickType_t now = xTaskGetTickCount();

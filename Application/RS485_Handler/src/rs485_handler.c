@@ -23,6 +23,7 @@ static const char *TAG = "RS485_HANDLER";
 #define RS485_RX_POLL_INTERVAL_MS 20
 #define RS485_DOWNLINK_QUEUE_SIZE 10
 #define RS485_STATS_LOG_INTERVAL_MS 10000 // 10 seconds
+uint32_t g_rs485_baud_rate = RS485_DEFAULT_BAUD_RATE;
 
 /* ===== Statistics ===== */
 typedef struct {
@@ -64,7 +65,7 @@ esp_err_t rs485_handler_start(void) {
 
   // Initialize RS485 communication driver
   rs485_comm_config_t config = {
-      .baud_rate = RS485_DEFAULT_BAUD_RATE,
+      .baud_rate = g_rs485_baud_rate,
       .rx_buffer_size = RS485_DEFAULT_RX_BUF_SIZE,
       .tx_buffer_size = RS485_DEFAULT_TX_BUF_SIZE,
   };

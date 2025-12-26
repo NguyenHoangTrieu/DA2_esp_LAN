@@ -11,6 +11,7 @@
 #include "lora_e32_comm.h"
 #include "lora_tdma_handler.h"
 #include "mcu_wan_handler.h"
+#include "rs485_handler.h"
 #include "stack_handler.h"
 #include <string.h>
 
@@ -47,6 +48,8 @@ config_type_t config_parse_type(const char *cmd, uint16_t len) {
     return CONFIG_UPDATE_CAN;
   } else if (cmd[2] == 'S' && cmd[3] == 'T') {
     return CONFIG_UPDATE_STACK;
+  } else if (cmd[2] == 'R' && cmd[3] == 'S'){
+    return CONFIG_UPDATE_RS485;
   }
   return CONFIG_TYPE_UNKNOWN;
 }
@@ -133,7 +136,7 @@ static esp_err_t config_parse_fota(const char *data, uint16_t len,
  *          [5] option (options)
  *      Action:
  *        - Copy into g_lora_e32_params
- *        - Save to NVS via save_lora_e32_config_to_nvs()
+ *        - Save to NVS via config_save_lora_e32_config_to_nvs()
  *        - If LoRa E32 driver is initialized (g_lora_e32_handle != NULL),
  *          push params to radio via lora_e32_comm_write_params().
  *
@@ -152,7 +155,7 @@ static esp_err_t config_parse_fota(const char *data, uint16_t len,
  *          [10] slot_duration_ms byte0 (LSB)
  *      Action:
  *        - Update g_lora_handler_cfg
- *        - Save to NVS via save_lora_handler_config_to_nvs()
+ *        - Save to NVS via config_save_lora_handler_config_to_nvs()
  *
  *   3) CFLR:CRYPT:<1 + N bytes>
  *      - Crypto key frame:
@@ -160,7 +163,7 @@ static esp_err_t config_parse_fota(const char *data, uint16_t len,
  *          [1..N] key bytes
  *      Action:
  *        - Update g_lora_handler_crypto_key_len and g_lora_handler_crypto_key[]
- *        - Save to NVS via save_lora_handler_config_to_nvs()
+ *        - Save to NVS via config_save_lora_handler_config_to_nvs()
  *
  * All frames are expected to be passed *without* the outer [CF][length(2)]
  * WAN header. The buffer here must start at 'C' of "CFLR:...".
@@ -200,7 +203,7 @@ esp_err_t config_parse_lora(const uint8_t *data, uint16_t len) {
              params.option);
 
     // Persist to NVS
-    esp_err_t err = save_lora_e32_config_to_nvs();
+    esp_err_t err = config_save_lora_e32_config_to_nvs();
     if (err != ESP_OK) {
       ESP_LOGE(TAG, "Failed to save E32 config to NVS: %s",
                esp_err_to_name(err));
@@ -253,7 +256,7 @@ esp_err_t config_parse_lora(const uint8_t *data, uint16_t len) {
              (unsigned)role, node_id, gateway_id, num_slots, my_slot,
              (unsigned long)slot_ms);
 
-    esp_err_t err = save_lora_handler_config_to_nvs();
+    esp_err_t err = config_save_lora_handler_config_to_nvs();
     if (err != ESP_OK) {
       ESP_LOGE(TAG, "Failed to save LoRa TDMA config to NVS: %s",
                esp_err_to_name(err));
@@ -289,7 +292,7 @@ esp_err_t config_parse_lora(const uint8_t *data, uint16_t len) {
 
     ESP_LOGI(TAG, "LoRa crypto key updated, len=%u", key_len);
 
-    esp_err_t err = save_lora_handler_config_to_nvs();
+    esp_err_t err = config_save_lora_handler_config_to_nvs();
     if (err != ESP_OK) {
       ESP_LOGE(TAG, "Failed to save LoRa crypto config to NVS: %s",
                esp_err_to_name(err));
@@ -343,7 +346,7 @@ static esp_err_t config_parse_can_whitelist(const uint8_t *data, uint16_t len) {
     g_can_whitelist_count = 0;
     ESP_LOGI(TAG, "CAN whitelist cleared");
 
-    esp_err_t err = save_can_config_to_nvs();
+    esp_err_t err = config_save_can_config_to_nvs();
     if (err != ESP_OK) {
       ESP_LOGE(TAG, "Failed to save CAN whitelist: %s", esp_err_to_name(err));
       return err;
@@ -382,7 +385,7 @@ static esp_err_t config_parse_can_whitelist(const uint8_t *data, uint16_t len) {
       ESP_LOGI(TAG, "CAN whitelist: added ID 0x%03X (count: %d)", can_id,
                g_can_whitelist_count);
 
-      esp_err_t err = save_can_config_to_nvs();
+      esp_err_t err = config_save_can_config_to_nvs();
       if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to save CAN whitelist: %s", esp_err_to_name(err));
         return err;
@@ -430,7 +433,7 @@ static esp_err_t config_parse_can_whitelist(const uint8_t *data, uint16_t len) {
     }
 
     if (found) {
-      esp_err_t err = save_can_config_to_nvs();
+      esp_err_t err = config_save_can_config_to_nvs();
       if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to save CAN whitelist: %s", esp_err_to_name(err));
         return err;
@@ -493,7 +496,7 @@ static esp_err_t config_parse_can_whitelist(const uint8_t *data, uint16_t len) {
 
     ESP_LOGI(TAG, "CAN whitelist SET: total %d IDs", g_can_whitelist_count);
 
-    esp_err_t err = save_can_config_to_nvs();
+    esp_err_t err = config_save_can_config_to_nvs();
     if (err != ESP_OK) {
       ESP_LOGE(TAG, "Failed to save CAN whitelist: %s", esp_err_to_name(err));
       return err;
@@ -516,7 +519,7 @@ static esp_err_t config_parse_can_whitelist(const uint8_t *data, uint16_t len) {
  *    - Valid rates: 125000, 250000, 500000, 800000, 1000000
  *    Action:
  *    - Update g_can_config.baud_rate
- *    - Save to NVS via save_can_config_to_nvs()
+ *    - Save to NVS via config_save_can_config_to_nvs()
  *    - Reinitialize CAN driver if running
  *
  * 2) CFCM:mode
@@ -525,7 +528,7 @@ static esp_err_t config_parse_can_whitelist(const uint8_t *data, uint16_t len) {
  *    - Valid modes: NORMAL, LOOPBACK, NO_ACK
  *    Action:
  *    - Update g_can_config.operating_mode
- *    - Save to NVS via save_can_config_to_nvs()
+ *    - Save to NVS via config_save_can_config_to_nvs()
  *    - Reinitialize CAN driver if running
  */
 static esp_err_t config_parse_can(const uint8_t *data, uint16_t len) {
@@ -556,7 +559,7 @@ static esp_err_t config_parse_can(const uint8_t *data, uint16_t len) {
       ESP_LOGI(TAG, "CAN baud rate updated: %lu", (unsigned long)baud_rate);
 
       // Save to NVS
-      esp_err_t err = save_can_config_to_nvs();
+      esp_err_t err = config_save_can_config_to_nvs();
       if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to save CAN config to NVS: %s",
                  esp_err_to_name(err));
@@ -593,7 +596,7 @@ static esp_err_t config_parse_can(const uint8_t *data, uint16_t len) {
       ESP_LOGI(TAG, "CAN mode updated: %d", new_mode);
 
       // Save to NVS
-      esp_err_t err = save_can_config_to_nvs();
+      esp_err_t err = config_save_can_config_to_nvs();
       if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to save CAN config to NVS: %s",
                  esp_err_to_name(err));
@@ -689,6 +692,66 @@ static esp_err_t config_parse_stack_type(const uint8_t *data, uint16_t len) {
   }
 
   return ESP_OK;
+}
+
+/**
+ * @brief Parse RS485 baud rate configuration
+ *
+ * Format: CFRS:BR:9600 or CFRS:BR:115200
+ *
+ * Valid baud rates: 9600, 19200, 38400, 57600, 115200
+ *
+ * @param data Command data buffer
+ * @param len Length of data
+ * @return esp_err_t ESP_OK on success
+ */
+static esp_err_t config_parse_rs485_baud(const uint8_t *data, uint16_t len) {
+  if (data == NULL || len < 8) { // Minimum: "CFRS:BR:"
+    ESP_LOGE(TAG, "RS485 baud: invalid buffer");
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  // Check CFRS:BR: prefix
+  if (memcmp(data, "CFRS:BR:", 8) != 0) {
+    ESP_LOGE(TAG, "RS485 baud: missing CFRS:BR: prefix");
+    return ESP_FAIL;
+  }
+
+  // Parse baud rate value
+  const char *ptr = (const char *)(data + 8);
+  int value_len = len - 8;
+
+  if (value_len > 0 && value_len < 16) {
+    char baud_str[16] = {0};
+    memcpy(baud_str, ptr, value_len);
+    uint32_t baud_rate = atoi(baud_str);
+
+    // Validate RS485 baud rates (max 115200)
+    if (baud_rate != 9600 && baud_rate != 19200 && baud_rate != 38400 &&
+        baud_rate != 57600 && baud_rate != 115200) {
+      ESP_LOGE(TAG,
+               "RS485: Invalid baud rate %lu (valid: 9600, 19200, 38400, "
+               "57600, 115200)",
+               (unsigned long)baud_rate);
+      return ESP_FAIL;
+    }
+
+    g_rs485_baud_rate = baud_rate;
+    ESP_LOGI(TAG, "RS485 baud rate updated: %lu", (unsigned long)baud_rate);
+
+    // Save to NVS
+    esp_err_t err = config_save_rs485_baud(baud_rate);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "Failed to save RS485 baud to NVS: %s",
+               esp_err_to_name(err));
+      return err;
+    }
+
+    return ESP_OK;
+  }
+
+  ESP_LOGE(TAG, "RS485 baud: invalid value format");
+  return ESP_FAIL;
 }
 
 /**
@@ -809,6 +872,15 @@ static void config_handler_task(void *arg) {
           ESP_LOGI(TAG, "Stack type updated from MCU WAN");
         } else {
           ESP_LOGE(TAG, "Failed to parse stack type command");
+        }
+        break;
+      }
+      case CONFIG_UPDATE_RS485: {
+        if (config_parse_rs485_baud((const uint8_t *)cmd.raw_data,
+                                    cmd.data_len) == ESP_OK) {
+          ESP_LOGI(TAG, "RS485 baud rate updated from MCU WAN");
+        } else {
+          ESP_LOGE(TAG, "Failed to parse RS485 baud rate command");
         }
         break;
       }

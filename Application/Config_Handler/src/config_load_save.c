@@ -11,6 +11,7 @@
 #include "lora_tdma_handler.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "rs485_handler.h"
 #include <string.h>
 
 static const char *TAG = "CONFIG_NVS";
@@ -28,6 +29,7 @@ static const char *TAG = "CONFIG_NVS";
 #define NVS_KEY_LORA_E32_BAUD "lora_e32_baud"
 #define NVS_KEY_STACK_1_TYPE "stack1_type"
 #define NVS_KEY_STACK_2_TYPE "stack2_type"
+#define NVS_KEY_RS485_BAUD "rs485_baud"
 
 /* CAN Whitelist Size */
 #define CAN_MAX_WHITELIST_SIZE MAX_WHITELISTED_IDS
@@ -46,7 +48,7 @@ static esp_err_t nvs_open_handle(nvs_handle_t *handle) {
 /**
  * @brief Load CAN configuration from NVS
  */
-static esp_err_t load_can_config_from_nvs(void) {
+static esp_err_t config_loadcan_config_from_nvs(void) {
   nvs_handle_t nvs_handle;
   esp_err_t err;
 
@@ -132,7 +134,7 @@ static esp_err_t load_can_config_from_nvs(void) {
  *  - g_lora_handler_cfg (role, IDs, TDMA params)
  *  - g_lora_handler_crypto_key & g_lora_handler_crypto_key_len
  */
-static esp_err_t load_lora_handler_config_from_nvs(void) {
+static esp_err_t config_load_lora_handler_config_from_nvs(void) {
   nvs_handle_t nvs_handle;
   esp_err_t err;
 
@@ -223,7 +225,7 @@ static esp_err_t load_lora_handler_config_from_nvs(void) {
 /**
  * @brief Save CAN configuration to NVS
  */
-esp_err_t save_can_config_to_nvs(void) {
+esp_err_t config_save_can_config_to_nvs(void) {
   nvs_handle_t nvs_handle;
   esp_err_t err;
 
@@ -299,7 +301,7 @@ esp_err_t save_can_config_to_nvs(void) {
  * Only the global context g_lora_e32_params and g_lora_e32_baud_rate is
  * persisted. Other driver settings are compile-time defaults.
  */
-static esp_err_t load_lora_e32_config_from_nvs(void) {
+static esp_err_t config_loadlora_e32_config_from_nvs(void) {
   nvs_handle_t nvs_handle;
   esp_err_t err;
 
@@ -352,7 +354,7 @@ static esp_err_t load_lora_e32_config_from_nvs(void) {
  * Only the minimal set of runtime-adjustable parameters is stored so that
  * the application can change them at runtime and keep them across reboots.
  */
-static esp_err_t save_lora_e32_config_to_nvs_internal(void) {
+static esp_err_t config_save_lora_e32_config_to_nvs_internal(void) {
   nvs_handle_t nvs_handle;
   esp_err_t err;
 
@@ -396,7 +398,7 @@ static esp_err_t save_lora_e32_config_to_nvs_internal(void) {
 /**
  * @brief Save LoRa TDMA configuration (handler config + crypto key) to NVS
  */
-esp_err_t save_lora_handler_config_to_nvs(void) {
+esp_err_t config_save_lora_handler_config_to_nvs(void) {
   /* Save LoRa TDMA handler configuration */
   nvs_handle_t nvs_handle;
   esp_err_t err;
@@ -481,8 +483,8 @@ esp_err_t save_lora_handler_config_to_nvs(void) {
  * @brief Save only the E32 radio configuration (g_lora_e32_params + baud) to
  * NVS.
  */
-esp_err_t save_lora_e32_config_to_nvs(void) {
-  return save_lora_e32_config_to_nvs_internal();
+esp_err_t config_save_lora_e32_config_to_nvs(void) {
+  return config_save_lora_e32_config_to_nvs_internal();
 }
 
 /**
@@ -560,38 +562,111 @@ esp_err_t config_save_stack_type(uint8_t stack_id, stack_comm_type_t type) {
 }
 
 /**
+ * @brief Load RS485 baud rate from NVS
+ */
+esp_err_t config_load_rs485_baud(uint32_t *baud_rate) {
+  if (baud_rate == NULL) {
+    ESP_LOGE(TAG, "Invalid argument");
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  nvs_handle_t nvs_handle;
+  esp_err_t err;
+
+  ESP_LOGI(TAG, "Loading RS485 baud rate from NVS...");
+
+  err = nvs_open_handle(&nvs_handle);
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  // Read baud rate as uint32_t
+  err = nvs_get_u32(nvs_handle, NVS_KEY_RS485_BAUD, baud_rate);
+  if (err == ESP_OK) {
+    ESP_LOGI(TAG, "RS485 baud rate loaded: %lu", (unsigned long)*baud_rate);
+  } else if (err == ESP_ERR_NVS_NOT_FOUND) {
+    ESP_LOGI(TAG, "RS485 baud rate not found in NVS, using default");
+    err = ESP_OK; // Not an error, use default
+  } else {
+    ESP_LOGE(TAG, "Error reading RS485 baud: %s", esp_err_to_name(err));
+  }
+
+  nvs_close(nvs_handle);
+  return err;
+}
+
+/**
+ * @brief Save RS485 baud rate to NVS
+ */
+esp_err_t config_save_rs485_baud(uint32_t baud_rate) {
+  nvs_handle_t nvs_handle;
+  esp_err_t err;
+
+  ESP_LOGI(TAG, "Saving RS485 baud rate to NVS...");
+
+  err = nvs_open_handle(&nvs_handle);
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  // Write baud rate as uint32_t
+  err = nvs_set_u32(nvs_handle, NVS_KEY_RS485_BAUD, baud_rate);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Error writing RS485 baud: %s", esp_err_to_name(err));
+    nvs_close(nvs_handle);
+    return err;
+  }
+
+  err = nvs_commit(nvs_handle);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Error committing RS485 baud to NVS: %s",
+             esp_err_to_name(err));
+  } else {
+    ESP_LOGI(TAG, "RS485 baud rate saved: %lu", (unsigned long)baud_rate);
+  }
+
+  nvs_close(nvs_handle);
+  return err;
+}
+
+/**
  * @brief Load all configurations from NVS (call at startup)
  */
-static esp_err_t load_all_configs_from_nvs(void) {
+static esp_err_t config_loadall_configs_from_nvs(void) {
   esp_err_t err;
 
   ESP_LOGI(TAG, "Loading all configurations from NVS...");
 
   // Load CAN config
-  err = load_can_config_from_nvs();
+  err = config_loadcan_config_from_nvs();
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "Failed to load CAN config");
   }
 
   // Load LoRa TDMA config
-  err = load_lora_handler_config_from_nvs();
+  err = config_load_lora_handler_config_from_nvs();
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "Failed to load LoRa TDMA config");
   }
 
   // Load E32 radio config (module params + baud)
-  err = load_lora_e32_config_from_nvs();
+  err = config_loadlora_e32_config_from_nvs();
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "Failed to load LoRa TDMA config");
   }
-  
+
   esp_err_t ret1 = config_load_stack_type(0, &g_stack_1_type);
   esp_err_t ret2 = config_load_stack_type(1, &g_stack_2_type);
 
   if (ret1 == ESP_OK && ret2 == ESP_OK) {
     ESP_LOGI(TAG, "Stack types loaded: ST1=%d, ST2=%d", g_stack_1_type,
              g_stack_2_type);
-    return ESP_OK;
+  }
+
+  // Load RS485 baud rate
+  err = config_load_rs485_baud(&g_rs485_baud_rate);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Failed to load RS485 baud rate");
   }
 
   ESP_LOGI(TAG, "Configuration loading complete");
@@ -671,21 +746,23 @@ esp_err_t config_init(void) {
     ESP_LOGI(TAG, "First boot detected - saving default configuration");
 
     // Save default CAN config to NVS
-    save_can_config_to_nvs();
+    config_save_can_config_to_nvs();
 
     // Save default LoRa TDMA config to NVS
-    save_lora_handler_config_to_nvs();
-    save_lora_e32_config_to_nvs();
+    config_save_lora_handler_config_to_nvs();
+    config_save_lora_e32_config_to_nvs();
 
     // Save stack config to NVS
     config_save_stack_type(0, g_stack_1_type);
     config_save_stack_type(1, g_stack_2_type);
 
+    config_save_rs485_baud(g_rs485_baud_rate);
+
     mark_initialized();
     ESP_LOGI(TAG, "Default configuration saved");
   } else {
     ESP_LOGI(TAG, "Loading existing configuration");
-    load_all_configs_from_nvs();
+    config_loadall_configs_from_nvs();
   }
 
   return ESP_OK;
