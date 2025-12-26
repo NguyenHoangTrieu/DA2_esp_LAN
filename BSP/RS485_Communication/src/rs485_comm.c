@@ -100,7 +100,7 @@ static esp_err_t rs485_set_mode_internal(rs485_comm_handle_t handle,
   ret = stack_handler_gpio_write(stack_id, get_rs485_de_gpio(), level);
   if (ret != ESP_OK) return ret;
 
-  // Set RE (Cùng mức logic với DE)
+  // Set RE
   ret = stack_handler_gpio_write(stack_id, get_rs485_re_gpio(), level);
   
   if (ret == ESP_OK) {

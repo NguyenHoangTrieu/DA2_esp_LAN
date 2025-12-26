@@ -94,6 +94,7 @@ static void dispatch_downlink_to_handler(handler_id_t target_id,
                                          const uint8_t *data, uint16_t length);
 static const char *handler_id_to_string(handler_id_t id);
 static handler_id_t string_to_handler_id(const uint8_t *type_str);
+static void send_ack_to_wan(ack_type_t ack_type);
 
 // External downlink callbacks
 extern bool can_handler_enqueue_downlink(uint8_t *data, uint16_t len);
@@ -519,7 +520,7 @@ static void mcu_wan_handler_task(void *pvParameters) {
         g_data_ready_flag = false;
         uint8_t dq_cmd[2] = {'D', 'Q'};
         wan_comm_send_command(g_wan_handle, dq_cmd, sizeof(dq_cmd));
-        vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelay(pdMS_TO_TICKS(600));
         // Poll data immediately
         wan_comm_status_t comm_status =
             wan_comm_request_data(g_wan_handle, rx_buffer, sizeof(rx_buffer));
@@ -536,9 +537,9 @@ static void mcu_wan_handler_task(void *pvParameters) {
           uint16_t payload_len = (rx_buffer[5] << 8) | rx_buffer[6];
           handler_id_t target_id = string_to_handler_id(handler_type);
 
-          ESP_LOGI(TAG, "Downlink received: handler=%s, len=%u", handler_type,
-                   payload_len);
-
+          ESP_LOGI(TAG, "Downlink received: handler=%s, len=%u, target_id=%d", handler_type,
+                   payload_len, target_id);
+          send_ack_to_wan(ACK_TYPE_RECEIVED_OK);
           // Dispatch to appropriate handler
           dispatch_downlink_to_handler(
               target_id, &rx_buffer[DATA_PACKET_HEADER_SIZE], payload_len);
@@ -662,6 +663,7 @@ static esp_err_t perform_handshake(void) {
 
 // ===== RTC Request Implementation =====
 static esp_err_t request_rtc_and_status(void) {
+  ESP_LOGI(TAG, "Requesting RTC and Internet status from WAN MCU");
   // Send RTC request: prefix "RT"
   uint8_t rtc_request[2] = {'R', 'T'};
 
@@ -800,6 +802,9 @@ static void dispatch_downlink_to_handler(handler_id_t target_id,
   case HANDLER_ZIGBEE:
     success = zigbee_nostack_connect_enqueue_downlink((uint8_t *)data, length);
     break;
+  case HANDLER_RS485:
+    success = rs485_handler_enqueue_downlink((uint8_t *)data, length);
+    break;
   default:
     ESP_LOGW(TAG, "Unknown target handler: %d", target_id);
     return;
@@ -835,7 +840,27 @@ static handler_id_t string_to_handler_id(const uint8_t *type_str) {
     return HANDLER_LORA;
   if (memcmp(type_str, "ZIG", 3) == 0)
     return HANDLER_ZIGBEE;
-  return HANDLER_CAN; // Default
+  if (memcmp(type_str, "RS4", 3) == 0)
+    return HANDLER_RS485;
+  return HANDLER_UNKNOWN; // Default
+}
+
+/**
+ * @brief Send ACK back to WAN MCU after receiving downlink data
+ * @param ack_type Type of ACK to send
+ */
+static void send_ack_to_wan(ack_type_t ack_type) {
+    uint8_t ack_packet[2];
+    ack_packet[0] = FRAME_TYPE_ACK;         // 0xF0 (ACK frame type)
+    ack_packet[1] = ack_type;               // ACK_TYPE_RECEIVED_OK = 0x11
+    
+    wan_comm_status_t status = wan_comm_send_command(g_wan_handle, ack_packet, sizeof(ack_packet));
+    
+    if (status == WAN_COMM_OK) {
+        ESP_LOGI(TAG, "✓ ACK sent to WAN MCU: type=0x%02X", ack_type);
+    } else {
+        ESP_LOGE(TAG, "✗ Failed to send ACK to WAN MCU");
+    }
 }
 
 // ===== SD Card Stub Functions (TODO: Implement with actual driver) =====

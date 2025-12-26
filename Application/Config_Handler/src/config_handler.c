@@ -13,6 +13,7 @@
 #include "mcu_wan_handler.h"
 #include "rs485_handler.h"
 #include "stack_handler.h"
+#include "led_strip.h"
 #include <string.h>
 
 static const char *TAG = "config_handler";
@@ -825,6 +826,7 @@ static void config_handler_task(void *arg) {
             ESP_OK) {
           ESP_LOGI(TAG, "Starting FOTA process...");
           // Start FOTA handler task
+          led_show_blue();
           can_handler_stop();
           lora_tdma_connect_stop();
           zigbee_nostack_connect_stop();

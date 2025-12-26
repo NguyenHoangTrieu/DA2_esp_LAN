@@ -162,7 +162,7 @@ bool rs485_handler_enqueue_downlink(uint8_t *data, uint16_t len) {
   }
 
   g_rs485_ctx.stats.downlink_enqueued++;
-  ESP_LOGD(TAG, "Enqueued downlink: %u bytes", len);
+  ESP_LOGI(TAG, "Enqueued downlink: %u bytes", len);
   return true;
 }
 
@@ -185,7 +185,7 @@ static void rs485_handler_task(void *arg) {
 
       if (ret == ESP_OK) {
         g_rs485_ctx.stats.tx_ok++;
-        ESP_LOGD(TAG, "Sent downlink: %u bytes", downlink_msg.len);
+        ESP_LOGI(TAG, "Sent downlink: %u bytes", downlink_msg.len);
       } else {
         g_rs485_ctx.stats.tx_error++;
         ESP_LOGE(TAG, "Failed to send downlink");
@@ -213,12 +213,12 @@ static void rs485_handler_task(void *arg) {
 
       if (ret == ESP_OK && actual_read > 0) {
         g_rs485_ctx.stats.rx_ok++;
-        ESP_LOGD(TAG, "Received RS485 data: %u bytes", actual_read);
+        ESP_LOGI(TAG, "Received RS485 data: %u bytes", actual_read);
 
         // Forward to WAN uplink
         if (mcu_wan_enqueue_uplink(HANDLER_RS485, rx_buffer, actual_read)) {
           g_rs485_ctx.stats.uplink_forwarded++;
-          ESP_LOGD(TAG, "Forwarded to WAN uplink: %u bytes", actual_read);
+          ESP_LOGI(TAG, "Forwarded to WAN uplink: %u bytes", actual_read);
         } else {
           g_rs485_ctx.stats.uplink_queue_full++;
           ESP_LOGW(TAG, "WAN uplink queue full");

@@ -44,6 +44,7 @@ typedef enum {
     HANDLER_LORA  = 0x02,
     HANDLER_ZIGBEE = 0x03,
     HANDLER_RS485 = 0x04,
+    HANDLER_UNKNOWN = 0xFF,
 } handler_id_t;
 
 // ===== Data Structures per Specification =====
