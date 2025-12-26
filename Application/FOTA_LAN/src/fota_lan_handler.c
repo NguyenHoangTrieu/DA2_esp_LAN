@@ -322,6 +322,7 @@ void advanced_ota_task(void *pvParameter) {
     ESP_LOGE(TAG, "ESP HTTPS OTA Begin failed");
     fota_lan_handler_task_stop();
     vTaskDelete(NULL);
+    esp_restart();
   }
 
   esp_app_desc_t app_desc = {};
@@ -378,6 +379,7 @@ void advanced_ota_task(void *pvParameter) {
       ESP_LOGE(TAG, "ESP_HTTPS_OTA upgrade failed 0x%x", ota_finish_err);
       fota_lan_handler_task_stop();
       vTaskDelete(NULL);
+      esp_restart();
     }
   }
 
@@ -386,6 +388,7 @@ ota_end:
   ESP_LOGE(TAG, "ESP_HTTPS_OTA upgrade failed");
   fota_lan_handler_task_stop();
   vTaskDelete(NULL);
+  esp_restart();
 }
 
 void fota_lan_handler_task_start(void) {
