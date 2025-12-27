@@ -599,7 +599,6 @@ static void mcu_wan_handler_task(void *pvParameters) {
         ESP_LOGW(TAG, "Internet offline, saving to SD card");
         save_to_sd_card(packet, packet_len);
       }
-      continue;
     }
 
     // ===== Check C: RTC Periodic Timer (Every 1 second) =====
