@@ -118,7 +118,7 @@ esp_err_t sd_card_init(const sd_card_config_t *config) {
 
   ESP_LOGI(TAG, "SD card initialized successfully. Files in queue: %lu",
            sd_card_get_file_count());
-  
+
   // Test write capability
   ESP_LOGI(TAG, "Testing write capability...");
   FILE *test = fopen(SD_DATA_DIR "/test_write.tmp", "wb");
@@ -262,6 +262,8 @@ file_opened_ok:
   // Write actual data
   written = fwrite(data, 1, length, f);
   fclose(f);
+  fflush(f);  // Force write to disk
+  fsync(fileno(f));  // Sync to storage
 
   if (written != length) {
     ESP_LOGE(TAG, "Failed to write complete data (%zu/%u bytes)", written,
@@ -316,8 +318,16 @@ esp_err_t sd_card_read_oldest(uint8_t *buffer, uint16_t *length,
   uint8_t len_header[2];
   size_t read_bytes = fread(len_header, 1, 2, f);
   if (read_bytes != 2) {
-    ESP_LOGE(TAG, "Failed to read length header");
+    ESP_LOGE(TAG, "Failed to read length header from %s", filepath);
     fclose(f);
+
+    // AUTO-DELETE CORRUPT FILE
+    ESP_LOGW(TAG, "Deleting corrupt file: %s", filepath);
+    if (unlink(filepath) == 0) {
+      ESP_LOGI(TAG, "Corrupt file deleted successfully");
+      scan_and_update_counters();
+    }
+
     *length = 0;
     return ESP_FAIL;
   }
