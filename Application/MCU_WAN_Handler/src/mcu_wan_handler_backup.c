@@ -1,21 +1,12 @@
 /**
  * @file mcu_wan_handler.c
- * @brief MCU WAN Handler - LAN Side (SPI Master) - DUAL TASK ARCHITECTURE
+ * @brief MCU WAN Handler - LAN Side (SPI Master)
  *
- * Architecture: 2 separate tasks for clean separation of concerns
- * 
- * TASK 1: DOWNLINK POLL TASK (High Priority - 7)
- *   - Handles GPIO ISR notifications IMMEDIATELY
- *   - When ISR triggers, this task wakes up and processes data from WAN
- *   - NO other operations - dedicated solely to polling downlink data
- *   - Uses binary semaphore for exclusive SPI access during poll
- *
- * TASK 2: UPLINK TASK (Lower Priority - 5)  
- *   - Handles uplink queue (data from LORA, RS485, CAN, Zigbee)
- *   - Handles RTC/Internet status requests
- *   - Handles SD card backup operations
- *   - Must acquire SPI semaphore before any operation
- *   - Yields to downlink task when semaphore not available
+ * Implements Diagram 1: System Control & Data Handling Logic (LAN Side)
+ * - Handshake with WAN MCU every 1 second until ACK received
+ * - Periodic RTC/Internet status requests
+ * - Data queue management with SD card backup
+ * - Transmission retry with ACK verification
  */
 #include "mcu_wan_handler.h"
 #include "SDCard_comm.h"
@@ -38,17 +29,14 @@
 #include <string.h>
 
 static const char *TAG = "MCU_WAN";
-static const char *TAG_DL = "MCU_WAN_DL";  // Downlink task tag
-static const char *TAG_UL = "MCU_WAN_UL";  // Uplink task tag
 
 // ===== Configuration =====
-#define DOWNLINK_TASK_STACK_SIZE 4096
-#define DOWNLINK_TASK_PRIORITY   7        // HIGH priority - responds to GPIO immediately
-#define UPLINK_TASK_STACK_SIZE   4096
-#define UPLINK_TASK_PRIORITY     5        // Lower priority than downlink
+#define MCU_WAN_TASK_STACK_SIZE 4096
+#define MCU_WAN_TASK_PRIORITY 5
 #define UPLINK_QUEUE_SIZE 50
 #define HANDSHAKE_INTERVAL_MS 1000
 #define RTC_REQUEST_INTERVAL_MS 1000
+#define DATA_POLLING_INTERVAL_MS 100
 #define ACK_TIMEOUT_MS 1000
 #define MAX_RETRY_COUNT 3
 #define MAX_PAYLOAD_SIZE 512
@@ -79,13 +67,10 @@ typedef struct {
 
 // ===== Global Variables =====
 static wan_comm_handle_t g_wan_handle = NULL;
-static TaskHandle_t g_downlink_task_handle = NULL;   // High priority - GPIO handler
-static TaskHandle_t g_uplink_task_handle = NULL;     // Lower priority - uplink/RTC/SD
+static TaskHandle_t g_task_handle = NULL;
 static QueueHandle_t g_uplink_queue = NULL;
 static SemaphoreHandle_t g_rtc_mutex = NULL;
-static SemaphoreHandle_t g_spi_mutex = NULL;         // SPI bus exclusive access
 static bool g_handler_running = false;
-static volatile bool g_handshake_done = false;       // Shared flag for handshake completion
 
 // RTC and Internet status
 static internet_status_t g_internet_status = INTERNET_STATUS_OFFLINE;
@@ -95,8 +80,7 @@ static rtc_cache_t g_rtc_cache = {{0}, false};
 static void (*g_config_callback)(const uint8_t *, uint16_t, bool) = NULL;
 
 // ===== Forward Declarations =====
-static void downlink_poll_task(void *pvParameters);
-static void uplink_handler_task(void *pvParameters);
+static void mcu_wan_handler_task(void *pvParameters);
 static esp_err_t perform_handshake(void);
 static esp_err_t request_rtc_and_status(void);
 static esp_err_t send_data_to_wan(const uint8_t *data, uint16_t length,
@@ -122,12 +106,14 @@ extern bool zigbee_nostack_connect_enqueue_downlink(uint8_t *data,
 #define GPIO_DATA_READY_PIN 14
 #define NOTIFY_DATA_READY (1 << 0)
 
-// GPIO ISR Handler - Notifies DOWNLINK task directly
+static volatile bool g_data_ready_flag = false;
+
+// GPIO ISR Handler
 static void IRAM_ATTR gpio_data_ready_isr(void *arg) {
+  g_data_ready_flag = true;
   BaseType_t xTaskWoken = pdFALSE;
-  if (g_downlink_task_handle) {
-    // Notify downlink task - it will wake up immediately due to high priority
-    xTaskNotifyFromISR(g_downlink_task_handle, NOTIFY_DATA_READY, eSetBits, &xTaskWoken);
+  if (g_task_handle) {
+    xTaskNotifyFromISR(g_task_handle, NOTIFY_DATA_READY, eSetBits, &xTaskWoken);
   }
   if (xTaskWoken == pdTRUE) {
     portYIELD_FROM_ISR();
@@ -169,7 +155,6 @@ static esp_err_t setup_data_ready_gpio(void) {
 
 /**
  * @brief Build and send LAN configuration response to WAN MCU
- * NOTE: Caller must hold g_spi_mutex
  */
 static void send_lan_config_response(void) {
   // Build config response packet: [CQ][length(2)][config_data]
@@ -310,9 +295,9 @@ static void send_lan_config_response(void) {
       wan_comm_send_data(g_wan_handle, config_packet, offset);
 
   if (status == WAN_COMM_OK) {
-    ESP_LOGI(TAG_DL, "LAN config response sent to WAN MCU (%u bytes)", offset);
+    ESP_LOGI(TAG, "LAN config response sent to WAN MCU (%u bytes)", offset);
   } else {
-    ESP_LOGE(TAG_DL, "Failed to send LAN config response");
+    ESP_LOGE(TAG, "Failed to send LAN config response");
   }
 }
 
@@ -329,9 +314,8 @@ esp_err_t mcu_wan_handler_start(void) {
     return ESP_FAIL;
   }
 
-  ESP_LOGI(TAG, "Starting MCU WAN Handler (SPI Master - LAN Side) - DUAL TASK MODE");
-  
-  // Initialize SD card for data backup
+  ESP_LOGI(TAG, "Starting MCU WAN Handler (SPI Master - LAN Side)");
+  // Initalize SD card for data backup
   sd_card_config_t sd_config = SD_CARD_CONFIG_DEFAULT();
   if (sd_card_init(&sd_config) != ESP_OK) {
     ESP_LOGW(TAG, "Failed to initialize SD card, continuing without backup");
@@ -367,56 +351,20 @@ esp_err_t mcu_wan_handler_start(void) {
 
   // Create RTC mutex
   g_rtc_mutex = xSemaphoreCreateMutex();
-  if (g_rtc_mutex == NULL) {
-    ESP_LOGE(TAG, "Failed to create RTC mutex");
-    vQueueDelete(g_uplink_queue);
-    wan_comm_deinit(g_wan_handle);
-    return ESP_FAIL;
-  }
 
-  // Create SPI mutex - CRITICAL for bus arbitration
-  g_spi_mutex = xSemaphoreCreateMutex();
-  if (g_spi_mutex == NULL) {
-    ESP_LOGE(TAG, "Failed to create SPI mutex");
-    vSemaphoreDelete(g_rtc_mutex);
-    vQueueDelete(g_uplink_queue);
-    wan_comm_deinit(g_wan_handle);
-    return ESP_FAIL;
-  }
-
+  // Create handler task
   g_handler_running = true;
-  g_handshake_done = false;
-
-  // Create DOWNLINK task first (HIGH PRIORITY) - handles GPIO ISR
-  BaseType_t ret = xTaskCreate(downlink_poll_task, "mcu_wan_dl", 
-                               DOWNLINK_TASK_STACK_SIZE, NULL, 
-                               DOWNLINK_TASK_PRIORITY, &g_downlink_task_handle);
+  BaseType_t ret =
+      xTaskCreate(mcu_wan_handler_task, "mcu_wan_task", MCU_WAN_TASK_STACK_SIZE,
+                  NULL, MCU_WAN_TASK_PRIORITY, &g_task_handle);
   if (ret != pdPASS) {
-    ESP_LOGE(TAG, "Failed to create downlink task");
-    vSemaphoreDelete(g_spi_mutex);
-    vSemaphoreDelete(g_rtc_mutex);
+    ESP_LOGE(TAG, "Failed to create task");
     vQueueDelete(g_uplink_queue);
     wan_comm_deinit(g_wan_handle);
     return ESP_FAIL;
   }
 
-  // Create UPLINK task (LOWER PRIORITY) - handles uplink/RTC/SD
-  ret = xTaskCreate(uplink_handler_task, "mcu_wan_ul", 
-                    UPLINK_TASK_STACK_SIZE, NULL, 
-                    UPLINK_TASK_PRIORITY, &g_uplink_task_handle);
-  if (ret != pdPASS) {
-    ESP_LOGE(TAG, "Failed to create uplink task");
-    vTaskDelete(g_downlink_task_handle);
-    vSemaphoreDelete(g_spi_mutex);
-    vSemaphoreDelete(g_rtc_mutex);
-    vQueueDelete(g_uplink_queue);
-    wan_comm_deinit(g_wan_handle);
-    return ESP_FAIL;
-  }
-
-  ESP_LOGI(TAG, "MCU WAN Handler started successfully (2 tasks)");
-  ESP_LOGI(TAG, "  - Downlink task: priority %d (GPIO handler)", DOWNLINK_TASK_PRIORITY);
-  ESP_LOGI(TAG, "  - Uplink task: priority %d (uplink/RTC/SD)", UPLINK_TASK_PRIORITY);
+  ESP_LOGI(TAG, "MCU WAN Handler started successfully");
   return ESP_OK;
 }
 
@@ -427,14 +375,9 @@ esp_err_t mcu_wan_handler_stop(void) {
   ESP_LOGI(TAG, "Stopping MCU WAN Handler");
   g_handler_running = false;
 
-  if (g_downlink_task_handle != NULL) {
-    vTaskDelete(g_downlink_task_handle);
-    g_downlink_task_handle = NULL;
-  }
-
-  if (g_uplink_task_handle != NULL) {
-    vTaskDelete(g_uplink_task_handle);
-    g_uplink_task_handle = NULL;
+  if (g_task_handle != NULL) {
+    vTaskDelete(g_task_handle);
+    g_task_handle = NULL;
   }
 
   if (g_uplink_queue != NULL) {
@@ -445,11 +388,6 @@ esp_err_t mcu_wan_handler_stop(void) {
   if (g_rtc_mutex != NULL) {
     vSemaphoreDelete(g_rtc_mutex);
     g_rtc_mutex = NULL;
-  }
-
-  if (g_spi_mutex != NULL) {
-    vSemaphoreDelete(g_spi_mutex);
-    g_spi_mutex = NULL;
   }
 
   if (g_wan_handle != NULL) {
@@ -542,229 +480,167 @@ static void stack_handler_start(stack_comm_type_t stack_type) {
   }
 }
 
-// ============================================================================
-// TASK 1: DOWNLINK POLL TASK (HIGH PRIORITY)
-// - Handles GPIO ISR notifications
-// - Takes SPI mutex immediately when notified
-// - Processes all downlink data before releasing mutex
-// ============================================================================
-static void downlink_poll_task(void *pvParameters) {
-  ESP_LOGI(TAG_DL, "Downlink Poll Task started (Priority %d)", DOWNLINK_TASK_PRIORITY);
-  
-  uint8_t rx_buffer[256];
-  uint32_t notification_value = 0;
+// ===== Main Task (Diagram 1 Implementation) =====
 
-  // Wait for handshake to complete (done by uplink task)
-  while (!g_handshake_done && g_handler_running) {
-    vTaskDelay(pdMS_TO_TICKS(100));
-  }
-
-  ESP_LOGI(TAG_DL, "Handshake complete, entering poll loop");
-
-  while (g_handler_running) {
-    // BLOCK here waiting for GPIO ISR notification
-    // When ISR fires, this task wakes up IMMEDIATELY due to high priority
-    if (xTaskNotifyWait(0, NOTIFY_DATA_READY, &notification_value, portMAX_DELAY) == pdTRUE) {
-      
-      if (notification_value & NOTIFY_DATA_READY) {
-        ESP_LOGI(TAG_DL, ">>> GPIO ISR triggered - acquiring SPI bus <<<");
-        
-        // Take SPI mutex - blocks uplink task from using SPI
-        if (xSemaphoreTake(g_spi_mutex, pdMS_TO_TICKS(5000)) == pdTRUE) {
-          ESP_LOGI(TAG_DL, "SPI bus acquired");
-          
-          // Poll for response - retry up to 5 times, resend DQ each time
-          bool got_valid_response = false;
-          uint8_t dq_cmd[2] = {'D', 'Q'};
-          
-          for (int retry = 0; retry < 10 && !got_valid_response; retry++) {
-            // Send DQ (Data Query) command EACH retry to ensure Slave receives it
-            ESP_LOGI(TAG_DL, "Sending DQ command (attempt %d/10)", retry + 1);
-            wan_comm_send_command(g_wan_handle, dq_cmd, sizeof(dq_cmd));
-            
-            // Wait for Slave to receive DQ and load TX buffer with response
-            vTaskDelay(pdMS_TO_TICKS(150));
-            
-            // Poll for response from Slave
-            memset(rx_buffer, 0, sizeof(rx_buffer));
-            wan_comm_status_t comm_status =
-                wan_comm_request_data(g_wan_handle, rx_buffer, sizeof(rx_buffer));
-            
-            ESP_LOGI(TAG_DL, "Poll attempt %d: [0]=0x%02X [1]=0x%02X [2]=0x%02X [3]=0x%02X",
-                     retry + 1, rx_buffer[0], rx_buffer[1], rx_buffer[2], rx_buffer[3]);
-
-            if (comm_status == WAN_COMM_OK && rx_buffer[0] == 'D' && rx_buffer[1] == 'T') {
-              // ===== DATA PACKET received =====
-              uint8_t handler_type[4] = {rx_buffer[2], rx_buffer[3], rx_buffer[4], '\0'};
-              uint16_t payload_len = (rx_buffer[5] << 8) | rx_buffer[6];
-              handler_id_t target_id = string_to_handler_id(handler_type);
-
-              ESP_LOGI(TAG_DL, "✓ Downlink DATA: handler=%s, len=%u", handler_type, payload_len);
-              send_ack_to_wan(ACK_TYPE_RECEIVED_OK);
-              dispatch_downlink_to_handler(target_id, &rx_buffer[DATA_PACKET_HEADER_SIZE], payload_len);
-              got_valid_response = true;
-
-            } else if (comm_status == WAN_COMM_OK && rx_buffer[0] == 'C' && rx_buffer[1] == 'F') {
-              if (rx_buffer[2] == 'C' && rx_buffer[3] == 'Q') {
-                // ===== CONFIG QUERY request =====
-                ESP_LOGI(TAG_DL, "✓ Config query request from WAN MCU");
-                send_lan_config_response();
-                got_valid_response = true;
-              } else {
-                // ===== CONFIG PACKET received =====
-                uint16_t config_len = (rx_buffer[2] << 8) | rx_buffer[3];
-                bool is_fota = (config_len >= 4 && memcmp(&rx_buffer[4], "CFFW", 4) == 0);
-                ESP_LOGI(TAG_DL, "✓ Config received: len=%u, FOTA=%d", config_len, is_fota);
-                if (g_config_callback != NULL) {
-                  g_config_callback(&rx_buffer[4], config_len, is_fota);
-                }
-                got_valid_response = true;
-              }
-            } else {
-              // Invalid response - will resend DQ on next retry
-              ESP_LOGD(TAG_DL, "No valid response, will retry");
-            }
-          }
-          
-          if (!got_valid_response) {
-            ESP_LOGW(TAG_DL, "Failed to get valid response after 5 retries");
-          }
-          
-          // Release SPI mutex - uplink task can now use SPI
-          xSemaphoreGive(g_spi_mutex);
-          ESP_LOGI(TAG_DL, ">>> SPI bus released <<<");
-          
-        } else {
-          ESP_LOGE(TAG_DL, "Failed to acquire SPI mutex!");
-        }
-      }
-    }
-  }
-
-  ESP_LOGI(TAG_DL, "Downlink Poll Task exiting");
-  vTaskDelete(NULL);
-}
-
-// ============================================================================
-// TASK 2: UPLINK HANDLER TASK (LOWER PRIORITY)
-// - Performs initial handshake
-// - Handles uplink queue
-// - Handles RTC requests
-// - Handles SD card backup
-// - Must acquire SPI mutex for ALL operations
-// ============================================================================
-static void uplink_handler_task(void *pvParameters) {
-  ESP_LOGI(TAG_UL, "Uplink Handler Task started (Priority %d)", UPLINK_TASK_PRIORITY);
+static void mcu_wan_handler_task(void *pvParameters) {
+  ESP_LOGI(TAG, "MCU WAN Handler task started");
 
   // ========================================
   // PHASE 1: Handshake Loop (Every 1 second)
   // ========================================
-  ESP_LOGI(TAG_UL, "Phase 1: Handshake with WAN MCU");
-  while (g_handler_running && !g_handshake_done) {
-    // Take SPI mutex for handshake
-    if (xSemaphoreTake(g_spi_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-      if (perform_handshake() == ESP_OK) {
-        g_handshake_done = true;
-        ESP_LOGI(TAG_UL, "Handshake successful!");
-        xSemaphoreGive(g_spi_mutex);
-        break;
-      }
-      xSemaphoreGive(g_spi_mutex);
+  ESP_LOGI(TAG, "Phase 1: Handshake with WAN MCU");
+  while (g_handler_running) {
+    if (perform_handshake() == ESP_OK) {
+      ESP_LOGI(TAG, "Handshake successful, entering Data Mode");
+      break;
     }
-    ESP_LOGW(TAG_UL, "Handshake failed, retrying in 1s");
+    ESP_LOGW(TAG, "Handshake failed, retrying in 1s");
     vTaskDelay(pdMS_TO_TICKS(HANDSHAKE_INTERVAL_MS));
   }
 
-  // Start stack handlers
+  // ========================================
+  // PHASE 2: Data Mode (Main Loop)
+  // ========================================
+  ESP_LOGI(TAG, "Phase 2: Data Mode with GPIO handshake");
+  TickType_t last_rtc_request = xTaskGetTickCount();
+  uplink_item_t uplink_item;
+  uint8_t rx_buffer[256];
   stack_handler_start(g_stack_1_type);
   stack_handler_start(g_stack_2_type);
 
-  // ========================================
-  // PHASE 2: Uplink/RTC/SD Loop
-  // ========================================
-  ESP_LOGI(TAG_UL, "Phase 2: Uplink processing loop");
-  TickType_t last_rtc_request = xTaskGetTickCount();
-  uplink_item_t uplink_item;
-
   while (g_handler_running) {
     TickType_t now = xTaskGetTickCount();
-    
-    // Try to acquire SPI mutex (non-blocking or short timeout)
-    // If downlink task has it, we'll skip and try next iteration
-    if (xSemaphoreTake(g_spi_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-      
-      // ===== Check A: Uplink Queue =====
-      if (xQueueReceive(g_uplink_queue, &uplink_item, 0) == pdTRUE) {
-        ESP_LOGI(TAG_UL, "Processing uplink from handler %d (%u bytes)",
-                 uplink_item.source_id, uplink_item.length);
+    uint32_t notification_value = 0;
+    // ===== Check A: GPIO Notification - Data Ready from WAN =====
+    if (xTaskNotifyWait(0, NOTIFY_DATA_READY, &notification_value,
+                        pdMS_TO_TICKS(100)) == pdTRUE) {
 
-        uint8_t packet[MAX_PAYLOAD_SIZE + DATA_PACKET_HEADER_SIZE + 20];
-        uint16_t packet_len = 0;
-        build_data_packet(&uplink_item, packet, &packet_len);
+      if (notification_value & NOTIFY_DATA_READY) {
+        ESP_LOGI(TAG, "Data-ready signal received from WAN MCU");
+        g_data_ready_flag = false;
+        uint8_t dq_cmd[2] = {'D', 'Q'};
+        wan_comm_send_command(g_wan_handle, dq_cmd, sizeof(dq_cmd));
+        // Wait for Slave to prepare and return response (SPI transaction ~200-300ms for large packets)
+        vTaskDelay(pdMS_TO_TICKS(600));
+        // Poll data after Slave has sent response
+        wan_comm_status_t comm_status =
+            wan_comm_request_data(g_wan_handle, rx_buffer, sizeof(rx_buffer));
+        ESP_LOGI(TAG,
+                 "Polled data: [0]=0x%02X [1]=0x%02X [2]=0x%02X [3]=0x%02X, "
+                 "checking type...",
+                 rx_buffer[0], rx_buffer[1], rx_buffer[2], rx_buffer[3]);
 
-        if (g_internet_status == INTERNET_STATUS_ONLINE) {
-          ack_type_t ack_result;
-          esp_err_t send_result = send_data_to_wan(packet, packet_len, &ack_result);
+        if (comm_status == WAN_COMM_OK && rx_buffer[0] == 'D' &&
+            rx_buffer[1] == 'T') {
+          // Data Packet received: [DT][handler_type(3)][length(2)][payload]
+          uint8_t handler_type[4] = {rx_buffer[2], rx_buffer[3], rx_buffer[4],
+                                     '\0'};
+          uint16_t payload_len = (rx_buffer[5] << 8) | rx_buffer[6];
+          handler_id_t target_id = string_to_handler_id(handler_type);
 
-          if (send_result == ESP_OK) {
-            if (ack_result == ACK_TYPE_INTERNET_OK) {
-              ESP_LOGI(TAG_UL, "Uplink sent successfully (ACK+INTERNET_OK)");
-            } else if (ack_result == ACK_TYPE_NO_INTERNET) {
-              ESP_LOGW(TAG_UL, "ACK received but NO_INTERNET, saving to SD");
-              g_internet_status = INTERNET_STATUS_OFFLINE;
-              save_to_sd_card(packet, packet_len);
-            }
-          } else {
-            ESP_LOGW(TAG_UL, "Send failed after retries, saving to SD");
+          ESP_LOGI(TAG, "Downlink received: handler=%s, len=%u, target_id=%d", handler_type,
+                   payload_len, target_id);
+          send_ack_to_wan(ACK_TYPE_RECEIVED_OK);
+          // Dispatch to appropriate handler
+          dispatch_downlink_to_handler(
+              target_id, &rx_buffer[DATA_PACKET_HEADER_SIZE], payload_len);
+
+        } else if (comm_status == WAN_COMM_OK && rx_buffer[0] == 'C' &&
+                   rx_buffer[1] == 'F') {
+          if (rx_buffer[2] == 'C' && rx_buffer[3] == 'Q') {
+            ESP_LOGI(TAG, "Config query request received from WAN MCU");
+            send_lan_config_response();
+            continue;
+          }
+          // Config Packet received: [CF][length(2)][config_data]
+          uint16_t config_len = (rx_buffer[2] << 8) | rx_buffer[3];
+          bool is_fota =
+              (config_len >= 4 && memcmp(&rx_buffer[4], "CFFW", 4) == 0);
+
+          ESP_LOGI(TAG, "Config received: len=%u, FOTA=%d", config_len,
+                   is_fota);
+
+          if (g_config_callback != NULL) {
+            g_config_callback(&rx_buffer[4], config_len, is_fota);
+          }
+        }
+      }
+    }
+
+    // ===== Check B: Output Queue (LAN Handler Queue) =====
+    if (xQueueReceive(g_uplink_queue, &uplink_item, 0) == pdTRUE) {
+      ESP_LOGI(TAG, "Processing uplink from handler %d (%u bytes)",
+               uplink_item.source_id, uplink_item.length);
+
+      // Build data_packet_t with RTC timestamp
+      uint8_t packet[MAX_PAYLOAD_SIZE + DATA_PACKET_HEADER_SIZE + 20];
+      uint16_t packet_len = 0;
+      build_data_packet(&uplink_item, packet, &packet_len);
+
+      // Check Internet Status before sending
+      if (g_internet_status == INTERNET_STATUS_ONLINE) {
+        ack_type_t ack_result;
+        esp_err_t send_result =
+            send_data_to_wan(packet, packet_len, &ack_result);
+
+        if (send_result == ESP_OK) {
+          if (ack_result == ACK_TYPE_INTERNET_OK) {
+            ESP_LOGI(TAG, "Uplink sent successfully (ACK+INTERNET_OK)");
+          } else if (ack_result == ACK_TYPE_NO_INTERNET) {
+            ESP_LOGW(TAG, "ACK received but NO_INTERNET, saving to SD");
+            g_internet_status = INTERNET_STATUS_OFFLINE;
             save_to_sd_card(packet, packet_len);
           }
         } else {
-          ESP_LOGW(TAG_UL, "Internet offline, saving to SD card");
+          ESP_LOGW(TAG, "Send failed after retries, saving to SD");
           save_to_sd_card(packet, packet_len);
         }
+      } else {
+        // Internet offline, save immediately to SD card
+        ESP_LOGW(TAG, "Internet offline, saving to SD card");
+        save_to_sd_card(packet, packet_len);
       }
-
-      // ===== Check B: RTC Periodic Timer (Every 1 second) =====
-      if ((now - last_rtc_request) >= pdMS_TO_TICKS(RTC_REQUEST_INTERVAL_MS)) {
-        if (request_rtc_and_status() == ESP_OK) {
-          ESP_LOGD(TAG_UL, "RTC and Internet status updated");
-        }
-        last_rtc_request = now;
-      }
-
-      // ===== Check C: SD Card Backup + Internet OK =====
-      if (sd_card_has_data() && g_internet_status == INTERNET_STATUS_ONLINE) {
-        uint8_t sd_buffer[MAX_PAYLOAD_SIZE + DATA_PACKET_HEADER_SIZE + 20];
-        uint16_t sd_length = 0;
-
-        if (read_oldest_from_sd_card(sd_buffer, &sd_length) == ESP_OK && sd_length > 0) {
-          ESP_LOGI(TAG_UL, "Retrying SD card data (%u bytes)", sd_length);
-          ack_type_t ack_result;
-
-          if (send_data_to_wan(sd_buffer, sd_length, &ack_result) == ESP_OK &&
-              ack_result == ACK_TYPE_INTERNET_OK) {
-            delete_oldest_from_sd_card();
-            ESP_LOGI(TAG_UL, "SD data sent successfully, deleted from card");
-          } else {
-            ESP_LOGW(TAG_UL, "SD data send failed, will retry later");
-          }
-        }
-      }
-
-      // Release SPI mutex
-      xSemaphoreGive(g_spi_mutex);
     }
 
-    // Small delay before next iteration
-    vTaskDelay(pdMS_TO_TICKS(10));
+    // ===== Check C: RTC Periodic Timer (Every 1 second) =====
+    // Skip RTC request when GPIO data-ready is pending to avoid timing conflicts
+    if (!g_data_ready_flag &&
+        (now - last_rtc_request) >= pdMS_TO_TICKS(RTC_REQUEST_INTERVAL_MS)) {
+      if (request_rtc_and_status() == ESP_OK) {
+        ESP_LOGD(TAG, "RTC and Internet status updated");
+      }
+      last_rtc_request = now;
+    }
+
+    // ===== Check C2: SD Card Backup + Internet OK =====
+    if (sd_card_has_data() && g_internet_status == INTERNET_STATUS_ONLINE) {
+      uint8_t sd_buffer[MAX_PAYLOAD_SIZE + DATA_PACKET_HEADER_SIZE + 20];
+      uint16_t sd_length = 0;
+
+      if (read_oldest_from_sd_card(sd_buffer, &sd_length) == ESP_OK &&
+          sd_length > 0) {
+        ESP_LOGI(TAG, "Retrying SD card data (%u bytes)", sd_length);
+        ack_type_t ack_result;
+
+        if (send_data_to_wan(sd_buffer, sd_length, &ack_result) == ESP_OK &&
+            ack_result == ACK_TYPE_INTERNET_OK) {
+          delete_oldest_from_sd_card();
+          ESP_LOGI(TAG, "SD data sent successfully, deleted from card");
+        } else {
+          ESP_LOGW(TAG, "SD data send failed, will retry later");
+        }
+      }
+    }
+
+    // Small delay if no events
+    vTaskDelay(pdMS_TO_TICKS(1));
   }
 
-  ESP_LOGI(TAG_UL, "Uplink Handler Task exiting");
+  ESP_LOGI(TAG, "MCU WAN Handler task exiting");
   vTaskDelete(NULL);
 }
 
 // ===== Handshake Implementation =====
-// NOTE: Caller must hold g_spi_mutex
 static esp_err_t perform_handshake(void) {
   uint8_t handshake_ack[2] = {FRAME_TYPE_ACK, ACK_TYPE_HANDSHAKE};
 
@@ -788,9 +664,15 @@ static esp_err_t perform_handshake(void) {
 }
 
 // ===== RTC Request Implementation =====
-// NOTE: Caller must hold g_spi_mutex
 static esp_err_t request_rtc_and_status(void) {
-  ESP_LOGD(TAG_UL, "Requesting RTC and Internet status from WAN MCU");
+  // Don't request if GPIO is high (data pending from WAN)
+  if (g_data_ready_flag) {
+    ESP_LOGD(TAG, "Skipping RTC request - GPIO data-ready active");
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  ESP_LOGD(TAG, "Requesting RTC and Internet status from WAN MCU");
+  // Send RTC request: prefix "RT"
   uint8_t rtc_request[2] = {'R', 'T'};
 
   wan_comm_status_t status =
@@ -799,6 +681,8 @@ static esp_err_t request_rtc_and_status(void) {
     return ESP_FAIL;
   }
 
+  // Receive RTC response: [RT][rtc_string(20)][network_status(1)]
+  // Reduced delay: WAN MCU only needs ~50-100ms to load TX buffer
   vTaskDelay(pdMS_TO_TICKS(100));
   uint8_t response[32] = {0};
   status = wan_comm_request_data(g_wan_handle, response, sizeof(response));
@@ -811,10 +695,12 @@ static esp_err_t request_rtc_and_status(void) {
       xSemaphoreGive(g_rtc_mutex);
     }
 
+    // Update internet status
     g_internet_status = (internet_status_t)response[22];
 
-    ESP_LOGI(TAG_UL, "RTC: %s, Internet: %s", g_rtc_cache.rtc_string,
-             g_internet_status == INTERNET_STATUS_ONLINE ? "ONLINE" : "OFFLINE");
+    ESP_LOGI(TAG, "RTC: %s, Internet: %s", g_rtc_cache.rtc_string,
+             g_internet_status == INTERNET_STATUS_ONLINE ? "ONLINE"
+                                                         : "OFFLINE");
     return ESP_OK;
   }
 
@@ -822,14 +708,13 @@ static esp_err_t request_rtc_and_status(void) {
 }
 
 // ===== Send Data with Retry & ACK =====
-// NOTE: Caller must hold g_spi_mutex
 static esp_err_t send_data_to_wan(const uint8_t *data, uint16_t length,
                                   ack_type_t *ack_out) {
   if (!data || length == 0 || !ack_out)
     return ESP_ERR_INVALID_ARG;
 
   for (int retry = 0; retry < MAX_RETRY_COUNT; retry++) {
-    ESP_LOGI(TAG_UL, "Transmit attempt %d/%d", retry + 1, MAX_RETRY_COUNT);
+    ESP_LOGI(TAG, "Transmit attempt %d/%d", retry + 1, MAX_RETRY_COUNT);
 
     wan_comm_status_t status = wan_comm_send_data(g_wan_handle, data, length);
     if (status != WAN_COMM_OK) {
@@ -837,43 +722,46 @@ static esp_err_t send_data_to_wan(const uint8_t *data, uint16_t length,
       continue;
     }
 
-    // Poll ACK within ACK_TIMEOUT_MS
+    // Poll ACK within ACK_TIMEOUT_MS (no fixed initial delay)
     const TickType_t start = xTaskGetTickCount();
     const TickType_t timeout_ticks = pdMS_TO_TICKS(ACK_TIMEOUT_MS);
 
-    uint32_t backoff_ms = 0;
-    const uint32_t max_backoff_ms = 10;
+    uint32_t backoff_ms = 0;            // first poll immediately (0ms)
+    const uint32_t max_backoff_ms = 10; // limit to avoid excessive SPI polling
 
     while ((xTaskGetTickCount() - start) < timeout_ticks) {
       uint8_t ack_response[8] = {0};
       status = wan_comm_request_data(g_wan_handle, ack_response,
                                      sizeof(ack_response));
 
+      // ACK format: [0]=FRAME_TYPE_ACK, [1]=ACK_TYPE_RECEIVED_OK,
+      // [2]=internet_flag
       if (status == WAN_COMM_OK && ack_response[0] == FRAME_TYPE_ACK &&
           ack_response[1] == ACK_TYPE_RECEIVED_OK) {
         *ack_out = (ack_type_t)ack_response[2];
-        ESP_LOGI(TAG_UL, "ACK received");
+        ESP_LOGI(TAG, "ACK received");
         return ESP_OK;
       }
 
+      // Yield/backoff lightly and poll again
       if (backoff_ms == 0) {
-        taskYIELD();
+        taskYIELD(); // yield CPU, do not wait by tick
         backoff_ms = 1;
       } else {
         vTaskDelay(pdMS_TO_TICKS(backoff_ms));
         if (backoff_ms < max_backoff_ms) {
-          backoff_ms <<= 1;
+          backoff_ms <<= 1; // 1,2,4,8,16...
           if (backoff_ms > max_backoff_ms)
             backoff_ms = max_backoff_ms;
         }
       }
     }
 
-    ESP_LOGW(TAG_UL, "ACK timeout on attempt %d", retry + 1);
-    vTaskDelay(pdMS_TO_TICKS(20));
+    ESP_LOGW(TAG, "ACK timeout on attempt %d", retry + 1);
+    vTaskDelay(pdMS_TO_TICKS(20)); // short delay before resend
   }
 
-  ESP_LOGW(TAG_UL, "Max retries reached");
+  ESP_LOGW(TAG, "Max retries reached");
   *ack_out = ACK_TYPE_TIMEOUT;
   return ESP_FAIL;
 }
@@ -881,22 +769,28 @@ static esp_err_t send_data_to_wan(const uint8_t *data, uint16_t length,
 // ===== Build Data Packet =====
 static void build_data_packet(const uplink_item_t *item, uint8_t *packet,
                               uint16_t *packet_len) {
+  // Format: [DT][handler_type(3)][length(2)][rtc(19)][payload]
   uint8_t *p = packet;
 
+  // Prefix "DT"
   *p++ = 'D';
   *p++ = 'T';
 
+  // Handler type (3 bytes)
   const char *type_str = handler_id_to_string(item->source_id);
   memcpy(p, type_str, 3);
   p += 3;
 
+  // Data length (2 bytes, big endian) - includes RTC + payload
   uint16_t total_data_len = 19 + item->length;
   *p++ = (total_data_len >> 8) & 0xFF;
   *p++ = total_data_len & 0xFF;
 
+  // RTC timestamp (19 bytes)
   memcpy(p, item->rtc_timestamp, 19);
   p += 19;
 
+  // Payload
   memcpy(p, item->data, item->length);
 
   *packet_len = DATA_PACKET_HEADER_SIZE + 19 + item->length;
@@ -921,14 +815,14 @@ static void dispatch_downlink_to_handler(handler_id_t target_id,
     success = rs485_handler_enqueue_downlink((uint8_t *)data, length);
     break;
   default:
-    ESP_LOGW(TAG_DL, "Unknown target handler: %d", target_id);
+    ESP_LOGW(TAG, "Unknown target handler: %d", target_id);
     return;
   }
 
   if (success) {
-    ESP_LOGI(TAG_DL, "Downlink dispatched to handler %d", target_id);
+    ESP_LOGI(TAG, "Downlink dispatched to handler %d", target_id);
   } else {
-    ESP_LOGW(TAG_DL, "Failed to dispatch downlink to handler %d", target_id);
+    ESP_LOGW(TAG, "Failed to dispatch downlink to handler %d", target_id);
   }
 }
 
@@ -957,28 +851,28 @@ static handler_id_t string_to_handler_id(const uint8_t *type_str) {
     return HANDLER_ZIGBEE;
   if (memcmp(type_str, "RS4", 3) == 0)
     return HANDLER_RS485;
-  return HANDLER_UNKNOWN;
+  return HANDLER_UNKNOWN; // Default
 }
 
 /**
  * @brief Send ACK back to WAN MCU after receiving downlink data
- * NOTE: Caller must hold g_spi_mutex
+ * @param ack_type Type of ACK to send
  */
 static void send_ack_to_wan(ack_type_t ack_type) {
-  uint8_t ack_packet[2];
-  ack_packet[0] = FRAME_TYPE_ACK;
-  ack_packet[1] = ack_type;
-
-  wan_comm_status_t status = wan_comm_send_command(g_wan_handle, ack_packet, sizeof(ack_packet));
-
-  if (status == WAN_COMM_OK) {
-    ESP_LOGI(TAG_DL, "✓ ACK sent to WAN MCU: type=0x%02X", ack_type);
-  } else {
-    ESP_LOGE(TAG_DL, "✗ Failed to send ACK to WAN MCU");
-  }
+    uint8_t ack_packet[2];
+    ack_packet[0] = FRAME_TYPE_ACK;         // 0xF0 (ACK frame type)
+    ack_packet[1] = ack_type;               // ACK_TYPE_RECEIVED_OK = 0x11
+    
+    wan_comm_status_t status = wan_comm_send_command(g_wan_handle, ack_packet, sizeof(ack_packet));
+    
+    if (status == WAN_COMM_OK) {
+        ESP_LOGI(TAG, "✓ ACK sent to WAN MCU: type=0x%02X", ack_type);
+    } else {
+        ESP_LOGE(TAG, "✗ Failed to send ACK to WAN MCU");
+    }
 }
 
-// ===== SD Card Functions =====
+// ===== SD Card Stub Functions (TODO: Implement with actual driver) =====
 static esp_err_t save_to_sd_card(const uint8_t *data, uint16_t length) {
   return sd_card_save(data, length);
 }
