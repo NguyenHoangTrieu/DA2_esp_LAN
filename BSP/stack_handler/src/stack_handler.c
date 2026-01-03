@@ -50,8 +50,8 @@ static const struct {
 };
 
 /* ===== Global Variables ===== */
-stack_comm_type_t g_stack_1_type = STACK_COMM_TYPE_RS485;
-stack_comm_type_t g_stack_2_type = STACK_COMM_TYPE_LORA;
+stack_comm_type_t g_stack_1_type = STACK_COMM_TYPE_NONE;
+stack_comm_type_t g_stack_2_type = STACK_COMM_TYPE_NONE;
 
 /* ===== Internal State ===== */
 static stack_config_t g_stack_configs[STACK_HANDLER_MAX_STACKS] = {

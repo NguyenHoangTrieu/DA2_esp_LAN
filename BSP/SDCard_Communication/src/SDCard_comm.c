@@ -261,16 +261,19 @@ file_opened_ok:
 
   // Write actual data
   written = fwrite(data, 1, length, f);
-  fclose(f);
-  fflush(f);  // Force write to disk
-  fsync(fileno(f));  // Sync to storage
-
+  
   if (written != length) {
     ESP_LOGE(TAG, "Failed to write complete data (%zu/%u bytes)", written,
              length);
+    fclose(f);
     unlink(filepath);
     return ESP_FAIL;
   }
+  
+  // CRITICAL: Flush and sync BEFORE closing file!
+  fflush(f);           // Flush stdio buffer to kernel
+  fsync(fileno(f));    // Sync kernel buffer to storage
+  fclose(f);           // Now safe to close
 
   // Update oldest file number if this is the first file
   if (g_oldest_file_num == 0 || g_file_counter < g_oldest_file_num) {

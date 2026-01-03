@@ -119,16 +119,28 @@ extern bool zigbee_nostack_connect_enqueue_downlink(uint8_t *data,
                                                     uint16_t len);
 
 // ===== GPIO Handshake Configuration =====
-#define GPIO_DATA_READY_PIN 14
+// NOTE: GPIO8 conflicts with SD Card D0, use GPIO9 instead!
+#define GPIO_DATA_READY_PIN 46
 #define NOTIFY_DATA_READY (1 << 0)
 
+// Debug: Track ISR trigger count
+static volatile uint32_t g_isr_trigger_count = 0;
+
 // GPIO ISR Handler - Notifies DOWNLINK task directly
+// NOTE: Cannot release mutex from ISR (mutex has priority inheritance)
+// Downlink task will naturally preempt uplink due to higher priority
 static void IRAM_ATTR gpio_data_ready_isr(void *arg) {
   BaseType_t xTaskWoken = pdFALSE;
+  
+  // Increment ISR counter for debugging
+  g_isr_trigger_count++;
+  
   if (g_downlink_task_handle) {
-    // Notify downlink task - it will wake up immediately due to high priority
+    // Notify downlink task - it will wake up and preempt lower priority tasks
     xTaskNotifyFromISR(g_downlink_task_handle, NOTIFY_DATA_READY, eSetBits, &xTaskWoken);
+    ESP_EARLY_LOGI(TAG_DL, "[ISR] GPIO%d triggered - Task notified", GPIO_DATA_READY_PIN);
   }
+  
   if (xTaskWoken == pdTRUE) {
     portYIELD_FROM_ISR();
   }
@@ -162,8 +174,11 @@ static esp_err_t setup_data_ready_gpio(void) {
     return ret;
   }
 
-  ESP_LOGI(TAG, "GPIO %d configured for data-ready notification",
-           GPIO_DATA_READY_PIN);
+  // Log initial GPIO level for debugging
+  int initial_level = gpio_get_level(GPIO_DATA_READY_PIN);
+  ESP_LOGI(TAG, "GPIO %d configured for data-ready notification (ISR enabled)", GPIO_DATA_READY_PIN);
+  ESP_LOGI(TAG, "GPIO %d initial level: %d", GPIO_DATA_READY_PIN, initial_level);
+  
   return ESP_OK;
 }
 
@@ -567,6 +582,7 @@ static void downlink_poll_task(void *pvParameters) {
     if (xTaskNotifyWait(0, NOTIFY_DATA_READY, &notification_value, portMAX_DELAY) == pdTRUE) {
       
       if (notification_value & NOTIFY_DATA_READY) {
+        ESP_LOGI(TAG_DL, ">>> GPIO ISR triggered - WOKEN UP! <<<");
         ESP_LOGI(TAG_DL, ">>> GPIO ISR triggered - acquiring SPI bus <<<");
         
         // Take SPI mutex - blocks uplink task from using SPI
@@ -692,7 +708,7 @@ static void uplink_handler_task(void *pvParameters) {
     // Try to acquire SPI mutex (non-blocking or short timeout)
     // If downlink task has it, we'll skip and try next iteration
     if (xSemaphoreTake(g_spi_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-      
+
       // ===== Check A: Uplink Queue =====
       if (xQueueReceive(g_uplink_queue, &uplink_item, 0) == pdTRUE) {
         ESP_LOGI(TAG_UL, "Processing uplink from handler %d (%u bytes)",
@@ -724,15 +740,7 @@ static void uplink_handler_task(void *pvParameters) {
         }
       }
 
-      // ===== Check B: RTC Periodic Timer (Every 1 second) =====
-      if ((now - last_rtc_request) >= pdMS_TO_TICKS(RTC_REQUEST_INTERVAL_MS)) {
-        if (request_rtc_and_status() == ESP_OK) {
-          ESP_LOGD(TAG_UL, "RTC and Internet status updated");
-        }
-        last_rtc_request = now;
-      }
-
-      // ===== Check C: SD Card Backup + Internet OK =====
+      // ===== Check B: SD Card Backup + Internet OK =====
       if (sd_card_has_data() && g_internet_status == INTERNET_STATUS_ONLINE) {
         uint8_t sd_buffer[MAX_PAYLOAD_SIZE + DATA_PACKET_HEADER_SIZE + 20];
         uint16_t sd_length = 0;
@@ -740,14 +748,39 @@ static void uplink_handler_task(void *pvParameters) {
         if (read_oldest_from_sd_card(sd_buffer, &sd_length) == ESP_OK && sd_length > 0) {
           ESP_LOGI(TAG_UL, "Retrying SD card data (%u bytes)", sd_length);
           ack_type_t ack_result;
+          esp_err_t send_result = send_data_to_wan(sd_buffer, sd_length, &ack_result);
 
-          if (send_data_to_wan(sd_buffer, sd_length, &ack_result) == ESP_OK &&
-              ack_result == ACK_TYPE_INTERNET_OK) {
-            delete_oldest_from_sd_card();
-            ESP_LOGI(TAG_UL, "SD data sent successfully, deleted from card");
+          if (send_result == ESP_OK) {
+            if (ack_result == ACK_TYPE_INTERNET_OK) {
+              delete_oldest_from_sd_card();
+              ESP_LOGI(TAG_UL, "SD data sent successfully, deleted from card");
+            } else if (ack_result == ACK_TYPE_NO_INTERNET) {
+              // CRITICAL FIX: Update internet status to prevent retry loop
+              g_internet_status = INTERNET_STATUS_OFFLINE;
+              ESP_LOGW(TAG_UL, "SD data ACK: NO_INTERNET, waiting for reconnect");
+            }
           } else {
             ESP_LOGW(TAG_UL, "SD data send failed, will retry later");
           }
+        }
+      }
+
+      // ===== Check C: RTC Periodic Timer (Every 1 second) =====
+      if ((now - last_rtc_request) >= pdMS_TO_TICKS(RTC_REQUEST_INTERVAL_MS)) {
+        if (request_rtc_and_status() == ESP_OK) {
+          ESP_LOGD(TAG_UL, "RTC and Internet status updated");
+        }
+        last_rtc_request = now;
+        
+        // DEBUG: Log GPIO status and ISR counter
+        int gpio_level = gpio_get_level(GPIO_DATA_READY_PIN);
+        ESP_LOGD(TAG_UL, "[GPIO_DEBUG] Pin%d=%d, ISR_count=%lu", 
+                 GPIO_DATA_READY_PIN, gpio_level, g_isr_trigger_count);
+        
+        // FALLBACK: If GPIO HIGH but ISR didn't trigger, manually notify downlink
+        if (gpio_level == 1 && g_downlink_task_handle != NULL) {
+          ESP_LOGW(TAG_UL, "[FALLBACK] GPIO HIGH detected via polling - notifying downlink task!");
+          xTaskNotify(g_downlink_task_handle, NOTIFY_DATA_READY, eSetBits);
         }
       }
 
@@ -756,7 +789,7 @@ static void uplink_handler_task(void *pvParameters) {
     }
 
     // Small delay before next iteration
-    vTaskDelay(pdMS_TO_TICKS(10));
+    vTaskDelay(pdMS_TO_TICKS(1));
   }
 
   ESP_LOGI(TAG_UL, "Uplink Handler Task exiting");
