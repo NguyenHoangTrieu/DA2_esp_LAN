@@ -16,3 +16,4 @@ dependencies:
   #   public: true
   espressif/led_strip: '*'
   espressif/eppp_link: ^1.1.3
+  espressif/usb: '*'

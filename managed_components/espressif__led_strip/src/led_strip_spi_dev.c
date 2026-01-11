@@ -12,6 +12,7 @@
 #include "soc/spi_periph.h"
 #include "led_strip.h"
 #include "led_strip_interface.h"
+#include "esp_heap_caps.h"
 
 #define LED_STRIP_SPI_DEFAULT_RESOLUTION (2.5 * 1000 * 1000) // 2.5MHz resolution
 #define LED_STRIP_SPI_DEFAULT_TRANS_QUEUE_SIZE 4
@@ -204,6 +205,10 @@ esp_err_t led_strip_new_spi_device(const led_strip_config_t *led_config, const l
     // clock_resolution between 2.2MHz to 2.8MHz is supported
     ESP_GOTO_ON_FALSE((clock_resolution_khz < LED_STRIP_SPI_DEFAULT_RESOLUTION / 1000 + 300) && (clock_resolution_khz > LED_STRIP_SPI_DEFAULT_RESOLUTION / 1000 - 300), ESP_ERR_NOT_SUPPORTED, err,
                       TAG, "unsupported clock resolution:%dKHz", clock_resolution_khz);
+
+    if (led_config->led_model != LED_MODEL_WS2812) {
+        ESP_LOGW(TAG, "Only support WS2812. The timing requirements for other models may not be met");
+    }
 
     spi_strip->component_fmt = component_fmt;
     spi_strip->bytes_per_pixel = bytes_per_pixel;
