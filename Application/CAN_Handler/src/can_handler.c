@@ -50,10 +50,69 @@ static QueueHandle_t g_downlink_queue = NULL;
 static bool g_handler_running = false;
 static can_handler_stats_t g_stats = {0};
 
+// ===== Static Buffer Pool for Downlink Packets =====
+#define DOWNLINK_POOL_SIZE 10
+#define DOWNLINK_BUFFER_SIZE 256
+
+typedef struct {
+    uint8_t buffer[DOWNLINK_BUFFER_SIZE];
+    bool in_use;
+} downlink_buffer_t;
+
+static downlink_buffer_t g_downlink_pool[DOWNLINK_POOL_SIZE];
+static SemaphoreHandle_t g_pool_mutex = NULL;
+
 can_config_t g_can_config = {
     .baud_rate = 500000,
     .operating_mode = CAN_MODE_NORMAL
 };
+
+// ===== Buffer Pool Functions =====
+
+/**
+ * @brief Allocate buffer from static pool
+ * @return Pointer to buffer, NULL if pool exhausted
+ */
+static uint8_t* downlink_pool_alloc(void) {
+    uint8_t* result = NULL;
+    
+    if (g_pool_mutex && xSemaphoreTake(g_pool_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        for (int i = 0; i < DOWNLINK_POOL_SIZE; i++) {
+            if (!g_downlink_pool[i].in_use) {
+                g_downlink_pool[i].in_use = true;
+                result = g_downlink_pool[i].buffer;
+                ESP_LOGD(TAG, "Pool alloc: slot %d", i);
+                break;
+            }
+        }
+        xSemaphoreGive(g_pool_mutex);
+    }
+    
+    if (result == NULL) {
+        ESP_LOGW(TAG, "Downlink buffer pool exhausted!");
+    }
+    
+    return result;
+}
+
+/**
+ * @brief Free buffer back to pool
+ * @param buffer Buffer to free
+ */
+static void downlink_pool_free(uint8_t* buffer) {
+    if (buffer == NULL) return;
+    
+    if (g_pool_mutex && xSemaphoreTake(g_pool_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        for (int i = 0; i < DOWNLINK_POOL_SIZE; i++) {
+            if (g_downlink_pool[i].buffer == buffer) {
+                g_downlink_pool[i].in_use = false;
+                ESP_LOGD(TAG, "Pool free: slot %d", i);
+                break;
+            }
+        }
+        xSemaphoreGive(g_pool_mutex);
+    }
+}
 
 // ===== Forward Declarations =====
 static void can_handler_task(void *pvParameters);
@@ -78,6 +137,21 @@ esp_err_t can_handler_start(void) {
         ESP_LOGE(TAG, "Failed to initialize CAN driver: %d", can_ret);
         return ESP_FAIL;
     }
+    
+    // Create pool mutex
+    g_pool_mutex = xSemaphoreCreateMutex();
+    if (g_pool_mutex == NULL) {
+        ESP_LOGE(TAG, "Failed to create pool mutex");
+        can_driver_deinit();
+        return ESP_FAIL;
+    }
+    
+    // Initialize buffer pool
+    memset(g_downlink_pool, 0, sizeof(g_downlink_pool));
+    for (int i = 0; i < DOWNLINK_POOL_SIZE; i++) {
+        g_downlink_pool[i].in_use = false;
+    }
+    ESP_LOGI(TAG, "Downlink buffer pool initialized (%d buffers)", DOWNLINK_POOL_SIZE);
     
     // Create downlink queue
     g_downlink_queue = xQueueCreate(DOWNLINK_QUEUE_SIZE, sizeof(can_downlink_packet_t));
@@ -117,10 +191,16 @@ esp_err_t can_handler_stop(void) {
     if (g_downlink_queue != NULL) {
         can_downlink_packet_t pkt;
         while (xQueueReceive(g_downlink_queue, &pkt, 0) == pdTRUE) {
-            if (pkt.data_payload) free(pkt.data_payload);
+            if (pkt.data_payload) downlink_pool_free(pkt.data_payload);
         }
         vQueueDelete(g_downlink_queue);
         g_downlink_queue = NULL;
+    }
+    
+    // Delete pool mutex
+    if (g_pool_mutex != NULL) {
+        vSemaphoreDelete(g_pool_mutex);
+        g_pool_mutex = NULL;
     }
     
     can_driver_deinit();
@@ -135,10 +215,15 @@ bool can_handler_enqueue_downlink(uint8_t *data, uint16_t len) {
         return false;
     }
     
+    if (len > DOWNLINK_BUFFER_SIZE) {
+        ESP_LOGE(TAG, "Downlink packet too large: %d bytes (max %d)", len, DOWNLINK_BUFFER_SIZE);
+        return false;
+    }
+    
     can_downlink_packet_t packet;
-    packet.data_payload = (uint8_t *)malloc(len);
+    packet.data_payload = downlink_pool_alloc();
     if (packet.data_payload == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate downlink memory");
+        ESP_LOGE(TAG, "Failed to allocate from pool (exhausted)");
         return false;
     }
     
@@ -146,7 +231,7 @@ bool can_handler_enqueue_downlink(uint8_t *data, uint16_t len) {
     packet.data_length = len;
     
     if (xQueueSend(g_downlink_queue, &packet, pdMS_TO_TICKS(100)) != pdTRUE) {
-        free(packet.data_payload);
+        downlink_pool_free(packet.data_payload);
         ESP_LOGW(TAG, "Downlink queue full");
         return false;
     }
@@ -264,7 +349,7 @@ static void process_downlink_tx(void) {
         ESP_LOGE(TAG, "Malformed downlink packet");
     }
     
-    free(tx_packet.data_payload);
+    downlink_pool_free(tx_packet.data_payload);
 }
 
 // ===== Bus Health Check =====

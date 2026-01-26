@@ -123,22 +123,15 @@ extern bool zigbee_nostack_connect_enqueue_downlink(uint8_t *data,
 #define GPIO_DATA_READY_PIN 46
 #define NOTIFY_DATA_READY (1 << 0)
 
-// Debug: Track ISR trigger count
-static volatile uint32_t g_isr_trigger_count = 0;
-
 // GPIO ISR Handler - Notifies DOWNLINK task directly
 // NOTE: Cannot release mutex from ISR (mutex has priority inheritance)
 // Downlink task will naturally preempt uplink due to higher priority
 static void IRAM_ATTR gpio_data_ready_isr(void *arg) {
   BaseType_t xTaskWoken = pdFALSE;
   
-  // Increment ISR counter for debugging
-  g_isr_trigger_count++;
-  
   if (g_downlink_task_handle) {
     // Notify downlink task - it will wake up and preempt lower priority tasks
     xTaskNotifyFromISR(g_downlink_task_handle, NOTIFY_DATA_READY, eSetBits, &xTaskWoken);
-    ESP_EARLY_LOGI(TAG_DL, "[ISR] GPIO%d triggered - Task notified", GPIO_DATA_READY_PIN);
   }
   
   if (xTaskWoken == pdTRUE) {
@@ -582,7 +575,6 @@ static void downlink_poll_task(void *pvParameters) {
     if (xTaskNotifyWait(0, NOTIFY_DATA_READY, &notification_value, portMAX_DELAY) == pdTRUE) {
       
       if (notification_value & NOTIFY_DATA_READY) {
-        ESP_LOGI(TAG_DL, ">>> GPIO ISR triggered - WOKEN UP! <<<");
         ESP_LOGI(TAG_DL, ">>> GPIO ISR triggered - acquiring SPI bus <<<");
         
         // Take SPI mutex - blocks uplink task from using SPI
@@ -771,17 +763,6 @@ static void uplink_handler_task(void *pvParameters) {
           ESP_LOGD(TAG_UL, "RTC and Internet status updated");
         }
         last_rtc_request = now;
-        
-        // DEBUG: Log GPIO status and ISR counter
-        int gpio_level = gpio_get_level(GPIO_DATA_READY_PIN);
-        ESP_LOGD(TAG_UL, "[GPIO_DEBUG] Pin%d=%d, ISR_count=%lu", 
-                 GPIO_DATA_READY_PIN, gpio_level, g_isr_trigger_count);
-        
-        // FALLBACK: If GPIO HIGH but ISR didn't trigger, manually notify downlink
-        if (gpio_level == 1 && g_downlink_task_handle != NULL) {
-          ESP_LOGW(TAG_UL, "[FALLBACK] GPIO HIGH detected via polling - notifying downlink task!");
-          xTaskNotify(g_downlink_task_handle, NOTIFY_DATA_READY, eSetBits);
-        }
       }
 
       // Release SPI mutex
