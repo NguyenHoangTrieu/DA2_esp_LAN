@@ -43,3 +43,5 @@ ENV/
 *.map
 
 todo.md
+
+.cache/
