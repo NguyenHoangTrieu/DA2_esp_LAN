@@ -9,8 +9,8 @@
 #ifndef SDCARD_COMM_H
 #define SDCARD_COMM_H
 
-#include "esp_err.h"
 #include "driver/gpio.h"
+#include "esp_err.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -40,11 +40,15 @@ typedef struct {
 
 // ===== Default Configuration Macro =====
 #define SD_CARD_CONFIG_DEFAULT()                                               \
-  {                                                                            \
-    .gpio_clk = GPIO_NUM_7, .gpio_cmd = GPIO_NUM_6, .gpio_d0 = GPIO_NUM_8, .gpio_d1 = GPIO_NUM_3, .gpio_d2 = GPIO_NUM_4, \
-    .gpio_d3 = GPIO_NUM_5, .format_if_failed = false, .max_files = 10,                  \
-    .bus_width_4 = false                                                        \
-  }
+  {.gpio_clk = GPIO_NUM_7,                                                     \
+   .gpio_cmd = GPIO_NUM_6,                                                     \
+   .gpio_d0 = GPIO_NUM_8,                                                      \
+   .gpio_d1 = GPIO_NUM_3,                                                      \
+   .gpio_d2 = GPIO_NUM_4,                                                      \
+   .gpio_d3 = GPIO_NUM_5,                                                      \
+   .format_if_failed = false,                                                  \
+   .max_files = 10,                                                            \
+   .bus_width_4 = false}
 
 // ===== Public API =====
 
@@ -72,7 +76,7 @@ esp_err_t sd_card_deinit(void);
  * @param length Length of data in bytes
  * @return ESP_OK on success, ESP_ERR_NO_MEM if full, ESP_FAIL on error
  */
-esp_err_t sd_card_save(const uint8_t *data, uint16_t length);
+esp_err_t sd_card_save(const uint8_t *data, uint32_t length);
 
 /**
  * @brief Read oldest data packet from SD card
@@ -84,8 +88,8 @@ esp_err_t sd_card_save(const uint8_t *data, uint16_t length);
  * @param buffer_size Maximum size of buffer
  * @return ESP_OK on success, ESP_ERR_NOT_FOUND if no files, ESP_FAIL on error
  */
-esp_err_t sd_card_read_oldest(uint8_t *buffer, uint16_t *length,
-                              uint16_t buffer_size);
+esp_err_t sd_card_read_oldest(uint8_t *buffer, uint32_t *length,
+                              uint32_t buffer_size);
 
 /**
  * @brief Delete oldest data packet from SD card

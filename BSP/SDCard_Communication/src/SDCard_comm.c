@@ -180,7 +180,7 @@ esp_err_t sd_card_deinit(void) {
   return ESP_OK;
 }
 
-esp_err_t sd_card_save(const uint8_t *data, uint16_t length) {
+esp_err_t sd_card_save(const uint8_t *data, uint32_t length) {
   if (!g_sd_mounted) {
     ESP_LOGE(TAG, "SD card not mounted");
     return ESP_FAIL;
@@ -249,10 +249,11 @@ esp_err_t sd_card_save(const uint8_t *data, uint16_t length) {
   }
 
 file_opened_ok:
-  // Write length header (2 bytes) + data
-  uint8_t len_header[2] = {(length >> 8) & 0xFF, length & 0xFF};
-  size_t written = fwrite(len_header, 1, 2, f);
-  if (written != 2) {
+  // Write length header (4 bytes) + data
+  uint8_t len_header[4] = {(length >> 24) & 0xFF, (length >> 16) & 0xFF,
+                           (length >> 8) & 0xFF, length & 0xFF};
+  size_t written = fwrite(len_header, 1, 4, f);
+  if (written != 4) {
     ESP_LOGE(TAG, "Failed to write length header");
     fclose(f);
     unlink(filepath);
@@ -261,7 +262,7 @@ file_opened_ok:
 
   // Write actual data
   written = fwrite(data, 1, length, f);
-  
+
   if (written != length) {
     ESP_LOGE(TAG, "Failed to write complete data (%zu/%u bytes)", written,
              length);
@@ -269,11 +270,11 @@ file_opened_ok:
     unlink(filepath);
     return ESP_FAIL;
   }
-  
+
   // CRITICAL: Flush and sync BEFORE closing file!
-  fflush(f);           // Flush stdio buffer to kernel
-  fsync(fileno(f));    // Sync kernel buffer to storage
-  fclose(f);           // Now safe to close
+  fflush(f);        // Flush stdio buffer to kernel
+  fsync(fileno(f)); // Sync kernel buffer to storage
+  fclose(f);        // Now safe to close
 
   // Update oldest file number if this is the first file
   if (g_oldest_file_num == 0 || g_file_counter < g_oldest_file_num) {
@@ -287,8 +288,8 @@ file_opened_ok:
   return ESP_OK;
 }
 
-esp_err_t sd_card_read_oldest(uint8_t *buffer, uint16_t *length,
-                              uint16_t buffer_size) {
+esp_err_t sd_card_read_oldest(uint8_t *buffer, uint32_t *length,
+                              uint32_t buffer_size) {
   if (!g_sd_mounted) {
     ESP_LOGE(TAG, "SD card not mounted");
     return ESP_FAIL;
@@ -317,10 +318,10 @@ esp_err_t sd_card_read_oldest(uint8_t *buffer, uint16_t *length,
     return ESP_FAIL;
   }
 
-  // Read length header (2 bytes)
-  uint8_t len_header[2];
-  size_t read_bytes = fread(len_header, 1, 2, f);
-  if (read_bytes != 2) {
+  // Read length header (4 bytes)
+  uint8_t len_header[4];
+  size_t read_bytes = fread(len_header, 1, 4, f);
+  if (read_bytes != 4) {
     ESP_LOGE(TAG, "Failed to read length header from %s", filepath);
     fclose(f);
 
@@ -335,7 +336,8 @@ esp_err_t sd_card_read_oldest(uint8_t *buffer, uint16_t *length,
     return ESP_FAIL;
   }
 
-  uint16_t data_length = (len_header[0] << 8) | len_header[1];
+  uint32_t data_length = (len_header[0] << 24) | (len_header[1] << 16) |
+                         (len_header[2] << 8) | len_header[3];
 
   // Check buffer size
   if (data_length > buffer_size) {

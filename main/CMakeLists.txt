@@ -2,7 +2,9 @@ file(GLOB I2C_DEVICES "../BSP/i2c_dev_support/src/*.c")
 idf_component_register(SRCS "DA2_esp_LAN.c"
                             "../rbg_led_ws_handler/rbg_handler.c"
                             "../Application/FOTA_LAN/src/fota_lan_handler.c"
-                            "../Application/MCU_WAN_Handler/src/mcu_wan_handler.c"
+                            # "../Application/MCU_WAN_Handler/src/mcu_wan_handler.c"
+                            "../Application/MCU_WAN_Handler/src/mcu_wan_handler_uplink.c"
+                            "../Application/MCU_WAN_Handler/src/mcu_wan_handler_downlink.c"
                             "../Application/Config_Handler/src/config_handler.c"
                             "../Application/Config_Handler/src/config_load_save.c"
                             "../Application/CAN_Handler/src/can_handler.c"
@@ -19,6 +21,7 @@ idf_component_register(SRCS "DA2_esp_LAN.c"
                             ${I2C_DEVICES}
                             "../Middleware/LoRa_Handler/src/lora_tdma_handler.c"
                             "../Middleware/Zigbee_Handler/src/zigbee_nostack_handler.c"
+                            "../Middleware/Storage_Handler/src/storage_handler.c"
                     PRIV_REQUIRES 
                                 esp_wifi
                                 nvs_flash
@@ -59,6 +62,7 @@ idf_component_register(SRCS "DA2_esp_LAN.c"
                                 "../BSP/SDCard_Communication/include"
                                 "../Middleware/LoRa_Handler/include"
                                 "../Middleware/Zigbee_Handler/include"
+                                "../Middleware/Storage_Handler/include"
                                 "../rbg_led_ws_handler"
                     EMBED_TXTFILES ${project_dir}/server_certs/ca_cert.pem)
 
