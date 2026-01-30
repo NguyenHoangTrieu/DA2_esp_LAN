@@ -307,31 +307,44 @@ static void uplink_handler_task(void *pvParameters) {
 
       if (storage_handler_has_data() &&
           g_internet_status == INTERNET_STATUS_ONLINE) {
-        uint8_t sd_buffer[MAX_PAYLOAD_SIZE + DATA_PACKET_HEADER_SIZE + 20];
-        uint32_t sd_length = 0;
 
-        if (storage_handler_read_oldest(sd_buffer, &sd_length,
-                                        sizeof(sd_buffer)) == ESP_OK &&
-            sd_length > 0) {
+        // Prepare retry session (open oldest file)
+        if (storage_handler_prepare_retry() == ESP_OK) {
+          ESP_LOGI(TAG, "Starting SD card retry session");
 
-          ESP_LOGI(TAG, "Retrying SD card data: %u bytes", sd_length);
+          bool session_success = true;
+          uint8_t sd_buffer[MAX_PAYLOAD_SIZE + DATA_PACKET_HEADER_SIZE + 20];
+          uint16_t sd_length = 0; // Changed to uint16_t to match new API
 
-          ack_type_t ack_result;
-          esp_err_t send_result =
-              send_data_to_wan(sd_buffer, sd_length, &ack_result);
+          // Process all packets in the file stream
+          while (storage_handler_get_next_packet(sd_buffer, &sd_length,
+                                                 sizeof(sd_buffer)) == ESP_OK) {
 
-          if (send_result == ESP_OK && ack_result == ACK_TYPE_INTERNET_OK) {
-            storage_handler_delete_oldest();
-            g_sd_retry_success_count++;
-            ESP_LOGI(TAG, "SD data sent successfully, deleted from card (#%lu)",
-                     g_sd_retry_success_count);
-          } else if (ack_result == ACK_TYPE_NO_INTERNET) {
-            // CRITICAL: Update internet status to prevent retry loop
-            g_internet_status = INTERNET_STATUS_OFFLINE;
-            ESP_LOGW(TAG, "SD data ACK NO_INTERNET, waiting for reconnect");
-          } else {
-            ESP_LOGW(TAG, "SD data send failed, will retry later");
+            ESP_LOGI(TAG, "Retrying SD packet: %u bytes", sd_length);
+
+            ack_type_t ack_result =
+                ACK_TYPE_TIMEOUT; // Initialize to avoid garbage
+            esp_err_t send_result =
+                send_data_to_wan(sd_buffer, sd_length, &ack_result);
+
+            if (send_result == ESP_OK && ack_result == ACK_TYPE_INTERNET_OK) {
+              g_sd_retry_success_count++;
+              ESP_LOGI(TAG, "SD packet sent OK (#%lu)",
+                       g_sd_retry_success_count);
+              // Continue to next packet
+            } else {
+              ESP_LOGW(TAG,
+                       "SD packet send failed/timeout, aborting retry session");
+              session_success = false;
+
+              if (ack_result == ACK_TYPE_NO_INTERNET) {
+                g_internet_status = INTERNET_STATUS_OFFLINE;
+              }
+              break; // Stop processing this file, retry later
+            }
           }
+
+          storage_handler_finish_retry(session_success);
         }
       }
 

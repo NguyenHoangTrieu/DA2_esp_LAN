@@ -11,7 +11,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/timers.h"
+#include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 static const char *TAG = "STORAGE";
 
@@ -34,6 +36,11 @@ static bool g_storage_initialized = false;
 static batch_buffer_t *g_batch_buffer = NULL;
 static TimerHandle_t g_flush_timer = NULL; // Timer for 5s flush
 static int64_t g_last_write_us = 0;        // Track last write timestamp
+
+/* Retry State */
+static FILE *g_retry_file = NULL;
+static char g_retry_path[64] = {0};
+static uint32_t g_retry_offset = 0;
 
 /* Forward Declarations */
 static esp_err_t flush_batch_buffer(void);
@@ -428,4 +435,120 @@ static esp_err_t flush_batch_buffer(void) {
   }
 
   return ret;
+}
+
+/* ========== Stream Read API (Fix for Batch vs Packet Issue) ========== */
+
+esp_err_t storage_handler_prepare_retry(void) {
+  if (!g_storage_initialized) {
+    return ESP_FAIL;
+  }
+
+  if (xSemaphoreTake(g_storage_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+    return ESP_ERR_TIMEOUT;
+  }
+
+  /* Close any existing file */
+  if (g_retry_file) {
+    fclose(g_retry_file);
+    g_retry_file = NULL;
+  }
+
+  /* Find oldest file */
+  if (sd_card_get_oldest_file_path(g_retry_path, sizeof(g_retry_path)) !=
+      ESP_OK) {
+    xSemaphoreGive(g_storage_mutex);
+    return ESP_ERR_NOT_FOUND;
+  }
+
+  /* Open file for reading */
+  g_retry_file = fopen(g_retry_path, "rb");
+  if (g_retry_file == NULL) {
+    ESP_LOGE(TAG, "Failed to open retry file: %s", g_retry_path);
+    xSemaphoreGive(g_storage_mutex);
+    return ESP_FAIL;
+  }
+
+  g_retry_offset = 0;
+  ESP_LOGI(TAG, "Opened retry file: %s", g_retry_path);
+
+  xSemaphoreGive(g_storage_mutex);
+  return ESP_OK;
+}
+
+esp_err_t storage_handler_get_next_packet(uint8_t *buffer, uint16_t *length,
+                                          uint16_t max_len) {
+  if (!g_retry_file) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  if (xSemaphoreTake(g_storage_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+    return ESP_ERR_TIMEOUT;
+  }
+
+  // Seek to current offset
+  fseek(g_retry_file, g_retry_offset, SEEK_SET);
+
+  // Read packet length (2 bytes)
+  uint8_t len_bytes[2];
+  size_t read = fread(len_bytes, 1, 2, g_retry_file);
+
+  if (read < 2) {
+    // End of file or error
+    xSemaphoreGive(g_storage_mutex);
+    return ESP_ERR_NOT_FOUND;
+  }
+
+  // Check for 0xFFFF padding (end of valid data in batch)
+  if (len_bytes[0] == 0xFF && len_bytes[1] == 0xFF) {
+    xSemaphoreGive(g_storage_mutex);
+    return ESP_ERR_NOT_FOUND;
+  }
+
+  uint16_t packet_len = (len_bytes[0] << 8) | len_bytes[1];
+
+  if (packet_len == 0 || packet_len > MAX_PACKET_SIZE) {
+    ESP_LOGW(TAG, "Invalid packet length at offset %lu: %u", g_retry_offset,
+             packet_len);
+    xSemaphoreGive(g_storage_mutex);
+    return ESP_ERR_INVALID_SIZE;
+  }
+
+  if (packet_len > max_len) {
+    xSemaphoreGive(g_storage_mutex);
+    return ESP_ERR_NO_MEM; // Buffer too small
+  }
+
+  // Read payload
+  read = fread(buffer, 1, packet_len, g_retry_file);
+  if (read < packet_len) {
+    ESP_LOGE(TAG, "Incomplete packet at offset %lu", g_retry_offset);
+    xSemaphoreGive(g_storage_mutex);
+    return ESP_FAIL;
+  }
+
+  *length = packet_len;
+  g_retry_offset += (2 + packet_len);
+
+  xSemaphoreGive(g_storage_mutex);
+  return ESP_OK;
+}
+
+void storage_handler_finish_retry(bool success) {
+  if (xSemaphoreTake(g_storage_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+    if (g_retry_file) {
+      fclose(g_retry_file);
+      g_retry_file = NULL;
+    }
+
+    if (success && strlen(g_retry_path) > 0) {
+      ESP_LOGI(TAG, "Retry successful, deleting file: %s", g_retry_path);
+      unlink(g_retry_path);
+    } else {
+      ESP_LOGW(TAG, "Retry aborted or failed, keeping file: %s", g_retry_path);
+    }
+
+    memset(g_retry_path, 0, sizeof(g_retry_path));
+    xSemaphoreGive(g_storage_mutex);
+  }
 }

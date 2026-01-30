@@ -101,6 +101,15 @@ esp_err_t sd_card_read_oldest(uint8_t *buffer, uint32_t *length,
 esp_err_t sd_card_delete_oldest(void);
 
 /**
+ * @brief Get path of the oldest data file
+ *
+ * @param filepath Buffer to store path
+ * @param max_len Size of buffer
+ * @return ESP_OK on success, ESP_ERR_NOT_FOUND if no files
+ */
+esp_err_t sd_card_get_oldest_file_path(char *filepath, size_t max_len);
+
+/**
  * @brief Check if SD card has any data files
  *
  * @return true if files exist, false otherwise

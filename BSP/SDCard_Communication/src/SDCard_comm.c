@@ -394,6 +394,13 @@ esp_err_t sd_card_delete_oldest(void) {
   return ESP_OK;
 }
 
+esp_err_t sd_card_get_oldest_file_path(char *filepath, size_t max_len) {
+  if (!g_sd_mounted) {
+    return ESP_FAIL;
+  }
+  return find_oldest_file(filepath, max_len);
+}
+
 bool sd_card_has_data(void) { return (sd_card_get_file_count() > 0); }
 
 uint32_t sd_card_get_file_count(void) {

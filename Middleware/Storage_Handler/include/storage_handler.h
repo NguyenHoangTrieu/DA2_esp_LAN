@@ -46,6 +46,28 @@ esp_err_t storage_handler_read_oldest(uint8_t *buffer, uint32_t *length,
 esp_err_t storage_handler_delete_oldest(void);
 
 /**
+ * @brief Prepare for retry session (open oldest file)
+ * @return ESP_OK if file opened, ESP_ERR_NOT_FOUND if no files
+ */
+esp_err_t storage_handler_prepare_retry(void);
+
+/**
+ * @brief Get next packet from current open file (stream read mode)
+ * @param buffer Output buffer
+ * @param length Output length pointer
+ * @param max_len Max buffer size
+ * @return ESP_OK on success, ESP_ERR_NOT_FOUND on EOF
+ */
+esp_err_t storage_handler_get_next_packet(uint8_t *buffer, uint16_t *length,
+                                          uint16_t max_len);
+
+/**
+ * @brief Finish retry session
+ * @param success If true, delete the file. If false, keep for later.
+ */
+void storage_handler_finish_retry(bool success);
+
+/**
  * Check if storage has data (in buffer or SD card)
  */
 bool storage_handler_has_data(void);
