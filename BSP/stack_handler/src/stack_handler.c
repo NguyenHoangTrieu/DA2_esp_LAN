@@ -1,15 +1,12 @@
 /**
  * @file stack_handler.c
  * @brief Communication Stack Manager Implementation
- *
- * GPIO Mapping according to schematic:
- * Stack 1: GPIO1=P02, GPIO2=P03, GPIO3=P04, GPIO4=P05, GPIO5=P06, GPIO6=P07,
- * GPIO7=P08, GPIO8=P12, GPIO9=P13 Stack 2: GPIO1=P15, GPIO2=P16, GPIO3=P17,
- * GPIO4=P20, GPIO5=P21, GPIO6=P22, GPIO7=P23, GPIO8=P24, GPIO9=P25
  */
 
 #include "stack_handler.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "tca_handler.h"
 #include <string.h>
 
@@ -69,6 +66,7 @@ static stack_config_t g_stack_configs[STACK_HANDLER_MAX_STACKS] = {
      .enabled = false}};
 
 static bool g_initialized = false;
+static SemaphoreHandle_t g_stack_mutex[STACK_HANDLER_MAX_STACKS];
 
 /* ===== Helper Functions ===== */
 
@@ -125,6 +123,19 @@ esp_err_t stack_handler_init(void) {
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "Failed to configure TCA Port 2");
     return ret;
+  }
+
+  // Initialize mutexes for each stack
+  for (int i = 0; i < STACK_HANDLER_MAX_STACKS; i++) {
+    g_stack_mutex[i] = xSemaphoreCreateMutex();
+    if (!g_stack_mutex[i]) {
+      ESP_LOGE(TAG, "Failed to create mutex for stack %d", i);
+      // Clean up previously created mutexes
+      for (int j = 0; j < i; j++) {
+        vSemaphoreDelete(g_stack_mutex[j]);
+      }
+      return ESP_ERR_NO_MEM;
+    }
   }
 
   g_initialized = true;
@@ -300,4 +311,121 @@ esp_err_t stack_handler_gpio_set_direction(uint8_t stack_id,
   }
 
   return ret;
+}
+/* ===== New APIs for Module Controller Support ===== */
+
+esp_err_t stack_handler_gpio_write_multi(uint8_t stack_id,
+                                         const gpio_action_t *actions,
+                                         size_t count) {
+  if (!g_initialized) {
+    ESP_LOGE(TAG, "Not initialized");
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  if (!is_valid_stack_id(stack_id) || !actions || count == 0) {
+    ESP_LOGE(TAG, "Invalid arguments");
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  // Group actions by TCA port to minimize I2C transactions
+  uint8_t port_masks[3] = {0};  // Bitmask of which pins to modify on each port
+  uint8_t port_states[3] = {0}; // Desired state for modified pins
+
+  // Build port masks and states
+  for (size_t i = 0; i < count; i++) {
+    if (!is_valid_pin(actions[i].pin)) {
+      ESP_LOGW(TAG, "Skipping invalid pin %d", actions[i].pin);
+      continue;
+    }
+
+    tca_port_t port;
+    uint8_t pin_num;
+    get_tca_mapping(stack_id, actions[i].pin, &port, &pin_num);
+
+    port_masks[port] |= (1 << pin_num);
+    if (actions[i].level) {
+      port_states[port] |= (1 << pin_num);
+    }
+  }
+
+  // Write to each port once (batched operation)
+  esp_err_t ret = ESP_OK;
+  for (int port = 0; port < 3; port++) {
+    if (port_masks[port] != 0) {
+      // Read current state
+      uint8_t current;
+      ret = tca_read_output_register(port, &current);
+      if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to read P%d output register", port);
+        break;
+      }
+
+      // Modify only target bits
+      current = (current & ~port_masks[port]) |
+                (port_states[port] & port_masks[port]);
+
+      // Write back
+      ret = tca_write_output_register(port, current);
+      if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to write P%d output register", port);
+        break;
+      }
+    }
+  }
+
+  ESP_LOGD(TAG, "Stack%d: Batch wrote %d GPIO actions", stack_id + 1, count);
+  return ret;
+}
+
+esp_err_t stack_handler_gpio_get_state(uint8_t stack_id,
+                                       stack_gpio_pin_num_t pin, bool *state) {
+  if (!g_initialized) {
+    ESP_LOGE(TAG, "Not initialized");
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  if (!is_valid_stack_id(stack_id) || !is_valid_pin(pin) || !state) {
+    ESP_LOGE(TAG, "Invalid arguments");
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  // Read current state (same as stack_handler_gpio_read)
+  return stack_handler_gpio_read(stack_id, pin, state);
+}
+
+esp_err_t stack_handler_lock(uint8_t stack_id) {
+  if (!g_initialized) {
+    ESP_LOGE(TAG, "Not initialized");
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  if (!is_valid_stack_id(stack_id)) {
+    ESP_LOGE(TAG, "Invalid stack ID: %d", stack_id);
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  if (xSemaphoreTake(g_stack_mutex[stack_id], pdMS_TO_TICKS(1000)) != pdTRUE) {
+    ESP_LOGW(TAG, "Failed to acquire mutex for stack%d", stack_id + 1);
+    return ESP_ERR_TIMEOUT;
+  }
+
+  ESP_LOGD(TAG, "Stack%d locked", stack_id + 1);
+  return ESP_OK;
+}
+
+esp_err_t stack_handler_unlock(uint8_t stack_id) {
+  if (!g_initialized) {
+    ESP_LOGE(TAG, "Not initialized");
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  if (!is_valid_stack_id(stack_id)) {
+    ESP_LOGE(TAG, "Invalid stack ID: %d", stack_id);
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  xSemaphoreGive(g_stack_mutex[stack_id]);
+  ESP_LOGD(TAG, "Stack%d unlocked", stack_id + 1);
+
+  return ESP_OK;
 }

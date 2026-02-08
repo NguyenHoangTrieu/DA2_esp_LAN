@@ -1,9 +1,6 @@
 /**
  * @file stack_handler.h
  * @brief Communication Stack Manager with GPIO Port Management
- *
- * Manages 2 communication stacks with dedicated GPIO ports from TCA6424A.
- * Each stack has access to 9 GPIO pins mapped to specific TCA ports.
  */
 
 #ifndef STACK_HANDLER_H
@@ -118,6 +115,68 @@ esp_err_t stack_handler_gpio_set_direction(uint8_t stack_id,
  * @return const char* String representation
  */
 const char *stack_handler_type_to_string(stack_comm_type_t type);
+
+/* ===== New APIs for Module Controller Support ===== */
+
+/**
+ * @brief GPIO action structure for batch operations
+ */
+typedef struct {
+  stack_gpio_pin_num_t pin;
+  bool level;
+} gpio_action_t;
+
+/**
+ * @brief Write multiple GPIO pins at once (batched operation)
+ *
+ * Optimizes I2C transactions by grouping GPIO writes by TCA port.
+ *
+ * @param stack_id Stack ID (0 = Stack 1, 1 = Stack 2)
+ * @param actions Array of GPIO actions
+ * @param count Number of actions
+ * @return esp_err_t ESP_OK on success
+ */
+esp_err_t stack_handler_gpio_write_multi(uint8_t stack_id,
+                                         const gpio_action_t *actions,
+                                         size_t count);
+
+/**
+ * @brief Get current state of a GPIO pin
+ *
+ * @param stack_id Stack ID (0 = Stack 1, 1 = Stack 2)
+ * @param pin GPIO pin number
+ * @param state Output: current pin state
+ * @return esp_err_t ESP_OK on success
+ */
+esp_err_t stack_handler_gpio_get_state(uint8_t stack_id,
+                                       stack_gpio_pin_num_t pin, bool *state);
+
+/**
+ * @brief Lock stack for exclusive access (thread-safe)
+ *
+ * @param stack_id Stack ID (0 = Stack 1, 1 = Stack 2)
+ * @return esp_err_t ESP_OK on success, ESP_ERR_TIMEOUT if mutex not acquired
+ */
+esp_err_t stack_handler_lock(uint8_t stack_id);
+
+/**
+ * @brief Unlock stack after exclusive access
+ *
+ * @param stack_id Stack ID (0 = Stack 1, 1 = Stack 2)
+ * @return esp_err_t ESP_OK on success
+ */
+esp_err_t stack_handler_unlock(uint8_t stack_id);
+
+// TODO: Implement runtime stack ID detection/mapping
+// /**
+//  * @brief Get stack ID from module configuration or runtime detection
+//  *
+//  * @param module_id Module ID string
+//  * @param stack_id Output: detected stack ID
+//  * @return esp_err_t ESP_OK on success
+//  */
+// esp_err_t stack_handler_get_stack_id(const char *module_id, uint8_t
+// *stack_id);
 
 #ifdef __cplusplus
 }

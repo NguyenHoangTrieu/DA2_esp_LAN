@@ -1,23 +1,6 @@
 /**
  * @file lora_tdma_connect.c
  * @brief LoRa TDMA connect task (gateway side)
- *
- * This module glues LoRa TDMA handler <-> WAN MCU handler:
- *
- *  - Uplink flow (sensor -> LoRa -> gateway -> WAN MCU):
- *      * lora_handler_handle_rx() decodes TDMA frame
- *      * our RX callback (lora_tdma_connect_rx_cb) is called
- *      * we build an uplink packet:
- *            [sensor_addr(2)][length(2)][data(length)]
- *        and push it to WAN via mcu_wan_enqueue_uplink(HANDLER_LORA, ...)
- *
- *  - Downlink flow (server -> WAN MCU -> gateway -> LoRa -> sensor):
- *      * dispatch_downlink_to_handler() calls
- *            lora_tdma_connect_enqueue_downlink(data, len)
- *      * data format:
- *            [sensor_addr(2)][length(2)][data(length)]
- *      * this module parses the buffer and sends the payload using
- *            lora_handler_send()
  */
 
 #include "lora_tdma_connect.h"

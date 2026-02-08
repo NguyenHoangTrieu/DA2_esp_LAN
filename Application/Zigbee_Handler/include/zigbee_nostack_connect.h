@@ -1,17 +1,6 @@
 /**
  * @file zigbee_nostack_connect.h
  * @brief Zigbee No-Stack Connect Task (Gateway Side)
- *
- * Similar to lora_tdma_connect.h:
- * - Uplink: Forward received sensor data to WAN MCU via
- * mcu_wan_enqueue_uplink()
- * - Downlink: Receive from WAN MCU and send to Zigbee nodes
- *
- * Downlink payload format (from WAN handler):
- * [sensor_addr(2)][length(2)][data(length)]
- * - sensor_addr: big endian
- * - length: big endian
- * - data: raw payload
  */
 
 #ifndef ZIGBEE_NOSTACK_CONNECT_H

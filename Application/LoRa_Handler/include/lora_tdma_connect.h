@@ -1,17 +1,6 @@
 /**
  * @file lora_tdma_connect.h
  * @brief LoRa TDMA connect task (gateway side)
- *
- * - Uplink: Forward received sensor data frames to WAN MCU
- *           via mcu_wan_enqueue_uplink(HANDLER_LORA, ...)
- * - Downlink: Receive downlink payload from WAN MCU and
- *             schedule LoRa TDMA transmissions to sensors.
- *
- * Downlink payload format (from dispatch_downlink_to_handler):
- *   [sensor_addr(2)][length(2)][data(length)]
- *   - sensor_addr: big endian (0x1234 -> 0x12 0x34)
- *   - length:      big endian
- *   - data:        raw application payload for the sensor
  */
 
 #ifndef LORA_TDMA_CONNECT_H

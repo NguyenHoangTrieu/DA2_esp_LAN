@@ -7,6 +7,7 @@
 #include "freertos/task.h"
 #include "lora_tdma_connect.h"
 #include "mcu_wan_handler.h"
+#include "ble_handler_task.h"
 #include "rs485_handler.h"
 #include "storage_handler.h"
 #include "wan_comm.h"
@@ -490,6 +491,10 @@ static void dispatch_downlink_to_handler(handler_id_t target_id,
     success = rs485_handler_enqueue_downlink((uint8_t *)data, length);
     break;
 
+  case HANDLER_BLE:
+    success = ble_handler_task_enqueue_downlink(data, length);
+    break;
+
   default:
     ESP_LOGW(TAG, "Unknown target handler: %d", target_id);
     return;
@@ -514,5 +519,7 @@ static handler_id_t string_to_handler_id(const uint8_t *type_str) {
     return HANDLER_ZIGBEE;
   if (memcmp(type_str, "RS4", 3) == 0)
     return HANDLER_RS485;
+  if (memcmp(type_str, "BLE", 3) == 0)
+    return HANDLER_BLE;
   return HANDLER_UNKNOWN;
 }

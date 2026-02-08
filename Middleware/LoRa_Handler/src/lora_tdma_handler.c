@@ -1,14 +1,6 @@
 /**
  * @file lora_handler.c
  * @brief TDMA + simple crypto handler using LoRa E32 broadcast driver.
- *
- * - All modules use RF broadcast (E32 address 0xFFFF, same channel).
- * - TDMA in software with num_slots, slot_duration_ms.
- * - Frames carry src_id/dst_id for logical addressing.
- * - Payload is XOR-encrypted using a simple key g_lora_handler_crypto_key[].
- *
- * WARNING: XOR is NOT secure cryptography. This is only a lightweight
- * obfuscation for demo/embedded use. Do not use it for real security.
  */
 
 #include "lora_tdma_handler.h"

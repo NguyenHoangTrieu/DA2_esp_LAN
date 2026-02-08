@@ -1,12 +1,6 @@
 /**
  * @file zigbee_nostack_connect.c
  * @brief Zigbee No-Stack Connect Task Implementation
- *
- * Glues Zigbee handler <-> WAN MCU handler:
- * - Uplink: zigbee_nostack_handler RX callback -> build packet ->
- * mcu_wan_enqueue_uplink()
- * - Downlink: WAN dispatch -> zigbee_nostack_connect_enqueue_downlink() ->
- * zigbee_nostack_handler_send()
  */
 
 #include "zigbee_nostack_connect.h"

@@ -1,10 +1,6 @@
 /**
  * @file zigbee_nostack_handler.h
  * @brief Zigbee No-Stack Handler API
- *
- * Provides simple API for Zigbee communication without mesh networking.
- * No RTOS inside - pure logic only.
- * Similar to lora_tdma_handler.h architecture.
  */
 
 #ifndef ZIGBEE_NOSTACK_HANDLER_H
