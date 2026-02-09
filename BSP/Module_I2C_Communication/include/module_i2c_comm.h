@@ -6,7 +6,7 @@
 #ifndef MODULE_I2C_COMM_H
 #define MODULE_I2C_COMM_H
 
-#include "driver/i2c.h"
+#include "driver/i2c_master.h"
 #include "esp_err.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -18,14 +18,14 @@ extern "C" {
 /* ===== Hardware Pin Definitions (Hardcoded) ===== */
 
 // Stack 0 I2C pins (adjust according to hardware schematic)
-#define STACK0_I2C_PORT       I2C_NUM_0
-#define STACK0_I2C_SDA_PIN    21
-#define STACK0_I2C_SCL_PIN    22
+#define STACK0_I2C_PORT I2C_NUM_0
+#define STACK0_I2C_SDA_PIN 21
+#define STACK0_I2C_SCL_PIN 22
 
 // Stack 1 I2C pins (adjust according to hardware schematic)
-#define STACK1_I2C_PORT       I2C_NUM_1
-#define STACK1_I2C_SDA_PIN    26
-#define STACK1_I2C_SCL_PIN    27
+#define STACK1_I2C_PORT I2C_NUM_1
+#define STACK1_I2C_SDA_PIN 26
+#define STACK1_I2C_SCL_PIN 27
 
 /* ===== Type Definitions ===== */
 
@@ -38,10 +38,10 @@ typedef struct module_i2c_comm_s *module_i2c_comm_handle_t;
  * @brief I2C configuration structure
  */
 typedef struct {
-  uint8_t stack_id;            ///< Stack ID (0 or 1) - determines pins/port
-  uint8_t device_address;      ///< I2C device address (7-bit)
-  uint32_t clock_speed_hz;     ///< Clock speed in Hz (e.g., 100000 for 100kHz)
-  bool pullup_enable;          ///< Enable internal pull-up resistors
+  uint8_t stack_id;        ///< Stack ID (0 or 1) - determines pins/port
+  uint8_t device_address;  ///< I2C device address (7-bit)
+  uint32_t clock_speed_hz; ///< Clock speed in Hz (e.g., 100000 for 100kHz)
+  bool pullup_enable;      ///< Enable internal pull-up resistors
 } module_i2c_config_t;
 
 /* ===== Public APIs ===== */

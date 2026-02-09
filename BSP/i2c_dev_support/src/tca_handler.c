@@ -185,58 +185,61 @@ esp_err_t tca_set_polarity(tca_port_t port, uint8_t polarity) {
   return tca_write_register(reg, polarity);
 }
 
-esp_err_t tca_set_pin_verified(tca_port_t port, uint8_t pin, bool level, bool verify) {
-    if (pin > 7 || port > TCA_PORT_2) {
-        return ESP_ERR_INVALID_ARG;
-    }
+esp_err_t tca_set_pin_verified(tca_port_t port, uint8_t pin, bool level,
+                               bool verify) {
+  if (pin > 7 || port > TCA_PORT_2) {
+    return ESP_ERR_INVALID_ARG;
+  }
 
-    // Read OUTPUT register
-    uint8_t port_value;
-    esp_err_t ret = tca_read_output_port(port, &port_value);
+  // Read OUTPUT register
+  uint8_t port_value;
+  esp_err_t ret = tca_read_output_port(port, &port_value);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to read output port %d: %s", port,
+             esp_err_to_name(ret));
+    return ret;
+  }
+
+  // Modify bit
+  if (level) {
+    port_value |= (1 << pin);
+  } else {
+    port_value &= ~(1 << pin);
+  }
+
+  // Write back
+  ret = tca_write_port(port, port_value);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to write port %d: %s", port, esp_err_to_name(ret));
+    return ret;
+  }
+
+  // Verify if requested
+  if (verify) {
+    vTaskDelay(pdMS_TO_TICKS(1)); // Small delay for chip to update
+
+    uint8_t verify_value;
+    ret = tca_read_output_port(port, &verify_value);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to read output port %d: %s", port, esp_err_to_name(ret));
-        return ret;
+      ESP_LOGE(TAG, "Failed to verify port %d: %s", port, esp_err_to_name(ret));
+      return ret;
     }
 
-    // Modify bit
-    if (level) {
-        port_value |= (1 << pin);
+    bool actual_state = (verify_value & (1 << pin)) != 0;
+    if (actual_state == level) {
+      ESP_LOGI(TAG, "Pin P%d_%d set to %d - VERIFIED ✓ (port=0x%02X)", port,
+               pin, level, verify_value);
     } else {
-        port_value &= ~(1 << pin);
+      ESP_LOGE(TAG,
+               "Pin P%d_%d VERIFY FAILED! Expected: %d, Got: %d (port=0x%02X)",
+               port, pin, level, actual_state, verify_value);
+      return ESP_ERR_INVALID_RESPONSE;
     }
+  } else {
+    ESP_LOGD(TAG, "Pin P%d_%d set to %d (no verify)", port, pin, level);
+  }
 
-    // Write back
-    ret = tca_write_port(port, port_value);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to write port %d: %s", port, esp_err_to_name(ret));
-        return ret;
-    }
-    
-    // Verify if requested
-    if (verify) {
-        vTaskDelay(pdMS_TO_TICKS(1));  // Small delay for chip to update
-        
-        uint8_t verify_value;
-        ret = tca_read_output_port(port, &verify_value);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to verify port %d: %s", port, esp_err_to_name(ret));
-            return ret;
-        }
-        
-        bool actual_state = (verify_value & (1 << pin)) != 0;
-        if (actual_state == level) {
-            ESP_LOGI(TAG, "Pin P%d_%d set to %d - VERIFIED ✓ (port=0x%02X)", 
-                     port, pin, level, verify_value);
-        } else {
-            ESP_LOGE(TAG, "Pin P%d_%d VERIFY FAILED! Expected: %d, Got: %d (port=0x%02X)", 
-                     port, pin, level, actual_state, verify_value);
-            return ESP_ERR_INVALID_RESPONSE;
-        }
-    } else {
-        ESP_LOGD(TAG, "Pin P%d_%d set to %d (no verify)", port, pin, level);
-    }
-    
-    return ESP_OK;
+  return ESP_OK;
 }
 
 esp_err_t tca_read_pin(tca_port_t port, uint8_t pin, bool *level) {
@@ -260,9 +263,25 @@ esp_err_t tca_register_interrupt_callback(tca_interrupt_callback_t callback) {
 }
 
 esp_err_t tca_read_config_register(tca_port_t port, uint8_t *value) {
-    if (!tca_handle || port > TCA_PORT_2 || !value) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    uint8_t reg = TCA6424A_CONFIG_PORT0 + port;
-    return tca_read_register(reg, value);
+  if (!tca_handle || port > TCA_PORT_2 || !value) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  uint8_t reg = TCA6424A_CONFIG_PORT0 + port;
+  return tca_read_register(reg, value);
+}
+
+esp_err_t tca_read_output_register(tca_port_t port, uint8_t *value) {
+  if (!tca_handle || port > TCA_PORT_2 || !value) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  uint8_t reg = TCA6424A_OUTPUT_PORT0 + port;
+  return tca_read_register(reg, value);
+}
+
+esp_err_t tca_write_output_register(tca_port_t port, uint8_t value) {
+  if (!tca_handle || port > TCA_PORT_2) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  uint8_t reg = TCA6424A_OUTPUT_PORT0 + port;
+  return tca_write_register(reg, value);
 }

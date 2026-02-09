@@ -5,11 +5,11 @@
 
 #include "module_config_controller.h"
 #include "esp_log.h"
-#include "stack_handler.h"
-#include "module_uart_comm.h"
-#include "module_spi_comm.h"
 #include "module_i2c_comm.h"
+#include "module_spi_comm.h"
+#include "module_uart_comm.h"
 #include "module_usb_comm.h"
+#include "stack_handler.h"
 #include <string.h>
 
 static const char *TAG = "MOD_CTRL";
@@ -29,7 +29,7 @@ typedef struct {
   bool usb_initialized;
 } stack_handles_t;
 
-static stack_handles_t g_stack_handles[2];  // Stack 0 and Stack 1
+static stack_handles_t g_stack_handles[2]; // Stack 0 and Stack 1
 
 /* ============================================================================
  * Public API Implementation
@@ -46,7 +46,7 @@ esp_err_t module_config_controller_init(void) {
  * ========================================================================== */
 
 esp_err_t module_config_controller_init_uart(uint8_t stack_id,
-                                              const uart_params_t *params) {
+                                             const uart_params_t *params) {
   if (stack_id > 1 || !params) {
     ESP_LOGE(TAG, "Invalid arguments: stack_id=%d", stack_id);
     return ESP_ERR_INVALID_ARG;
@@ -59,16 +59,17 @@ esp_err_t module_config_controller_init_uart(uint8_t stack_id,
 
   ESP_LOGI(TAG, "Initializing UART for stack %d", stack_id);
 
-  module_uart_comm_config_t uart_config = {
+  module_uart_config_t uart_config = {
       .stack_id = stack_id,
       .baudrate = params->baudrate,
       .parity = params->parity,
-      .stop_bits = params->stop_bits,
-      .data_bits = params->data_bits,
+      .stop_bits = params->stopbit,
+      .rx_buffer_size = 256,
+      .tx_buffer_size = 256,
   };
 
-  esp_err_t ret = module_uart_comm_init(&uart_config,
-                                         &g_stack_handles[stack_id].uart);
+  esp_err_t ret =
+      module_uart_comm_init(&uart_config, &g_stack_handles[stack_id].uart);
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "Failed to initialize UART: %s", esp_err_to_name(ret));
     return ret;
@@ -82,7 +83,7 @@ esp_err_t module_config_controller_init_uart(uint8_t stack_id,
 }
 
 esp_err_t module_config_controller_init_spi(uint8_t stack_id,
-                                             const spi_params_t *params) {
+                                            const spi_params_t *params) {
   if (stack_id > 1 || !params) {
     ESP_LOGE(TAG, "Invalid arguments: stack_id=%d", stack_id);
     return ESP_ERR_INVALID_ARG;
@@ -95,14 +96,15 @@ esp_err_t module_config_controller_init_spi(uint8_t stack_id,
 
   ESP_LOGI(TAG, "Initializing SPI for stack %d", stack_id);
 
-  module_spi_comm_config_t spi_config = {
+  module_spi_config_t spi_config = {
       .stack_id = stack_id,
       .clock_speed_hz = params->clock_speed,
       .mode = params->mode,
+      .queue_size = 1,
   };
 
-  esp_err_t ret = module_spi_comm_init(&spi_config,
-                                        &g_stack_handles[stack_id].spi);
+  esp_err_t ret =
+      module_spi_comm_init(&spi_config, &g_stack_handles[stack_id].spi);
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "Failed to initialize SPI: %s", esp_err_to_name(ret));
     return ret;
@@ -116,7 +118,7 @@ esp_err_t module_config_controller_init_spi(uint8_t stack_id,
 }
 
 esp_err_t module_config_controller_init_i2c(uint8_t stack_id,
-                                             const i2c_params_t *params) {
+                                            const i2c_params_t *params) {
   if (stack_id > 1 || !params) {
     ESP_LOGE(TAG, "Invalid arguments: stack_id=%d", stack_id);
     return ESP_ERR_INVALID_ARG;
@@ -129,14 +131,15 @@ esp_err_t module_config_controller_init_i2c(uint8_t stack_id,
 
   ESP_LOGI(TAG, "Initializing I2C for stack %d", stack_id);
 
-  module_i2c_comm_config_t i2c_config = {
+  module_i2c_config_t i2c_config = {
       .stack_id = stack_id,
-      .slave_address = params->address,
-      .clock_speed = params->clock_speed,
+      .device_address = params->address,
+      .clock_speed_hz = params->clock_speed,
+      .pullup_enable = true,
   };
 
-  esp_err_t ret = module_i2c_comm_init(&i2c_config,
-                                        &g_stack_handles[stack_id].i2c);
+  esp_err_t ret =
+      module_i2c_comm_init(&i2c_config, &g_stack_handles[stack_id].i2c);
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "Failed to initialize I2C: %s", esp_err_to_name(ret));
     return ret;
@@ -150,7 +153,7 @@ esp_err_t module_config_controller_init_i2c(uint8_t stack_id,
 }
 
 esp_err_t module_config_controller_init_usb(uint8_t stack_id,
-                                             const usb_params_t *params) {
+                                            const usb_params_t *params) {
   if (stack_id > 1 || !params) {
     ESP_LOGE(TAG, "Invalid arguments: stack_id=%d", stack_id);
     return ESP_ERR_INVALID_ARG;
@@ -176,8 +179,8 @@ esp_err_t module_config_controller_init_usb(uint8_t stack_id,
       .tx_buffer_size = 256,
   };
 
-  esp_err_t ret = module_usb_comm_init(&usb_config,
-                                        &g_stack_handles[stack_id].usb);
+  esp_err_t ret =
+      module_usb_comm_init(&usb_config, &g_stack_handles[stack_id].usb);
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "Failed to initialize USB: %s", esp_err_to_name(ret));
     return ret;
@@ -208,8 +211,7 @@ esp_err_t module_config_controller_deinit_uart(uint8_t stack_id) {
 
   ESP_LOGI(TAG, "Deinitializing UART for stack %d", stack_id);
 
-  esp_err_t ret =
-      module_uart_comm_deinit(g_stack_handles[stack_id].uart);
+  esp_err_t ret = module_uart_comm_deinit(g_stack_handles[stack_id].uart);
   if (ret == ESP_OK) {
     g_stack_handles[stack_id].uart_initialized = false;
     g_stack_handles[stack_id].uart = NULL;
@@ -310,29 +312,31 @@ esp_err_t module_bus_write(uint8_t stack_id, comm_port_type_t port_type,
       return ESP_ERR_INVALID_STATE;
     }
     return module_uart_comm_send(g_stack_handles[stack_id].uart, data, len,
-                                  1000);
+                                 1000);
 
   case COMM_PORT_SPI:
     if (!g_stack_handles[stack_id].spi_initialized) {
       ESP_LOGE(TAG, "SPI not initialized for stack %d", stack_id);
       return ESP_ERR_INVALID_STATE;
     }
-    return module_spi_comm_send(g_stack_handles[stack_id].spi, data, len);
+    return module_spi_comm_transfer(g_stack_handles[stack_id].spi, data, NULL,
+                                    len);
 
   case COMM_PORT_I2C:
     if (!g_stack_handles[stack_id].i2c_initialized) {
       ESP_LOGE(TAG, "I2C not initialized for stack %d", stack_id);
       return ESP_ERR_INVALID_STATE;
     }
-    return module_i2c_comm_write(g_stack_handles[stack_id].i2c, data, len);
+    return module_i2c_comm_write(g_stack_handles[stack_id].i2c, data, len,
+                                 1000);
+    break;
 
   case COMM_PORT_USB:
     if (!g_stack_handles[stack_id].usb_initialized) {
       ESP_LOGE(TAG, "USB not initialized for stack %d", stack_id);
       return ESP_ERR_INVALID_STATE;
     }
-    return module_usb_comm_send(g_stack_handles[stack_id].usb, data, len,
-                                 1000);
+    return module_usb_comm_send(g_stack_handles[stack_id].usb, data, len, 1000);
 
   default:
     ESP_LOGE(TAG, "Unsupported port type: %d", port_type);
@@ -353,18 +357,18 @@ esp_err_t module_bus_read(uint8_t stack_id, comm_port_type_t port_type,
     return ESP_ERR_INVALID_ARG;
   }
 
-  // Validate timeout to prevent hangs or zero-wait bugs
-  #define MODULE_CTRL_MIN_TIMEOUT_MS  10
-  #define MODULE_CTRL_MAX_TIMEOUT_MS  60000
-  
+// Validate timeout to prevent hangs or zero-wait bugs
+#define MODULE_CTRL_MIN_TIMEOUT_MS 10
+#define MODULE_CTRL_MAX_TIMEOUT_MS 60000
+
   if (timeout_ms < MODULE_CTRL_MIN_TIMEOUT_MS) {
-    ESP_LOGW(TAG, "Timeout too small (%ld ms), clamping to minimum (%d ms)", 
+    ESP_LOGW(TAG, "Timeout too small (%ld ms), clamping to minimum (%d ms)",
              timeout_ms, MODULE_CTRL_MIN_TIMEOUT_MS);
     timeout_ms = MODULE_CTRL_MIN_TIMEOUT_MS;
   }
-  
+
   if (timeout_ms > MODULE_CTRL_MAX_TIMEOUT_MS) {
-    ESP_LOGW(TAG, "Timeout too large (%ld ms), clamping to maximum (%d ms)", 
+    ESP_LOGW(TAG, "Timeout too large (%ld ms), clamping to maximum (%d ms)",
              timeout_ms, MODULE_CTRL_MAX_TIMEOUT_MS);
     timeout_ms = MODULE_CTRL_MAX_TIMEOUT_MS;
   }
@@ -381,23 +385,30 @@ esp_err_t module_bus_read(uint8_t stack_id, comm_port_type_t port_type,
       return ESP_ERR_INVALID_STATE;
     }
     return module_uart_comm_receive(g_stack_handles[stack_id].uart, buffer,
-                                     max_len, received_len, timeout_ms);
+                                    max_len, received_len, timeout_ms);
 
   case COMM_PORT_SPI:
     if (!g_stack_handles[stack_id].spi_initialized) {
       ESP_LOGE(TAG, "SPI not initialized for stack %d", stack_id);
       return ESP_ERR_INVALID_STATE;
     }
-    return module_spi_comm_receive(g_stack_handles[stack_id].spi, buffer,
-                                    max_len, received_len, timeout_ms);
+    *received_len = max_len;
+    return module_spi_comm_transfer(g_stack_handles[stack_id].spi, NULL, buffer,
+                                    max_len);
 
   case COMM_PORT_I2C:
     if (!g_stack_handles[stack_id].i2c_initialized) {
       ESP_LOGE(TAG, "I2C not initialized for stack %d", stack_id);
       return ESP_ERR_INVALID_STATE;
     }
-    return module_i2c_comm_read(g_stack_handles[stack_id].i2c, buffer, max_len,
-                                 received_len, timeout_ms);
+    esp_err_t ret = module_i2c_comm_read(g_stack_handles[stack_id].i2c, buffer,
+                                         max_len, timeout_ms);
+    if (ret == ESP_OK) {
+      *received_len = max_len;
+    } else {
+      *received_len = 0;
+    }
+    return ret;
 
   case COMM_PORT_USB:
     if (!g_stack_handles[stack_id].usb_initialized) {
@@ -405,7 +416,7 @@ esp_err_t module_bus_read(uint8_t stack_id, comm_port_type_t port_type,
       return ESP_ERR_INVALID_STATE;
     }
     return module_usb_comm_receive(g_stack_handles[stack_id].usb, buffer,
-                                    max_len, received_len, timeout_ms);
+                                   max_len, received_len, timeout_ms);
 
   default:
     ESP_LOGE(TAG, "Unsupported port type: %d", port_type);

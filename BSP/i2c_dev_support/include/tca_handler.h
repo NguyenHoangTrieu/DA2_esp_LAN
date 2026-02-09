@@ -145,6 +145,22 @@ esp_err_t tca_register_interrupt_callback(tca_interrupt_callback_t callback);
  */
 esp_err_t tca_read_config_register(tca_port_t port, uint8_t *value);
 
+/**
+ * @brief Read output register of a port
+ * @param port Port number (0-2)
+ * @param value Output value pointer
+ * @return esp_err_t ESP_OK on success
+ */
+esp_err_t tca_read_output_register(tca_port_t port, uint8_t *value);
+
+/**
+ * @brief Write output register of a port
+ * @param port Port number (0-2)
+ * @param value Value to write
+ * @return esp_err_t ESP_OK on success
+ */
+esp_err_t tca_write_output_register(tca_port_t port, uint8_t value);
+
 #ifdef __cplusplus
 }
 #endif

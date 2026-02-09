@@ -17,3 +17,4 @@ dependencies:
   espressif/led_strip: '*'
   espressif/eppp_link: ^1.1.3
   espressif/usb: '*'
+  espressif/cjson: ^1.7.19

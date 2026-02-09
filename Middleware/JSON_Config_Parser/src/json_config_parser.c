@@ -32,14 +32,14 @@ static comm_port_type_t string_to_port_type(const char *str) {
 /**
  * @brief Convert string to UART parity enum
  */
-static uart_parity_t string_to_parity(const char *str) {
+static module_uart_parity_t string_to_parity(const char *str) {
   if (strcmp(str, "none") == 0)
-    return UART_PARITY_NONE;
+    return MODULE_UART_PARITY_NONE;
   if (strcmp(str, "even") == 0)
-    return UART_PARITY_EVEN;
+    return MODULE_UART_PARITY_EVEN;
   if (strcmp(str, "odd") == 0)
-    return UART_PARITY_ODD;
-  return UART_PARITY_NONE;
+    return MODULE_UART_PARITY_ODD;
+  return MODULE_UART_PARITY_NONE;
 }
 
 /**

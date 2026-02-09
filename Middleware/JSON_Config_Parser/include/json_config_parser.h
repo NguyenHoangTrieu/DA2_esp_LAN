@@ -42,13 +42,13 @@ typedef enum {
 } comm_port_type_t;
 
 /**
- * @brief UART parity options
+ * @brief UART parity options (module-specific to avoid ESP-IDF conflict)
  */
 typedef enum {
-  UART_PARITY_NONE = 0,
-  UART_PARITY_EVEN,
-  UART_PARITY_ODD
-} uart_parity_t;
+  MODULE_UART_PARITY_NONE = 0,
+  MODULE_UART_PARITY_EVEN,
+  MODULE_UART_PARITY_ODD
+} module_uart_parity_t;
 
 /* ============================================================================
  * Structures
@@ -67,7 +67,7 @@ typedef struct {
  */
 typedef struct {
   uint32_t baudrate;
-  uart_parity_t parity;
+  module_uart_parity_t parity;
   uint8_t stopbit;
 } uart_params_t;
 
@@ -92,10 +92,10 @@ typedef struct {
  * @brief USB CDC communication parameters
  */
 typedef struct {
-  uint32_t bit_rate;      // Bit rate (bps) - e.g., 115200
-  uint8_t stop_bits;      // 0=1bit, 1=1.5bits, 2=2bits
-  uint8_t parity;         // 0=None, 1=Odd, 2=Even
-  uint8_t data_bits;      // 5, 6, 7, 8, or 16
+  uint32_t bit_rate; // Bit rate (bps) - e.g., 115200
+  uint8_t stop_bits; // 0=1bit, 1=1.5bits, 2=2bits
+  uint8_t parity;    // 0=None, 1=Odd, 2=Even
+  uint8_t data_bits; // 5, 6, 7, 8, or 16
 } usb_params_t;
 
 /**
