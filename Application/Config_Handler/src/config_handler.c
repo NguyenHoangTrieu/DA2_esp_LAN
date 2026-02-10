@@ -5,8 +5,8 @@
 
 #include "config_handler.h"
 #include "DA2_esp_LAN.h"
-#include "ble_handler.h"
-#include "ble_handler_task.h"
+// #include "ble_handler.h"
+// #include "ble_handler_task.h"
 #include "can_driver.h"
 #include "fota_lan_config.h"
 #include "fota_lan_handler.h"
@@ -14,7 +14,7 @@
 #include "lora_e32_comm.h"
 #include "lora_tdma_handler.h"
 #include "mcu_wan_handler.h"
-#include "module_monitor_task.h"
+// #include "module_monitor_task.h"
 #include "rs485_handler.h"
 #include "stack_handler.h"
 #include <stdlib.h>
@@ -768,266 +768,269 @@ static esp_err_t config_parse_rs485_baud(const uint8_t *data, uint16_t len) {
   return ESP_FAIL;
 }
 
-/**
- * @brief Parse BLE JSON config command
- * Format: "CFBL:JSON:<len>:<json_data>"
- */
-static esp_err_t config_parse_ble_json(const uint8_t *data, uint16_t len) {
-  if (!data || len < 14) { // "CFBL:JSON:0001:X"
-    ESP_LOGE(TAG, "BLE JSON: invalid parameters");
-    return ESP_ERR_INVALID_ARG;
-  }
+// /**
+//  * @brief Parse BLE JSON config command
+//  * Format: "CFBL:JSON:<len>:<json_data>"
+//  */
+// static esp_err_t config_parse_ble_json(const uint8_t *data, uint16_t len) {
+//   if (!data || len < 14) { // "CFBL:JSON:0001:X"
+//     ESP_LOGE(TAG, "BLE JSON: invalid parameters");
+//     return ESP_ERR_INVALID_ARG;
+//   }
 
-  // Check prefix
-  if (strncmp((const char *)data, "CFBL:JSON:", 10) != 0) {
-    ESP_LOGE(TAG, "BLE JSON: invalid prefix");
-    return ESP_FAIL;
-  }
+//   // Check prefix
+//   if (strncmp((const char *)data, "CFBL:JSON:", 10) != 0) {
+//     ESP_LOGE(TAG, "BLE JSON: invalid prefix");
+//     return ESP_FAIL;
+//   }
 
-  // Extract JSON length
-  const char *len_str = (const char *)(data + 10);
-  const char *colon = strchr(len_str, ':');
-  if (!colon) {
-    ESP_LOGE(TAG, "BLE JSON: missing separator");
-    return ESP_FAIL;
-  }
+//   // Extract JSON length
+//   const char *len_str = (const char *)(data + 10);
+//   const char *colon = strchr(len_str, ':');
+//   if (!colon) {
+//     ESP_LOGE(TAG, "BLE JSON: missing separator");
+//     return ESP_FAIL;
+//   }
 
-  char len_buf[8] = {0};
-  int len_digits = colon - len_str;
-  if (len_digits <= 0 || len_digits >= sizeof(len_buf)) {
-    ESP_LOGE(TAG, "BLE JSON: invalid length format");
-    return ESP_FAIL;
-  }
-  memcpy(len_buf, len_str, len_digits);
-  uint16_t json_len = atoi(len_buf);
+//   char len_buf[8] = {0};
+//   int len_digits = colon - len_str;
+//   if (len_digits <= 0 || len_digits >= sizeof(len_buf)) {
+//     ESP_LOGE(TAG, "BLE JSON: invalid length format");
+//     return ESP_FAIL;
+//   }
+//   memcpy(len_buf, len_str, len_digits);
+//   uint16_t json_len = atoi(len_buf);
 
-  // Extract JSON data
-  const char *json_data = colon + 1;
-  if (json_len <= 0 || json_len > 2048) {
-    ESP_LOGE(TAG, "BLE JSON: length out of range: %u", json_len);
-    return ESP_FAIL;
-  }
+//   // Extract JSON data
+//   const char *json_data = colon + 1;
+//   if (json_len <= 0 || json_len > 2048) {
+//     ESP_LOGE(TAG, "BLE JSON: length out of range: %u", json_len);
+//     return ESP_FAIL;
+//   }
 
-  // Verify actual length
-  uint16_t actual_len = len - (json_data - (const char *)data);
-  if (actual_len < json_len) {
-    ESP_LOGE(TAG, "BLE JSON: incomplete data (expected %u, got %u)", json_len,
-             actual_len);
-    return ESP_FAIL;
-  }
+//   // Verify actual length
+//   uint16_t actual_len = len - (json_data - (const char *)data);
+//   if (actual_len < json_len) {
+//     ESP_LOGE(TAG, "BLE JSON: incomplete data (expected %u, got %u)",
+//     json_len,
+//              actual_len);
+//     return ESP_FAIL;
+//   }
 
-  // Load config to Module Monitor (which will parse and route to BLE handler)
-  // Assume stack_id = 0 by default (can be extended to extract from JSON)
-  uint8_t stack_id = 0;
+//   // Load config to Module Monitor (which will parse and route to BLE
+//   handler)
+//   // Assume stack_id = 0 by default (can be extended to extract from JSON)
+//   uint8_t stack_id = 0;
 
-  esp_err_t ret = module_monitor_load_config(stack_id, json_data, json_len);
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to load BLE config to Module Monitor: %s",
-             esp_err_to_name(ret));
-    return ret;
-  }
+//   esp_err_t ret = module_monitor_load_config(stack_id, json_data, json_len);
+//   if (ret != ESP_OK) {
+//     ESP_LOGE(TAG, "Failed to load BLE config to Module Monitor: %s",
+//              esp_err_to_name(ret));
+//     return ret;
+//   }
 
-  ESP_LOGI(TAG, "BLE JSON config loaded successfully (stack=%u, %u bytes)",
-           stack_id, json_len);
+//   ESP_LOGI(TAG, "BLE JSON config loaded successfully (stack=%u, %u bytes)",
+//            stack_id, json_len);
 
-  return ESP_OK;
-}
+//   return ESP_OK;
+// }
 
-/**
- * @brief Parse BLE discovery command and execute
- * Format: "CFBL:DISC:<timeout>:<stack_id>"
- */
-static esp_err_t config_parse_ble_discovery(const uint8_t *data, uint16_t len) {
-  if (!data || len < 13) { // "CFBL:DISC:1:0"
-    ESP_LOGE(TAG, "BLE discovery: invalid parameters");
-    return ESP_ERR_INVALID_ARG;
-  }
+// /**
+//  * @brief Parse BLE discovery command and execute
+//  * Format: "CFBL:DISC:<timeout>:<stack_id>"
+//  */
+// static esp_err_t config_parse_ble_discovery(const uint8_t *data, uint16_t
+// len) {
+//   if (!data || len < 13) { // "CFBL:DISC:1:0"
+//     ESP_LOGE(TAG, "BLE discovery: invalid parameters");
+//     return ESP_ERR_INVALID_ARG;
+//   }
 
-  // Check prefix
-  if (strncmp((const char *)data, "CFBL:DISC:", 10) != 0) {
-    ESP_LOGE(TAG, "BLE discovery: invalid prefix");
-    return ESP_FAIL;
-  }
+//   // Check prefix
+//   if (strncmp((const char *)data, "CFBL:DISC:", 10) != 0) {
+//     ESP_LOGE(TAG, "BLE discovery: invalid prefix");
+//     return ESP_FAIL;
+//   }
 
-  // Parse timeout and stack_id
-  const char *timeout_str = (const char *)(data + 10);
-  const char *colon = strchr(timeout_str, ':');
+//   // Parse timeout and stack_id
+//   const char *timeout_str = (const char *)(data + 10);
+//   const char *colon = strchr(timeout_str, ':');
 
-  uint32_t timeout_ms = 5000; // Default 5 seconds
-  uint8_t stack_id = 0;       // Default stack 0
+//   uint32_t timeout_ms = 5000; // Default 5 seconds
+//   uint8_t stack_id = 0;       // Default stack 0
 
-  if (colon) {
-    char timeout_buf[8] = {0};
-    int len_digits = colon - timeout_str;
-    if (len_digits > 0 && len_digits < sizeof(timeout_buf)) {
-      memcpy(timeout_buf, timeout_str, len_digits);
-      timeout_ms = atoi(timeout_buf);
-    }
-    stack_id = atoi(colon + 1);
-  } else {
-    timeout_ms = atoi(timeout_str);
-  }
+//   if (colon) {
+//     char timeout_buf[8] = {0};
+//     int len_digits = colon - timeout_str;
+//     if (len_digits > 0 && len_digits < sizeof(timeout_buf)) {
+//       memcpy(timeout_buf, timeout_str, len_digits);
+//       timeout_ms = atoi(timeout_buf);
+//     }
+//     stack_id = atoi(colon + 1);
+//   } else {
+//     timeout_ms = atoi(timeout_str);
+//   }
 
-  // Validate
-  if (timeout_ms < 1000 || timeout_ms > 60000) {
-    ESP_LOGW(TAG, "BLE discovery: timeout out of range, using 5000ms");
-    timeout_ms = 5000;
-  }
+//   // Validate
+//   if (timeout_ms < 1000 || timeout_ms > 60000) {
+//     ESP_LOGW(TAG, "BLE discovery: timeout out of range, using 5000ms");
+//     timeout_ms = 5000;
+//   }
 
-  if (stack_id > 1) {
-    ESP_LOGE(TAG, "BLE discovery: invalid stack_id: %u", stack_id);
-    return ESP_FAIL;
-  }
+//   if (stack_id > 1) {
+//     ESP_LOGE(TAG, "BLE discovery: invalid stack_id: %u", stack_id);
+//     return ESP_FAIL;
+//   }
 
-  ESP_LOGI(TAG, "Starting BLE discovery (timeout=%lu ms, stack=%u)",
-           (unsigned long)timeout_ms, stack_id);
+//   ESP_LOGI(TAG, "Starting BLE discovery (timeout=%lu ms, stack=%u)",
+//            (unsigned long)timeout_ms, stack_id);
 
-  // Call BLE handler task to start discovery
-  esp_err_t ret = ble_handler_task_start_discovery(stack_id, timeout_ms);
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to start BLE discovery: %s", esp_err_to_name(ret));
+//   // Call BLE handler task to start discovery
+//   esp_err_t ret = ble_handler_task_start_discovery(stack_id, timeout_ms);
+//   if (ret != ESP_OK) {
+//     ESP_LOGE(TAG, "Failed to start BLE discovery: %s", esp_err_to_name(ret));
 
-    // Send error response back to WAN
-    char error_resp[64];
-    int error_len =
-        snprintf(error_resp, sizeof(error_resp), "BL:DISC:RESULT:0:ERROR");
-    mcu_wan_enqueue_uplink(HANDLER_BLE, (uint8_t *)error_resp, error_len);
-    return ret;
-  }
+//     // Send error response back to WAN
+//     char error_resp[64];
+//     int error_len =
+//         snprintf(error_resp, sizeof(error_resp), "BL:DISC:RESULT:0:ERROR");
+//     mcu_wan_enqueue_uplink(HANDLER_BLE, (uint8_t *)error_resp, error_len);
+//     return ret;
+//   }
 
-  // Wait for discovery to complete (blocking with timeout + margin)
-  vTaskDelay(pdMS_TO_TICKS(timeout_ms + 500));
+//   // Wait for discovery to complete (blocking with timeout + margin)
+//   vTaskDelay(pdMS_TO_TICKS(timeout_ms + 500));
 
-  // Get discovered devices
-  uint8_t devices[20][6];
-  uint8_t device_count =
-      ble_handler_task_get_discovered_devices(stack_id, devices, 20);
+//   // Get discovered devices
+//   uint8_t devices[20][6];
+//   uint8_t device_count =
+//       ble_handler_task_get_discovered_devices(stack_id, devices, 20);
 
-  ESP_LOGI(TAG, "BLE discovery completed: %u devices found", device_count);
+//   ESP_LOGI(TAG, "BLE discovery completed: %u devices found", device_count);
 
-  // Format response: "BL:DISC:RESULT:<count>:<device_list>"
-  char *response = (char *)malloc(512);
-  if (!response) {
-    ESP_LOGE(TAG, "Failed to allocate response buffer");
-    return ESP_ERR_NO_MEM;
-  }
+//   // Format response: "BL:DISC:RESULT:<count>:<device_list>"
+//   char *response = (char *)malloc(512);
+//   if (!response) {
+//     ESP_LOGE(TAG, "Failed to allocate response buffer");
+//     return ESP_ERR_NO_MEM;
+//   }
 
-  int pos = snprintf(response, 512, "BL:DISC:RESULT:%u:", device_count);
+//   int pos = snprintf(response, 512, "BL:DISC:RESULT:%u:", device_count);
 
-  for (uint8_t i = 0; i < device_count && pos < 512 - 20; i++) {
-    pos += snprintf(response + pos, 512 - pos, "%02X%02X%02X%02X%02X%02X:0",
-                    devices[i][0], devices[i][1], devices[i][2], devices[i][3],
-                    devices[i][4], devices[i][5]);
+//   for (uint8_t i = 0; i < device_count && pos < 512 - 20; i++) {
+//     pos += snprintf(response + pos, 512 - pos, "%02X%02X%02X%02X%02X%02X:0",
+//                     devices[i][0], devices[i][1], devices[i][2],
+//                     devices[i][3], devices[i][4], devices[i][5]);
 
-    if (i < device_count - 1) {
-      response[pos++] = ',';
-    }
-  }
+//     if (i < device_count - 1) {
+//       response[pos++] = ',';
+//     }
+//   }
 
-  // Send response back to WAN MCU
-  ret = mcu_wan_enqueue_uplink(HANDLER_BLE, (uint8_t *)response, pos);
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to send discovery result to WAN MCU");
-  }
+//   // Send response back to WAN MCU
+//   ret = mcu_wan_enqueue_uplink(HANDLER_BLE, (uint8_t *)response, pos);
+//   if (ret != ESP_OK) {
+//     ESP_LOGE(TAG, "Failed to send discovery result to WAN MCU");
+//   }
 
-  free(response);
-  return ret;
-}
+//   free(response);
+//   return ret;
+// }
 
-/**
- * @brief Parse BLE setup command and execute
- * Format: "CFBL:SETUP:<function_id>:<stack_id>:<params>"
- */
-static esp_err_t config_parse_ble_setup(const uint8_t *data, uint16_t len) {
-  if (!data || len < 14) { // "CFBL:SETUP:0:0"
-    ESP_LOGE(TAG, "BLE setup: invalid parameters");
-    return ESP_ERR_INVALID_ARG;
-  }
+// /**
+//  * @brief Parse BLE setup command and execute
+//  * Format: "CFBL:SETUP:<function_id>:<stack_id>:<params>"
+//  */
+// static esp_err_t config_parse_ble_setup(const uint8_t *data, uint16_t len) {
+//   if (!data || len < 14) { // "CFBL:SETUP:0:0"
+//     ESP_LOGE(TAG, "BLE setup: invalid parameters");
+//     return ESP_ERR_INVALID_ARG;
+//   }
 
-  // Check prefix
-  if (strncmp((const char *)data, "CFBL:SETUP:", 11) != 0) {
-    ESP_LOGE(TAG, "BLE setup: invalid prefix");
-    return ESP_FAIL;
-  }
+//   // Check prefix
+//   if (strncmp((const char *)data, "CFBL:SETUP:", 11) != 0) {
+//     ESP_LOGE(TAG, "BLE setup: invalid prefix");
+//     return ESP_FAIL;
+//   }
 
-  // Parse function_id
-  const char *func_str = (const char *)(data + 11);
-  const char *colon1 = strchr(func_str, ':');
-  if (!colon1) {
-    ESP_LOGE(TAG, "BLE setup: missing function_id separator");
-    return ESP_FAIL;
-  }
+//   // Parse function_id
+//   const char *func_str = (const char *)(data + 11);
+//   const char *colon1 = strchr(func_str, ':');
+//   if (!colon1) {
+//     ESP_LOGE(TAG, "BLE setup: missing function_id separator");
+//     return ESP_FAIL;
+//   }
 
-  char func_buf[4] = {0};
-  int func_len = colon1 - func_str;
-  if (func_len <= 0 || func_len >= sizeof(func_buf)) {
-    ESP_LOGE(TAG, "BLE setup: invalid function_id");
-    return ESP_FAIL;
-  }
-  memcpy(func_buf, func_str, func_len);
-  uint8_t function_id = atoi(func_buf);
+//   char func_buf[4] = {0};
+//   int func_len = colon1 - func_str;
+//   if (func_len <= 0 || func_len >= sizeof(func_buf)) {
+//     ESP_LOGE(TAG, "BLE setup: invalid function_id");
+//     return ESP_FAIL;
+//   }
+//   memcpy(func_buf, func_str, func_len);
+//   uint8_t function_id = atoi(func_buf);
 
-  // Parse stack_id
-  const char *stack_str = colon1 + 1;
-  const char *colon2 = strchr(stack_str, ':');
-  if (!colon2) {
-    ESP_LOGE(TAG, "BLE setup: missing stack_id separator");
-    return ESP_FAIL;
-  }
+//   // Parse stack_id
+//   const char *stack_str = colon1 + 1;
+//   const char *colon2 = strchr(stack_str, ':');
+//   if (!colon2) {
+//     ESP_LOGE(TAG, "BLE setup: missing stack_id separator");
+//     return ESP_FAIL;
+//   }
 
-  uint8_t stack_id = atoi(stack_str);
+//   uint8_t stack_id = atoi(stack_str);
 
-  // Extract params (can be empty)
-  const char *params = colon2 + 1;
-  uint16_t params_len = len - (params - (const char *)data);
+//   // Extract params (can be empty)
+//   const char *params = colon2 + 1;
+//   uint16_t params_len = len - (params - (const char *)data);
 
-  // Validate
-  if (function_id > 19) {
-    ESP_LOGE(TAG, "BLE setup: invalid function_id: %u", function_id);
-    return ESP_FAIL;
-  }
+//   // Validate
+//   if (function_id > 19) {
+//     ESP_LOGE(TAG, "BLE setup: invalid function_id: %u", function_id);
+//     return ESP_FAIL;
+//   }
 
-  if (stack_id > 1) {
-    ESP_LOGE(TAG, "BLE setup: invalid stack_id: %u", stack_id);
-    return ESP_FAIL;
-  }
+//   if (stack_id > 1) {
+//     ESP_LOGE(TAG, "BLE setup: invalid stack_id: %u", stack_id);
+//     return ESP_FAIL;
+//   }
 
-  ESP_LOGI(TAG, "Executing BLE setup (func=%u, stack=%u, params_len=%u)",
-           function_id, stack_id, params_len);
+//   ESP_LOGI(TAG, "Executing BLE setup (func=%u, stack=%u, params_len=%u)",
+//            function_id, stack_id, params_len);
 
-  // Execute function via BLE handler
-  ble_exec_result_t result = {0};
-  esp_err_t ret =
-      ble_handler_execute_function(stack_id, function_id, params, &result);
+//   // Execute function via BLE handler
+//   ble_exec_result_t result = {0};
+//   esp_err_t ret =
+//       ble_handler_execute_function(stack_id, function_id, params, &result);
 
-  // Format result: "BL:SETUP:RESULT:<func>:<status>:<response>"
-  const char *status = (ret == ESP_OK) ? "OK" : "FAIL";
-  char *result_buf = (char *)malloc(512);
-  if (!result_buf) {
-    ESP_LOGE(TAG, "Failed to allocate result buffer");
-    return ESP_ERR_NO_MEM;
-  }
+//   // Format result: "BL:SETUP:RESULT:<func>:<status>:<response>"
+//   const char *status = (ret == ESP_OK) ? "OK" : "FAIL";
+//   char *result_buf = (char *)malloc(512);
+//   if (!result_buf) {
+//     ESP_LOGE(TAG, "Failed to allocate result buffer");
+//     return ESP_ERR_NO_MEM;
+//   }
 
-  int result_len = snprintf(result_buf, 512, "BL:SETUP:RESULT:%u:%s:%s",
-                            function_id, status, result.response);
+//   int result_len = snprintf(result_buf, 512, "BL:SETUP:RESULT:%u:%s:%s",
+//                             function_id, status, result.response);
 
-  if (result_len < 0 || result_len >= 512) {
-    ESP_LOGE(TAG, "BLE setup: result buffer overflow");
-    free(result_buf);
-    return ESP_FAIL;
-  }
+//   if (result_len < 0 || result_len >= 512) {
+//     ESP_LOGE(TAG, "BLE setup: result buffer overflow");
+//     free(result_buf);
+//     return ESP_FAIL;
+//   }
 
-  // Send result back to WAN MCU
-  ret = mcu_wan_enqueue_uplink(HANDLER_BLE, (uint8_t *)result_buf, result_len);
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to send BLE setup result to WAN MCU");
-  }
+//   // Send result back to WAN MCU
+//   ret = mcu_wan_enqueue_uplink(HANDLER_BLE, (uint8_t *)result_buf,
+//   result_len); if (ret != ESP_OK) {
+//     ESP_LOGE(TAG, "Failed to send BLE setup result to WAN MCU");
+//   }
 
-  free(result_buf);
-  ESP_LOGI(TAG, "BLE setup completed (func=%u, status=%s)", function_id,
-           status);
-  return ret;
-}
+//   free(result_buf);
+//   ESP_LOGI(TAG, "BLE setup completed (func=%u, status=%s)", function_id,
+//            status);
+//   return ret;
+// }
 
 /**
  * @brief Config callback from MCU WAN handler
@@ -1160,33 +1163,33 @@ static void config_handler_task(void *arg) {
         }
         break;
       }
-      case CONFIG_UPDATE_BLE_JSON: {
-        if (config_parse_ble_json((const uint8_t *)cmd.raw_data,
-                                  cmd.data_len) == ESP_OK) {
-          ESP_LOGI(TAG, "BLE JSON config updated from WAN MCU");
-        } else {
-          ESP_LOGE(TAG, "Failed to parse BLE JSON config");
-        }
-        break;
-      }
-      case CONFIG_UPDATE_BLE_DISC: {
-        if (config_parse_ble_discovery((const uint8_t *)cmd.raw_data,
-                                       cmd.data_len) == ESP_OK) {
-          ESP_LOGI(TAG, "BLE discovery completed");
-        } else {
-          ESP_LOGE(TAG, "Failed to execute BLE discovery");
-        }
-        break;
-      }
-      case CONFIG_UPDATE_BLE_SETUP: {
-        if (config_parse_ble_setup((const uint8_t *)cmd.raw_data,
-                                   cmd.data_len) == ESP_OK) {
-          ESP_LOGI(TAG, "BLE setup command executed");
-        } else {
-          ESP_LOGE(TAG, "Failed to execute BLE setup command");
-        }
-        break;
-      }
+      // case CONFIG_UPDATE_BLE_JSON: {
+      //   if (config_parse_ble_json((const uint8_t *)cmd.raw_data,
+      //                             cmd.data_len) == ESP_OK) {
+      //     ESP_LOGI(TAG, "BLE JSON config updated from WAN MCU");
+      //   } else {
+      //     ESP_LOGE(TAG, "Failed to parse BLE JSON config");
+      //   }
+      //   break;
+      // }
+      // case CONFIG_UPDATE_BLE_DISC: {
+      //   if (config_parse_ble_discovery((const uint8_t *)cmd.raw_data,
+      //                                  cmd.data_len) == ESP_OK) {
+      //     ESP_LOGI(TAG, "BLE discovery completed");
+      //   } else {
+      //     ESP_LOGE(TAG, "Failed to execute BLE discovery");
+      //   }
+      //   break;
+      // }
+      // case CONFIG_UPDATE_BLE_SETUP: {
+      //   if (config_parse_ble_setup((const uint8_t *)cmd.raw_data,
+      //                              cmd.data_len) == ESP_OK) {
+      //     ESP_LOGI(TAG, "BLE setup command executed");
+      //   } else {
+      //     ESP_LOGE(TAG, "Failed to execute BLE setup command");
+      //   }
+      //   break;
+      // }
       default:
         ESP_LOGW(TAG, "Unknown config type: %d", cmd.type);
         break;
