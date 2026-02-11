@@ -5,8 +5,8 @@
 
 #include "config_handler.h"
 #include "DA2_esp_LAN.h"
-// #include "ble_handler.h"
-// #include "ble_handler_task.h"
+#include "ble_handler.h"
+#include "config_handler_ble_commands.h"
 #include "can_driver.h"
 #include "fota_lan_config.h"
 #include "fota_lan_handler.h"
@@ -1163,33 +1163,33 @@ static void config_handler_task(void *arg) {
         }
         break;
       }
-      // case CONFIG_UPDATE_BLE_JSON: {
-      //   if (config_parse_ble_json((const uint8_t *)cmd.raw_data,
-      //                             cmd.data_len) == ESP_OK) {
-      //     ESP_LOGI(TAG, "BLE JSON config updated from WAN MCU");
-      //   } else {
-      //     ESP_LOGE(TAG, "Failed to parse BLE JSON config");
-      //   }
-      //   break;
-      // }
-      // case CONFIG_UPDATE_BLE_DISC: {
-      //   if (config_parse_ble_discovery((const uint8_t *)cmd.raw_data,
-      //                                  cmd.data_len) == ESP_OK) {
-      //     ESP_LOGI(TAG, "BLE discovery completed");
-      //   } else {
-      //     ESP_LOGE(TAG, "Failed to execute BLE discovery");
-      //   }
-      //   break;
-      // }
-      // case CONFIG_UPDATE_BLE_SETUP: {
-      //   if (config_parse_ble_setup((const uint8_t *)cmd.raw_data,
-      //                              cmd.data_len) == ESP_OK) {
-      //     ESP_LOGI(TAG, "BLE setup command executed");
-      //   } else {
-      //     ESP_LOGE(TAG, "Failed to execute BLE setup command");
-      //   }
-      //   break;
-      // }
+      case CONFIG_UPDATE_BLE_JSON: {
+        if (config_parse_ble_json((const uint8_t *)cmd.raw_data,
+                                  cmd.data_len) == ESP_OK) {
+          ESP_LOGI(TAG, "BLE JSON config loaded from WAN MCU");
+        } else {
+          ESP_LOGE(TAG, "Failed to parse BLE JSON config");
+        }
+        break;
+      }
+      case CONFIG_UPDATE_BLE_DISC: {
+        if (config_parse_ble_scan((const uint8_t *)cmd.raw_data,
+                                  cmd.data_len) == ESP_OK) {
+          ESP_LOGI(TAG, "BLE SCAN completed");
+        } else {
+          ESP_LOGE(TAG, "Failed to execute BLE SCAN");
+        }
+        break;
+      }
+      case CONFIG_UPDATE_BLE_SETUP: {
+        if (config_parse_ble_setup((const uint8_t *)cmd.raw_data,
+                                   cmd.data_len) == ESP_OK) {
+          ESP_LOGI(TAG, "BLE SETUP command executed");
+        } else {
+          ESP_LOGE(TAG, "Failed to execute BLE SETUP");
+        }
+        break;
+      }
       default:
         ESP_LOGW(TAG, "Unknown config type: %d", cmd.type);
         break;

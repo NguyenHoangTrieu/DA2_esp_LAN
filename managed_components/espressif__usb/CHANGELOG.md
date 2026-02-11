@@ -4,6 +4,16 @@ All notable changes to this component will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-02-05
+
+### Added
+
+- Device initiated remote wakeup (https://github.com/espressif/esp-usb/pull/298)
+
+### Fixed
+
+- Fixed deadlock that prevented closing devices from high priority tasks (https://github.com/espressif/esp-idf/issues/17707)
+
 ## [1.1.0] - 2025-12-04
 
 ### Added

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2015-2025 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2015-2026 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -14,6 +14,7 @@ extern "C" {
 #include <stdbool.h>
 #include <sys/queue.h>
 #include "esp_err.h"
+#include "esp_idf_version.h"
 #include "usb_private.h"
 #include "usb/usb_types_ch9.h"
 
@@ -69,6 +70,9 @@ typedef enum {
     HCD_PORT_EVENT_DISCONNECTION,   /**< A device disconnection has been detected */
     HCD_PORT_EVENT_ERROR,           /**< A port error has been detected. Port is now HCD_PORT_STATE_RECOVERY  */
     HCD_PORT_EVENT_OVERCURRENT,     /**< Overcurrent detected on the port. Port is now HCD_PORT_STATE_RECOVERY */
+#ifdef REMOTE_WAKE_HAL_SUPPORTED
+    HCD_PORT_EVENT_REMOTE_WAKEUP,   /**< A remote-wakeup event from device has been detected */
+#endif // REMOTE_WAKE_HAL_SUPPORTED
 } hcd_port_event_t;
 
 /**
@@ -151,15 +155,6 @@ typedef struct {
     uint32_t ptx_fifo_lines;  /**< Number of periodic TX FIFO lines */
     uint32_t rx_fifo_lines;   /**< Number of RX FIFO lines */
 } hcd_fifo_settings_t;
-/**
- * @brief HCD configuration structure
- */
-typedef struct {
-    int intr_flags;                         /**< Interrupt flags for HCD interrupt */
-    const hcd_fifo_settings_t *fifo_config; /**< Optional pointer to custom FIFO config.
-                                                 If NULL, default configuration is used. */
-    unsigned peripheral_map;                /**< Bit map of USB-OTG peripherals that belong to HCD. Set to zero to use default */
-} hcd_config_t;
 
 /**
  * @brief Port configuration structure
@@ -168,7 +163,8 @@ typedef struct {
     hcd_port_callback_t callback;           /**< HCD port event callback */
     void *callback_arg;                     /**< User argument for HCD port callback */
     void *context;                          /**< Context variable used to associate the port with upper layer object */
-    unsigned peripheral_idx;                /**< Index of USB peripheral this port belongs to. Index numbers are defined in USB_DWC_LL_GET_HW */
+    const hcd_fifo_settings_t *fifo_config; /**< Optional pointer to custom FIFO config. If NULL, default configuration is used. */
+    int intr_flags;                         /**< Interrupt flags for HCD interrupt */
 } hcd_port_config_t;
 
 /**
@@ -184,42 +180,6 @@ typedef struct {
     usb_speed_t dev_speed;                  /**< Speed of the device */
     uint8_t dev_addr;                       /**< Device address of the pipe */
 } hcd_pipe_config_t;
-
-// --------------------------------------------- Host Controller Driver ------------------------------------------------
-
-/**
- * @brief Installs the Host Controller Driver
- *
- * - Allocates memory and interrupt resources for the HCD and underlying ports
- *
- * @note This function must be called before any other HCD function is called
- * @note Before calling this function, the Host Controller must already be un-clock gated and reset. The USB PHY
- *       (internal or external, and associated GPIOs) must already be configured.
- *
- * @param[in] config HCD configuration
- *
- * @return
- *    - ESP_OK: HCD successfully installed
- *    - ESP_ERR_NO_MEM: Insufficient memory
- *    - ESP_ERR_INVALID_STATE: HCD is already installed
- *    - ESP_ERR_INVALID_ARG: Arguments are invalid
- */
-esp_err_t hcd_install(const hcd_config_t *config);
-
-/**
- * @brief Uninstalls the HCD
- *
- * Before uninstalling the HCD, the following conditions should be met:
- * - All ports must be uninitialized, all pipes freed
- *
- * @note This function will simply free the resources used by the HCD. The underlying Host Controller and USB PHY will
- *       not be disabled.
- *
- * @return
- *    - ESP_OK: HCD successfully uninstalled
- *    - ESP_ERR_INVALID_STATE: HCD is not in the right condition to be uninstalled
- */
-esp_err_t hcd_uninstall(void);
 
 // ---------------------------------------------------- HCD Port -------------------------------------------------------
 

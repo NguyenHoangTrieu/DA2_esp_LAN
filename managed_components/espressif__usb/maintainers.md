@@ -8,10 +8,10 @@ Note: Some static functions within the stack need to be called within critical s
 
 The host driver is currently split into the following layers, ordered from the lowest (furthest away from the user) to the highest layer (closest to the user).
 
-* USB Host lower layer in `usbh_ll.h`
-* USB HAL in `usbh_hal.h` and `usbh_hal.c`
-* Host Controller Driver in `hcd.c` and `hcd.h`
-* USB Host Driver in `usb_host.h` and `usb_host.c`
+- USB Host lower layer in `usbh_ll.h`
+- USB HAL in `usbh_hal.h` and `usbh_hal.c`
+- Host Controller Driver in `hcd.c` and `hcd.h`
+- USB Host Driver in `usb_host.h` and `usb_host.c`
 
 # DWC_OTG
 
@@ -19,8 +19,7 @@ Details regarding the DWC_OTG peripheral are covered in the data book and progra
 
 ## Implicit interrupt on short packet on INTERRUPT transfer.
 
-- An interrupt channel will trigger an interrupt one of its QTDs is a short packet (event if the QTD did not set the interrupt on complete bit). This implicit interrupt is used to notify the software that it should halt the channel to
-stop the remainder of the interrupt transfer.
+- An interrupt channel will trigger an interrupt one of its QTDs is a short packet (event if the QTD did not set the interrupt on complete bit). This implicit interrupt is used to notify the software that it should halt the channel to stop the remainder of the interrupt transfer.
 
 ## Channel interrupt on port errors
 
@@ -38,10 +37,10 @@ stop the remainder of the interrupt transfer.
 
 # USB Host Lower Layer
 
-* `usbh_ll.h` abstracts away the basic register operation of the DWC_OTG controller
-* The LL provides register operations of the DWC OTG controller operating under Host Mode using scatter/gather internal DMA.
-* For non-host mode specific register operations (i.e. global registers), the functions are prefixed with `usb_ll_...()`
-* For host mode specific register operations, the functions are prefixed with `usbh_ll_...()`
+- `usbh_ll.h` abstracts away the basic register operation of the DWC_OTG controller
+- The LL provides register operations of the DWC OTG controller operating under Host Mode using scatter/gather internal DMA.
+- For non-host mode specific register operations (i.e. global registers), the functions are prefixed with `usb_ll_...()`
+- For host mode specific register operations, the functions are prefixed with `usbh_ll_...()`
 
 # USB Host HAL
 
@@ -80,7 +79,7 @@ The HCD (Host Controller Driver) abstracts the DWC_OTG as N number of ports and 
 The HCD currently has the following limitations:
 
 - HCD **does not "present the root hub and its behavior according to the hub class definition"**. We currently don't have a hub driver yet, so the port commands in the driver do not fully represent an interface of a USB hub as described in 10.4 of the USB2.0 spec.
-- No more than 8 pipes can be allocated at any one time due to underlying Host Controllers 8 channel limit. In the future, we could make particular pipes share a single Host Controller channel.
+- No more than 8 (or 16 on ESP32-P4) pipes can be allocated at any one time due to underlying Host Controllers 8 channel limit. In the future, we could make particular pipes share a single Host Controller channel.
 
 ## HCD Port
 
@@ -138,8 +137,7 @@ The client of the HCD can also forego callbacks entirely and simply poll for por
 
 The HCD API is thread safe however the following limitations should be noted:
 
-- It is the client's responsibility to ensure that `hcd_install()` is called before any other HCD function is called
-- Likewise, it is the client's responsibility to ensure that events and pipes are cleared before calling `hcd_port_deinit()`.
+- It is the client's responsibility to ensure that events and pipes are cleared before calling `hcd_port_deinit()`.
 - `hcd_port_command()` is thread safe, but only one port command can be executed at any one time. Therefore HCD internally used a mutex to protect against concurrent commands.
 - If multiple threads attempt to execute a command on the sample one, all but one of those threads will return with an invalid state error.
 - Blocking HCD functions should not be called from critical sections and interrupts (e.g., `hcd_port_command()` and `hcd_pipe_command()`).

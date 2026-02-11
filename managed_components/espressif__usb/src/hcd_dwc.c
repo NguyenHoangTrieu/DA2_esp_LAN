@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2015-2025 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2015-2026 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -256,7 +256,7 @@ struct port_obj {
         };
         uint32_t val;
     } flags;
-    bool initialized;
+    int periph_idx;                                 // Peripheral index of this port. Used for initialization check
     // FIFO related
     usb_dwc_hal_fifo_config_t fifo_config;          // FIFO config to be applied at HAL level
     // Port callback and context
@@ -267,15 +267,9 @@ struct port_obj {
     intr_handle_t isr_hdl;       // Interrupt handle for this root port (USB-OTG peripheral)
 };
 
-/**
- * @brief Object representing the HCD
- */
-typedef struct {
-    // Ports: Each peripheral is a root port
-    port_t *port_obj[NUM_PORTS];
-} hcd_obj_t;
-
-static hcd_obj_t *s_hcd_obj = NULL;     // Note: "s_" is for the static pointer
+// With s_port_inited[] we can check if a port has been initialized -> to provide singleton handle for each root port
+// Each peripheral is a root port
+static bool s_port_inited[NUM_PORTS] = {0};
 
 // ------------------------------------------------- Forward Declare ---------------------------------------------------
 
@@ -575,8 +569,7 @@ static void _port_reset_all_pipes(port_t *port);
 /**
  * @brief Convert user-provided FIFO configuration to HAL format
  *
- * This function validates and converts a user-defined FIFO configuration
- * (provided via `hcd_config_t.fifo_config`) into the format expected by the HAL.
+ * This function validates and converts a user-defined FIFO configuration into the format expected by the HAL.
  * It ensures that both RX FIFO and Non-Periodic TX FIFO sizes are non-zero.
  *
  * @param[in]  src Pointer to user-defined FIFO settings (HCD format)
@@ -586,14 +579,15 @@ static void _port_reset_all_pipes(port_t *port);
  *      - ESP_OK: Conversion successful and values copied
  *      - ESP_ERR_INVALID_SIZE: Either RX FIFO or Non-Periodic TX FIFO is zero
  */
-
 static esp_err_t convert_fifo_config_to_hal_config(const hcd_fifo_settings_t *src, usb_dwc_hal_fifo_config_t *dst);
 
 /**
  * @brief Power ON the port
  *
- * @param port Port object
- * @return esp_err_t
+ * @param[in] port Pointer to the port object
+ * @return
+ *    - ESP_ERR_INVALID_STATE: Root port is not in a correct state to be powered on
+ *    - ESP_OK: Root port powered on
  */
 static esp_err_t _port_cmd_power_on(port_t *port);
 
@@ -602,8 +596,11 @@ static esp_err_t _port_cmd_power_on(port_t *port);
  *
  * - If a device is currently connected, this function will cause a disconnect event
  *
- * @param port Port object
- * @return esp_err_t
+ * @param[in] port Pointer to the port object
+ * @return
+ *    - ESP_ERR_INVALID_STATE: Root port is not in a correct state to be powered off
+ *    - ESP_ERR_NOT_ALLOWED: HCLK could not be un-gated
+ *    - ESP_OK: Root port powered off
  */
 static esp_err_t _port_cmd_power_off(port_t *port);
 
@@ -613,8 +610,13 @@ static esp_err_t _port_cmd_power_off(port_t *port);
  * - This function issues a reset signal using the timings specified by the USB2.0 spec
  *
  * @note This function can block
- * @param port Port object
- * @return esp_err_t
+ * @param[in] port Pointer to the port object
+ * @return
+ *    - ESP_ERR_INVALID_STATE: Root port is not in a correct state to be reset
+ *    - ESP_ERR_NOT_ALLOWED: HCLK could not be un-gated
+ *    - ESP_ERR_INVALID_RESPONSE: Root port state unexpectedly changed during the reset sequence
+ *    - ESP_ERR_INVALID_SIZE: Invalid FIFO config
+ *    - ESP_OK: Root port reset successful
  */
 static esp_err_t _port_cmd_reset(port_t *port);
 
@@ -623,11 +625,19 @@ static esp_err_t _port_cmd_reset(port_t *port);
  *
  * - Port must be enabled in order to to be suspended
  * - All pipes must be halted for the port to be suspended
- * - Suspending the port stops Keep Alive/SOF from being sent to the connected device
+ * - Suspending the port stops Keep Alive/SOF from being sent to the connected device and gates the internal clock
+ *
+ * - This sequence equals to a sequence from the DesignWare Cores USB 2.0 Programming Guide version 4.00a
+ *   14.2.2 Clock Gating
  *
  * @note This function can block
- * @param port Port object
- * @return esp_err_t
+ * @param[in] port Pointer to the port object
+ * @return
+ *    - ESP_ERR_INVALID_STATE: Port is not in a correct state to be suspended, or pipe(s) routed through this port is not halted
+ *    - ESP_ERR_INVALID_RESPONSE: Port state unexpectedly changed (for example: device was disconnected)
+ *    - ESP_ERR_NOT_FINISHED: Port did not finish the suspending sequence and is not in the suspended state
+ *    - ESP_ERR_NOT_ALLOWED: HCLK could not be gated
+ *    - ESP_OK: Root port suspended
  */
 static esp_err_t _port_cmd_bus_suspend(port_t *port);
 
@@ -635,10 +645,21 @@ static esp_err_t _port_cmd_bus_suspend(port_t *port);
  * @brief Resume the port
  *
  * - Port must be suspended in order to be resumed
+ * - Resuming the root port starts to send Keep Alive/SOF to the connected device and un-gates the internal clock
+ *
+ * - This sequence equals to a sequence from the DesignWare Cores USB 2.0 Programming Guide version 4.00a
+ *   14.2.2 Clock Gating
+ *   Sequence Exiting Suspend State Through Host Initiated Resume
+ *            Exiting Suspend State Through Device Initiated Remote Wakeup
  *
  * @note This function can block
- * @param port Port object
- * @return esp_err_t
+ * @note this sequence is used for both resume scenarios: the host initiated and the device initiated (remote wakeup) resume
+ * @param[in] port Pointer to the port object
+ * @return
+ *    - ESP_ERR_INVALID_STATE: Port is not in a correct state to be resumed
+ *    - ESP_ERR_NOT_ALLOWED: HCLK could not be un-gated
+ *    - ESP_ERR_INVALID_RESPONSE: Port state unexpectedly changed (for example: device was disconnected)
+ *    - ESP_OK: Root port resumed
  */
 static esp_err_t _port_cmd_bus_resume(port_t *port);
 
@@ -649,8 +670,12 @@ static esp_err_t _port_cmd_bus_resume(port_t *port);
  * - The port must be enabled or suspended in order to be disabled
  *
  * @note This function can block
- * @param port Port object
- * @return esp_err_t
+ * @param[in] port Pointer to the port object
+ * @return
+ *    - ESP_ERR_INVALID_STATE: Port is not in a correct state to be disabled, or pipe(s) routed through this port is not halted
+ *    - ESP_ERR_NOT_ALLOWED: HCLK could not be un-gated
+ *    - ESP_ERR_INVALID_RESPONSE: Port state unexpectedly changed (for example: device was disconnected)
+ *    - ESP_OK: Root port disabled
  */
 static esp_err_t _port_cmd_disable(port_t *port);
 
@@ -841,6 +866,16 @@ static hcd_port_event_t _intr_hdlr_hprt(port_t *port, usb_dwc_hal_port_event_t h
         port->flags.conn_dev_ena = 0;
         break;
     }
+#ifdef REMOTE_WAKE_HAL_SUPPORTED
+    case USB_DWC_HAL_PORT_EVENT_REMOTE_WAKEUP: {
+        ESP_EARLY_LOGD(HCD_DWC_TAG, "Remote wakeup generated from device");
+        // Port must have been previously suspended to start processing remote wakeup signaling
+        if (port->state == HCD_PORT_STATE_SUSPENDED) {
+            port_event = HCD_PORT_EVENT_REMOTE_WAKEUP;
+        }
+        break;
+    }
+#endif // REMOTE_WAKE_HAL_SUPPORTED
     default: {
         abort();
         break;
@@ -1054,107 +1089,6 @@ static void port_obj_free(port_t *port)
     free(port);
 }
 
-// ----------------------- Public --------------------------
-
-esp_err_t hcd_install(const hcd_config_t *config)
-{
-    HCD_ENTER_CRITICAL();
-    HCD_CHECK_FROM_CRIT(s_hcd_obj == NULL, ESP_ERR_INVALID_STATE);
-    HCD_EXIT_CRITICAL();
-
-    // Check if peripheral_map does not have bits set outside of valid range. Valid bits are BIT0 - BIT(NUM_PORTS - 1)
-    HCD_CHECK((config->peripheral_map != 0) && (config->peripheral_map < BIT(NUM_PORTS)), ESP_ERR_INVALID_ARG);
-
-    esp_err_t err_ret;
-
-    // Allocate memory for the driver object
-    hcd_obj_t *p_hcd_obj_dmy = calloc(1, sizeof(hcd_obj_t));
-    if (p_hcd_obj_dmy == NULL) {
-        return ESP_ERR_NO_MEM;
-    }
-
-    // Allocate each port object
-    for (int i = 0; i < NUM_PORTS; i++) {
-        if (BIT(i) & config->peripheral_map) {
-            p_hcd_obj_dmy->port_obj[i] = port_obj_alloc();
-            if (p_hcd_obj_dmy->port_obj[i] == NULL) {
-                err_ret = ESP_ERR_NO_MEM;
-                goto clean_up;
-            }
-            // Allocate interrupt
-            const int irq_index = usb_dwc_info.controllers[i].irq;
-            err_ret = esp_intr_alloc(irq_index,
-                                     config->intr_flags | ESP_INTR_FLAG_INTRDISABLED,  // The interrupt must be disabled until the port is initialized
-                                     intr_hdlr_main,
-                                     (void *)p_hcd_obj_dmy->port_obj[i],
-                                     &p_hcd_obj_dmy->port_obj[i]->isr_hdl);
-            if (err_ret != ESP_OK) {
-                ESP_LOGE(HCD_DWC_TAG, "Interrupt alloc error: %s", esp_err_to_name(err_ret));
-                goto clean_up;
-            }
-
-            // Apply custom FIFO config if provided
-            if (config->fifo_config != NULL) {
-                // Convert and validate user-provided config
-                err_ret = convert_fifo_config_to_hal_config(config->fifo_config, &p_hcd_obj_dmy->port_obj[i]->fifo_config);
-                if (err_ret != ESP_OK) {
-                    goto clean_up;
-                }
-            }
-        }
-    }
-
-    HCD_ENTER_CRITICAL();
-    if (s_hcd_obj != NULL) {
-        HCD_EXIT_CRITICAL();
-        err_ret = ESP_ERR_INVALID_STATE;
-        goto clean_up;
-    }
-    s_hcd_obj = p_hcd_obj_dmy;
-    HCD_EXIT_CRITICAL();
-    return ESP_OK;
-
-clean_up:
-    // Free resources
-    for (int i = 0; i < NUM_PORTS; i++) {
-        if (p_hcd_obj_dmy->port_obj[i]) {
-            esp_intr_free(p_hcd_obj_dmy->port_obj[i]->isr_hdl);
-            port_obj_free(p_hcd_obj_dmy->port_obj[i]);
-        }
-    }
-    free(p_hcd_obj_dmy);
-    return err_ret;
-}
-
-esp_err_t hcd_uninstall(void)
-{
-    HCD_ENTER_CRITICAL();
-    // Check that all ports have been disabled
-    bool all_ports_disabled = true;
-    for (int i = 0; i < NUM_PORTS; i++) {
-        if (s_hcd_obj->port_obj[i]) {
-            all_ports_disabled = all_ports_disabled && !(s_hcd_obj->port_obj[i]->initialized);
-        }
-    }
-    if (s_hcd_obj == NULL || !all_ports_disabled) {
-        HCD_EXIT_CRITICAL();
-        return ESP_ERR_INVALID_STATE;
-    }
-    hcd_obj_t *p_hcd_obj_dmy = s_hcd_obj;
-    s_hcd_obj = NULL;
-    HCD_EXIT_CRITICAL();
-
-    // Free resources
-    for (int i = 0; i < NUM_PORTS; i++) {
-        if (p_hcd_obj_dmy->port_obj[i]) {
-            esp_intr_free(p_hcd_obj_dmy->port_obj[i]->isr_hdl);
-            port_obj_free(p_hcd_obj_dmy->port_obj[i]);
-        }
-    }
-    free(p_hcd_obj_dmy);
-    return ESP_OK;
-}
-
 // ------------------------------------------------------ Port ---------------------------------------------------------
 
 // ----------------------- Helpers -------------------------
@@ -1236,6 +1170,41 @@ static inline bool _is_fifo_config_by_bias(const usb_dwc_hal_fifo_config_t *cfg)
             cfg->ptx_fifo_lines == 0);
 }
 
+/**
+ * @brief Gate internal clock
+ *
+ * @note HAL functions used in this function were backported together with remote wakeup changes, we are guarding the
+ *       presence of both using the same public define
+ *
+ * @param[in] port Pointer to the port object
+ * @param[in] enable enable/disable internal clock gating
+ * @return True internal clk successfully gated/un-gated
+ * @return False internal clk could not be gated/un-gated
+ */
+static inline bool _internal_clk_gate(port_t *port, bool enable)
+{
+#ifdef REMOTE_WAKE_HAL_SUPPORTED
+    // Stop PHY Clock and gate HCLK
+    usb_dwc_hal_pwr_clk_internal_clock_gate(port->hal, enable);
+
+    // Wait 10 PHY clock cycles, PHY Clock is 30MHz when using 16bit interface, 60MHz when 8bit interface
+    // which makes 33.3 nS. Busy wait for 1uS just to be sure
+    esp_rom_delay_us(1);
+
+    const bool phy_clk_stopped = usb_dwc_hal_pwr_clk_check_phy_clk_stopped(port->hal);
+    const bool hclk_gated = usb_dwc_hal_pwr_clk_check_hclk_gated(port->hal);
+
+    // enable == phy_clk_stopped == hclk_gated
+    // When gating the clock, all 3 variables must be 1. When un-gating, all 3 must be 0.
+    if ((enable == phy_clk_stopped) && (enable == hclk_gated)) {
+        return true;
+    }
+    return false;
+#else
+    return true;
+#endif // REMOTE_WAKE_HAL_SUPPORTED
+}
+
 // ---------------------- Commands -------------------------
 
 static esp_err_t _port_cmd_power_on(port_t *port)
@@ -1257,15 +1226,27 @@ static esp_err_t _port_cmd_power_off(port_t *port)
 {
     esp_err_t ret;
     // Port can only be unpowered if already powered
-    if (port->state != HCD_PORT_STATE_NOT_POWERED) {
-        port->state = HCD_PORT_STATE_NOT_POWERED;
-        usb_dwc_hal_port_deinit(port->hal);
-        usb_dwc_hal_port_toggle_power(port->hal, false);
-        // If a device is currently connected, this should trigger a disconnect event
-        ret = ESP_OK;
-    } else {
+    if (port->state == HCD_PORT_STATE_NOT_POWERED) {
         ret = ESP_ERR_INVALID_STATE;
+        goto exit;
     }
+
+    // Powering-off from suspended state
+    if (port->state == HCD_PORT_STATE_SUSPENDED) {
+        // un-gate internal clock, to be able to toggle power on the port
+        if (!_internal_clk_gate(port, false)) {
+            ret = ESP_ERR_NOT_ALLOWED;
+            goto exit;
+        }
+    }
+
+    port->state = HCD_PORT_STATE_NOT_POWERED;
+    usb_dwc_hal_port_deinit(port->hal);
+    usb_dwc_hal_port_toggle_power(port->hal, false);
+    // If a device is currently connected, this should trigger a disconnect event
+    ret = ESP_OK;
+
+exit:
     return ret;
 }
 
@@ -1285,6 +1266,14 @@ static esp_err_t _port_cmd_reset(port_t *port)
     if (port->num_pipes_queued > 0) {
         ret = ESP_ERR_INVALID_STATE;
         goto exit;
+    }
+    // If resetting from suspended state, we must un-gate the internal clock
+    if (port->state == HCD_PORT_STATE_SUSPENDED) {
+        // un-gate internal clock, to be able to toggle reset the port
+        if (!_internal_clk_gate(port, false)) {
+            ret = ESP_ERR_NOT_ALLOWED;
+            goto exit;
+        }
     }
     /*
     Proceed to resetting the bus
@@ -1369,6 +1358,12 @@ static esp_err_t _port_cmd_bus_suspend(port_t *port)
         goto exit;
     }
 
+    // Gate the internal clock
+    if (! _internal_clk_gate(port, true)) {
+        ret = ESP_ERR_NOT_ALLOWED;
+        goto exit;
+    }
+
     port->state = HCD_PORT_STATE_SUSPENDED;
     ret = ESP_OK;
 
@@ -1384,6 +1379,13 @@ static esp_err_t _port_cmd_bus_resume(port_t *port)
         ret = ESP_ERR_INVALID_STATE;
         goto exit;
     }
+
+    // Un-gate the internal clock first, to be able to resume the root port
+    if (!_internal_clk_gate(port, false)) {
+        ret = ESP_ERR_NOT_ALLOWED;
+        goto exit;
+    }
+
     // Put and hold the bus in the K state.
     usb_dwc_hal_port_toggle_resume(port->hal, true);
     port->state = HCD_PORT_STATE_RESUMING;
@@ -1424,6 +1426,15 @@ static esp_err_t _port_cmd_disable(port_t *port)
         ret = ESP_ERR_INVALID_STATE;
         goto exit;
     }
+
+    // If disabling from suspended state, un-gate the internal clock to be able the disable the root port
+    if (port->state == HCD_PORT_STATE_SUSPENDED) {
+        if (!_internal_clk_gate(port, false)) {
+            ret = ESP_ERR_NOT_ALLOWED;
+            goto exit;
+        }
+    }
+
     // All pipes are guaranteed to be halted or freed at this point. Proceed to disable the port
     port->flags.disable_requested = 1;
     usb_dwc_hal_port_disable(port->hal);
@@ -1446,9 +1457,20 @@ esp_err_t hcd_port_init(int port_number, const hcd_port_config_t *port_config, h
     HCD_CHECK(port_number < NUM_PORTS, ESP_ERR_NOT_FOUND);
 
     HCD_ENTER_CRITICAL();
-    HCD_CHECK_FROM_CRIT(s_hcd_obj != NULL && !s_hcd_obj->port_obj[port_number]->initialized, ESP_ERR_INVALID_STATE);
-    // Port object memory and resources (such as the mutex) already be allocated. Just need to initialize necessary fields only
-    port_t *port_obj = s_hcd_obj->port_obj[port_number];
+    HCD_CHECK_FROM_CRIT(!s_port_inited[port_number], ESP_ERR_INVALID_STATE);
+    s_port_inited[port_number] = true; // Reserve the port slot to avoid concurrent init
+    HCD_EXIT_CRITICAL();
+
+    esp_err_t err_ret = ESP_OK;
+    bool hal_inited = false;
+    bool isr_allocated = false;
+    port_t *port_obj = port_obj_alloc();
+    if (port_obj == NULL) {
+        err_ret = ESP_ERR_NO_MEM;
+        goto clean_up;
+    }
+
+    port_obj->periph_idx = port_number;
     TAILQ_INIT(&port_obj->pipes_idle_tailq);
     TAILQ_INIT(&port_obj->pipes_active_tailq);
     port_obj->state = HCD_PORT_STATE_NOT_POWERED;
@@ -1457,13 +1479,37 @@ esp_err_t hcd_port_init(int port_number, const hcd_port_config_t *port_config, h
     port_obj->callback_arg = port_config->callback_arg;
     port_obj->context = port_config->context;
 
+    // Apply custom FIFO config if provided
+    if (port_config->fifo_config != NULL) {
+        err_ret = convert_fifo_config_to_hal_config(port_config->fifo_config, &port_obj->fifo_config);
+        if (err_ret != ESP_OK) {
+            goto clean_up;
+        }
+    }
+
+    // Allocate interrupt (disabled by default; enabled after init completes)
+    const int irq_index = usb_dwc_info.controllers[port_number].irq;
+    err_ret = esp_intr_alloc(irq_index,
+                             port_config->intr_flags | ESP_INTR_FLAG_INTRDISABLED,
+                             intr_hdlr_main,
+                             (void *)port_obj,
+                             &port_obj->isr_hdl);
+    if (err_ret != ESP_OK) {
+        ESP_LOGE(HCD_DWC_TAG, "Interrupt alloc error: %s", esp_err_to_name(err_ret));
+        goto clean_up;
+    }
+    isr_allocated = true;
+
     // USB-HAL's size is dependent on its configuration, namely on number of channels in the configuration
     // We must first initialize the HAL, to get the number of channels and then allocate memory for the channels
     usb_dwc_hal_init(port_obj->hal, port_number);
+    hal_inited = true;
     port_obj->hal->channels.hdls = calloc(port_obj->hal->constant_config.chan_num_total, sizeof(usb_dwc_hal_chan_t *));
-    HCD_CHECK_FROM_CRIT(port_obj->hal->channels.hdls != NULL, ESP_ERR_NO_MEM);
+    if (port_obj->hal->channels.hdls == NULL) {
+        err_ret = ESP_ERR_NO_MEM;
+        goto clean_up;
+    }
 
-    port_obj->initialized = true;
     // Clear the frame list. We will set the frame list register and enable periodic scheduling after a successful reset
     memset(port_obj->frame_list, 0, FRAME_LIST_LEN * sizeof(uint32_t));
     // If FIFO config is zeroed -> calculate from bias
@@ -1471,33 +1517,55 @@ esp_err_t hcd_port_init(int port_number, const hcd_port_config_t *port_config, h
         // Calculate default FIFO sizes based on Kconfig bias settings
         _calculate_fifo_from_bias(port_obj, port_obj->hal);
     }
+
     esp_intr_enable(port_obj->isr_hdl);
     *port_hdl = (hcd_port_handle_t)port_obj;
-    HCD_EXIT_CRITICAL();
     ESP_LOGD(HCD_DWC_TAG, "FIFO config lines: RX=%" PRIu32 ", PTX=%" PRIu32 ", NPTX=%" PRIu32,
              port_obj->fifo_config.rx_fifo_lines,
              port_obj->fifo_config.ptx_fifo_lines,
              port_obj->fifo_config.nptx_fifo_lines);
     vTaskDelay(pdMS_TO_TICKS(INIT_DELAY_MS));    // Need a short delay before host mode takes effect
     return ESP_OK;
+
+clean_up:
+    if (port_obj != NULL) {
+        if (port_obj->hal != NULL && port_obj->hal->channels.hdls != NULL) {
+            free(port_obj->hal->channels.hdls);
+            port_obj->hal->channels.hdls = NULL;
+        }
+        if (hal_inited) {
+            usb_dwc_hal_deinit(port_obj->hal);
+        }
+        if (isr_allocated) {
+            esp_intr_free(port_obj->isr_hdl);
+        }
+        port_obj_free(port_obj);
+    }
+    HCD_ENTER_CRITICAL();
+    s_port_inited[port_number] = false;
+    HCD_EXIT_CRITICAL();
+    return err_ret;
 }
 
 esp_err_t hcd_port_deinit(hcd_port_handle_t port_hdl)
 {
     port_t *port = (port_t *)port_hdl;
+    HCD_CHECK(port != NULL, ESP_ERR_INVALID_ARG);
 
     HCD_ENTER_CRITICAL();
-    HCD_CHECK_FROM_CRIT(s_hcd_obj != NULL && port->initialized
+    HCD_CHECK_FROM_CRIT(s_port_inited[port->periph_idx]
                         && port->num_pipes_idle == 0 && port->num_pipes_queued == 0
                         && (port->state == HCD_PORT_STATE_NOT_POWERED || port->state == HCD_PORT_STATE_RECOVERY)
                         && port->task_waiting_port_notif == NULL,
                         ESP_ERR_INVALID_STATE);
-    port->initialized = false;
+    s_port_inited[port->periph_idx] = false;
     esp_intr_disable(port->isr_hdl);
-    free(port->hal->channels.hdls);
-    usb_dwc_hal_deinit(port->hal);
     HCD_EXIT_CRITICAL();
 
+    esp_intr_free(port->isr_hdl);
+    free(port->hal->channels.hdls);
+    usb_dwc_hal_deinit(port->hal);
+    port_obj_free(port);
     return ESP_OK;
 }
 
@@ -1507,7 +1575,7 @@ esp_err_t hcd_port_command(hcd_port_handle_t port_hdl, hcd_port_cmd_t command)
     port_t *port = (port_t *)port_hdl;
     xSemaphoreTake(port->port_mux, portMAX_DELAY);
     HCD_ENTER_CRITICAL();
-    if (port->initialized && !port->flags.event_pending) { // Port events need to be handled first before issuing a command
+    if (s_port_inited[port->periph_idx] && !port->flags.event_pending) { // Port events need to be handled first before issuing a command
         port->flags.cmd_processing = 1;
         switch (command) {
         case HCD_PORT_CMD_POWER_ON: {
@@ -1570,7 +1638,7 @@ hcd_port_event_t hcd_port_handle_event(hcd_port_handle_t port_hdl)
     hcd_port_event_t ret = HCD_PORT_EVENT_NONE;
     xSemaphoreTake(port->port_mux, portMAX_DELAY);
     HCD_ENTER_CRITICAL();
-    if (port->initialized && port->flags.event_pending) {
+    if (s_port_inited[port->periph_idx] && port->flags.event_pending) {
         port->flags.event_pending = 0;
         port->flags.event_processing = 1;
         ret = port->last_event;
@@ -1603,11 +1671,14 @@ esp_err_t hcd_port_recover(hcd_port_handle_t port_hdl)
 {
     port_t *port = (port_t *)port_hdl;
     HCD_ENTER_CRITICAL();
-    HCD_CHECK_FROM_CRIT(s_hcd_obj != NULL && port->initialized && port->state == HCD_PORT_STATE_RECOVERY
+    HCD_CHECK_FROM_CRIT(s_port_inited[port->periph_idx] && port->state == HCD_PORT_STATE_RECOVERY
                         && port->num_pipes_idle == 0 && port->num_pipes_queued == 0
                         && port->flags.val == 0 && port->task_waiting_port_notif == NULL,
                         ESP_ERR_INVALID_STATE);
 
+    // In case, we are recovering from a state which has gated internal clock, ungate it to be able to reconnect a device
+    // Soft reset does not clear the GateHclk bit
+    _internal_clk_gate(port, false);
     // We are about to do a soft reset on the peripheral. Disable the peripheral throughout
     esp_intr_disable(port->isr_hdl);
     usb_dwc_hal_core_soft_reset(port->hal);
@@ -1637,7 +1708,7 @@ esp_err_t hcd_port_check_all_pipes_idle(hcd_port_handle_t port_hdl)
     port_t *port = (port_t *)port_hdl;
 
     HCD_ENTER_CRITICAL();
-    HCD_CHECK_FROM_CRIT(port->initialized, ESP_ERR_INVALID_STATE);
+    HCD_CHECK_FROM_CRIT(s_port_inited[port->periph_idx], ESP_ERR_INVALID_STATE);
     HCD_CHECK_FROM_CRIT(port->num_pipes_queued == 0, ESP_ERR_NOT_FINISHED);
     HCD_EXIT_CRITICAL();
 
@@ -1941,7 +2012,7 @@ esp_err_t hcd_pipe_alloc(hcd_port_handle_t port_hdl, const hcd_pipe_config_t *pi
     port_t *port = (port_t *)port_hdl;
     HCD_ENTER_CRITICAL();
     // Can only allocate a pipe if the target port is initialized and connected to an enabled device
-    HCD_CHECK_FROM_CRIT(port->initialized && port->flags.conn_dev_ena, ESP_ERR_INVALID_STATE);
+    HCD_CHECK_FROM_CRIT(s_port_inited[port->periph_idx] && port->flags.conn_dev_ena, ESP_ERR_INVALID_STATE);
     usb_speed_t port_speed = port->speed;
     int pipe_idx = port->num_pipes_idle + port->num_pipes_queued;
     HCD_EXIT_CRITICAL();
@@ -2001,7 +2072,7 @@ esp_err_t hcd_pipe_alloc(hcd_port_handle_t port_hdl, const hcd_pipe_config_t *pi
 
     // Allocate channel
     HCD_ENTER_CRITICAL();
-    if (!port->initialized || !port->flags.conn_dev_ena) {
+    if (!s_port_inited[port->periph_idx] || !port->flags.conn_dev_ena) {
         HCD_EXIT_CRITICAL();
         ret = ESP_ERR_INVALID_STATE;
         goto err;

@@ -260,7 +260,48 @@ static esp_err_t ble_execute_function_internal(uint8_t stack_id,
     strncpy(final_command, func_cfg->command, sizeof(final_command) - 1);
   }
 
-  // Step 2.5: Validate command string (APPROVED ENHANCEMENT)
+  // TASK 1.1: Check for GPIO-only functions (no command, no response)
+  size_t cmd_len = strlen(final_command);
+  size_t expect_len = strlen(func_cfg->expect_response);
+  bool is_gpio_only = (cmd_len == 0 && expect_len == 0);
+
+  if (is_gpio_only) {
+    // GPIO-only function: skip command sending, just execute sequences
+    ESP_LOGI(TAG, "GPIO-only function %d - no command/response expected", func_id);
+    
+    // Execute GPIO end sequences
+    for (uint8_t i = 0; i < func_cfg->gpio_end_count; i++) {
+      char pin_str[8];
+      snprintf(pin_str, sizeof(pin_str), "%d%d", stack_id, func_cfg->gpio_end[i]);
+      bool state = func_cfg->gpio_end_state[i];
+
+      ret = module_gpio_write(stack_id, pin_str, state);
+      if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to control GPIO end pin %s: %s", pin_str,
+                 esp_err_to_name(ret));
+      }
+    }
+
+    // Wait delay_end_ms
+    if (func_cfg->delay_end_ms > 0) {
+      ESP_LOGD(TAG, "Waiting %lu ms after GPIO sequences", func_cfg->delay_end_ms);
+      vTaskDelay(pdMS_TO_TICKS(func_cfg->delay_end_ms));
+    }
+
+    uint32_t exec_time = (xTaskGetTickCount() - start_tick) * portTICK_PERIOD_MS;
+    if (result) {
+      result->status = ESP_OK;
+      snprintf(result->response, sizeof(result->response), "GPIO_OK");
+      result->response_len = 7;
+      result->execution_time_ms = exec_time;
+    }
+
+    ESP_LOGI(TAG, "GPIO-only function %d completed on stack %d (took %lu ms)",
+             func_id, stack_id, exec_time);
+    return ESP_OK;
+  }
+
+  // Normal command execution: validate command string
   if (!ble_validate_command_string(final_command, sizeof(final_command))) {
     ESP_LOGE(TAG, "Command validation failed for function %d", func_id);
     if (result)
@@ -269,7 +310,6 @@ static esp_err_t ble_execute_function_internal(uint8_t stack_id,
   }
 
   // Step 3: Send AT command via Module_Config_Controller wrapper
-  // (module_bus_write)
   ESP_LOGD(TAG, "Sending command: %s", final_command);
   comm_port_type_t port_type = ble_get_comm_port(stack_id);
   if (port_type == COMM_PORT_MAX) {
@@ -288,44 +328,51 @@ static esp_err_t ble_execute_function_internal(uint8_t stack_id,
     return ret;
   }
 
-  // Step 4: Wait for response with timeout via Module_Config_Controller wrapper
-  // (module_bus_read)
+  // TASK 1.3: Optimize no-response timeout
+  // Skip module_bus_read if no response expected and timeout is 0
   uint8_t response_buffer[BLE_RESPONSE_MAX_LEN] = {0};
   size_t response_len = 0;
-  ret = module_bus_read(stack_id, port_type, response_buffer,
-                        sizeof(response_buffer) - 1, func_cfg->timeout_ms,
-                        &response_len);
-  if (ret != ESP_OK && ret != ESP_ERR_TIMEOUT) {
-    ESP_LOGE(TAG, "Failed to receive response: %s", esp_err_to_name(ret));
-    if (result)
-      result->status = ret;
-    return ret;
-  }
+  bool skip_read = (expect_len == 0 && func_cfg->timeout_ms == 0);
 
-  // Step 5: Verify response matches expect_response
-  bool response_valid = false;
-  if (response_len > 0) {
-    response_buffer[response_len] = '\0';
-    ESP_LOGD(TAG, "Received response: %s", (char *)response_buffer);
-
-    // Check if response contains expected string
-    if (strlen(func_cfg->expect_response) == 0 ||
-        strstr((const char *)response_buffer, func_cfg->expect_response) !=
-            NULL) {
-      response_valid = true;
+  if (!skip_read) {
+    // Step 4: Wait for response with timeout
+    ret = module_bus_read(stack_id, port_type, response_buffer,
+                          sizeof(response_buffer) - 1, func_cfg->timeout_ms,
+                          &response_len);
+    if (ret != ESP_OK && ret != ESP_ERR_TIMEOUT) {
+      ESP_LOGE(TAG, "Failed to receive response: %s", esp_err_to_name(ret));
+      if (result)
+        result->status = ret;
+      return ret;
     }
-  }
 
-  if (!response_valid && strlen(func_cfg->expect_response) > 0) {
-    ESP_LOGW(TAG, "Response validation failed: expected '%s'",
-             func_cfg->expect_response);
-    if (result) {
-      result->status = ESP_ERR_INVALID_RESPONSE;
-      snprintf(result->response, sizeof(result->response), "%s",
-               response_len > 0 ? (const char *)response_buffer : "TIMEOUT");
-      result->response_len = response_len;
+    // Step 5: Verify response matches expect_response
+    bool response_valid = false;
+    if (response_len > 0) {
+      response_buffer[response_len] = '\0';
+      ESP_LOGD(TAG, "Received response: %s", (char *)response_buffer);
+
+      // Check if response contains expected string
+      if (expect_len == 0 ||
+          strstr((const char *)response_buffer, func_cfg->expect_response) !=
+              NULL) {
+        response_valid = true;
+      }
     }
-    return ESP_ERR_INVALID_RESPONSE;
+
+    if (!response_valid && expect_len > 0) {
+      ESP_LOGW(TAG, "Response validation failed: expected '%s'",
+               func_cfg->expect_response);
+      if (result) {
+        result->status = ESP_ERR_INVALID_RESPONSE;
+        snprintf(result->response, sizeof(result->response), "%s",
+                 response_len > 0 ? (const char *)response_buffer : "TIMEOUT");
+        result->response_len = response_len;
+      }
+      return ESP_ERR_INVALID_RESPONSE;
+    }
+  } else {
+    ESP_LOGD(TAG, "Skipping response read (no response expected, timeout=0)");
   }
 
   // Step 6: Execute GPIO end sequences via Module_Config_Controller wrapper
@@ -923,7 +970,7 @@ esp_err_t ble_handler_set_security(uint8_t stack_id,
   }
 
   ble_exec_result_t result = {0};
-  esp_err_t ret = ble_execute_function_internal(stack_id, BLE_FUNC_SET_SECURITY,
+  esp_err_t ret = ble_execute_function_internal(stack_id, JSON_BLE_FUNC_SET_SECURITY,
                                                 security_param, &result);
 
   if (ret == ESP_ERR_NOT_SUPPORTED) {
@@ -947,7 +994,7 @@ esp_err_t ble_handler_manage_whitelist(uint8_t stack_id,
 
   ble_exec_result_t result = {0};
   esp_err_t ret = ble_execute_function_internal(
-      stack_id, BLE_FUNC_MANAGE_WHITELIST, param, &result);
+      stack_id, JSON_BLE_FUNC_MANAGE_WHITELIST, param, &result);
 
   if (ret == ESP_ERR_NOT_SUPPORTED) {
     ESP_LOGW(TAG, "Whitelist management not configured for stack %d", stack_id);
@@ -1156,6 +1203,184 @@ esp_err_t ble_handler_execute_with_recovery(uint8_t stack_id,
   return ret;
 }
 
+/* ===== Streaming Mode Implementation (TASK 2.1) ===== */
+
+/**
+ * @brief Execute BLE function with streaming response support
+ * 
+ * This function is designed for commands that generate multiple responses
+ * over time (e.g., BLE SCAN commands that return discovered devices).
+ * 
+ * Flow:
+ * 1. Execute GPIO start sequences
+ * 2. Send command
+ * 3. Loop for stream_duration_ms:
+ *    - Read response with short timeout (50ms)
+ *    - If data received, invoke callback
+ *    - Continue until duration expires
+ * 4. Execute GPIO end sequences
+ * 
+ * @param stack_id Stack ID (0 or 1)
+ * @param func_id Function ID to execute
+ * @param param Optional parameter string
+ * @param stream_duration_ms Total duration to collect responses
+ * @param callback Function called for each response
+ * @param user_data User context passed to callback
+ * @return ESP_OK on success
+ */
+esp_err_t ble_execute_function_streaming(uint8_t stack_id,
+                                         ble_function_id_t func_id,
+                                         const char *param,
+                                         uint32_t stream_duration_ms,
+                                         ble_stream_callback_t callback,
+                                         void *user_data) {
+  if (!g_ble_handler.initialized) {
+    ESP_LOGE(TAG, "BLE handler not initialized");
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  if (!ble_is_valid_stack_id(stack_id) || func_id >= BLE_FUNC_COUNT || !callback) {
+    ESP_LOGE(TAG, "Invalid arguments for streaming function");
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  ble_function_config_t *func_cfg = ble_get_function_config(stack_id, func_id);
+  if (!func_cfg || !func_cfg->available) {
+    ESP_LOGW(TAG, "Function %d not configured for stack %d", func_id, stack_id);
+    return ESP_ERR_NOT_SUPPORTED;
+  }
+
+  ESP_LOGI(TAG, "Starting streaming function %d on stack %d (duration=%lu ms)",
+           func_id, stack_id, stream_duration_ms);
+
+  esp_err_t ret = ESP_OK;
+  TickType_t start_tick = xTaskGetTickCount();
+
+  // Step 1: Execute GPIO start sequences
+  for (uint8_t i = 0; i < func_cfg->gpio_start_count; i++) {
+    char pin_str[8];
+    snprintf(pin_str, sizeof(pin_str), "%d%d", stack_id, func_cfg->gpio_start[i]);
+    bool state = func_cfg->gpio_start_state[i];
+
+    ret = module_gpio_write(stack_id, pin_str, state);
+    if (ret != ESP_OK) {
+      ESP_LOGE(TAG, "Failed to control GPIO start pin %s: %s", pin_str,
+               esp_err_to_name(ret));
+      return ret;
+    }
+  }
+
+  // Step 2: Delay start
+  if (func_cfg->delay_start_ms > 0) {
+    vTaskDelay(pdMS_TO_TICKS(func_cfg->delay_start_ms));
+  }
+
+  // Step 3: Build and send command
+  char final_command[BLE_CMD_MAX_LEN] = {0};
+  if (param && strstr(func_cfg->command, "{PARAM}")) {
+    char *src = func_cfg->command;
+    char *dest = final_command;
+    size_t dest_remaining = sizeof(final_command) - 1;
+
+    while (*src && dest_remaining > 0) {
+      if (strncmp(src, "{PARAM}", 7) == 0) {
+        size_t param_len = strlen(param);
+        if (param_len > dest_remaining) {
+          ESP_LOGE(TAG, "Parameter too long");
+          return ESP_ERR_INVALID_SIZE;
+        }
+        memcpy(dest, param, param_len);
+        dest += param_len;
+        dest_remaining -= param_len;
+        src += 7;
+      } else {
+        *dest++ = *src++;
+        dest_remaining--;
+      }
+    }
+    *dest = '\0';
+  } else {
+    strncpy(final_command, func_cfg->command, sizeof(final_command) - 1);
+  }
+
+  // Validate and send command
+  if (strlen(final_command) > 0) {
+    comm_port_type_t port_type = ble_get_comm_port(stack_id);
+    if (port_type == COMM_PORT_MAX) {
+      ESP_LOGE(TAG, "Invalid comm port type for stack %d", stack_id);
+      return ESP_ERR_INVALID_STATE;
+    }
+
+    ESP_LOGD(TAG, "Sending streaming command: %s", final_command);
+    ret = module_bus_write(stack_id, port_type, (const uint8_t *)final_command,
+                           strlen(final_command));
+    if (ret != ESP_OK) {
+      ESP_LOGE(TAG, "Failed to send streaming command: %s", esp_err_to_name(ret));
+      return ret;
+    }
+  }
+
+  // Step 4: Streaming response loop
+  uint8_t response_buffer[BLE_RESPONSE_MAX_LEN];
+  uint32_t response_count = 0;
+  TickType_t stream_start = xTaskGetTickCount();
+  comm_port_type_t port_type = ble_get_comm_port(stack_id);
+
+  while (1) {
+    uint32_t elapsed_ms = (xTaskGetTickCount() - stream_start) * portTICK_PERIOD_MS;
+    if (elapsed_ms >= stream_duration_ms) {
+      ESP_LOGI(TAG, "Streaming duration expired (%lu ms)", elapsed_ms);
+      break;
+    }
+
+    // Read with short timeout (50ms) to allow multiple reads
+    memset(response_buffer, 0, sizeof(response_buffer));
+    size_t response_len = 0;
+    uint32_t remaining_ms = stream_duration_ms - elapsed_ms;
+    uint32_t read_timeout = (remaining_ms < 50) ? remaining_ms : 50;
+
+    ret = module_bus_read(stack_id, port_type, response_buffer,
+                          sizeof(response_buffer) - 1, read_timeout,
+                          &response_len);
+
+    if (ret == ESP_OK && response_len > 0) {
+      response_buffer[response_len] = '\0';
+      ESP_LOGD(TAG, "Streaming response #%lu: %s", response_count, response_buffer);
+      
+      // Invoke callback with response
+      callback(response_buffer, response_len, user_data);
+      response_count++;
+    } else if (ret != ESP_ERR_TIMEOUT) {
+      ESP_LOGW(TAG, "Error reading streaming response: %s", esp_err_to_name(ret));
+    }
+
+    // Small delay between reads
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+
+  ESP_LOGI(TAG, "Streaming completed: %lu responses received", response_count);
+
+  // Step 5: Execute GPIO end sequences
+  for (uint8_t i = 0; i < func_cfg->gpio_end_count; i++) {
+    char pin_str[8];
+    snprintf(pin_str, sizeof(pin_str), "%d%d", stack_id, func_cfg->gpio_end[i]);
+    bool state = func_cfg->gpio_end_state[i];
+
+    module_gpio_write(stack_id, pin_str, state);
+  }
+
+  // Step 6: Delay end
+  if (func_cfg->delay_end_ms > 0) {
+    vTaskDelay(pdMS_TO_TICKS(func_cfg->delay_end_ms));
+  }
+
+  uint32_t total_time = (xTaskGetTickCount() - start_tick) * portTICK_PERIOD_MS;
+  ESP_LOGI(TAG, "Streaming function %d completed on stack %d (took %lu ms, %lu responses)",
+           func_id, stack_id, total_time, response_count);
+
+  return ESP_OK;
+}
+
 esp_err_t ble_handler_parse_frame(const uint8_t *data, uint16_t len,
                                   uint8_t *mac_out, uint8_t *payload_out,
                                   uint16_t *payload_len_out) {
@@ -1218,5 +1443,96 @@ esp_err_t ble_handler_send_binary_command(uint8_t stack_id,
     ESP_LOGD(TAG, "Binary response received: %zu bytes", received_len);
   }
 
+  return ESP_OK;
+}
+
+/**
+ * @brief Send raw command with streaming response support (NEW - Phase 3)
+ * 
+ * Generic pass-through streaming for commands in any format (AT/binary/ASCII).
+ * No JSON config lookup, no GPIO sequences, no function_id mapping.
+ * 
+ * @param stack_id Stack ID (0 or 1)
+ * @param command Raw command bytes
+ * @param cmd_len Command length
+ * @param duration_ms Duration to collect responses
+ * @param callback Function called for each response
+ * @param user_data User context passed to callback
+ * @return ESP_OK on success
+ */
+esp_err_t ble_send_raw_command_streaming(uint8_t stack_id,
+                                         const uint8_t *command,
+                                         uint16_t cmd_len,
+                                         uint32_t duration_ms,
+                                         ble_stream_callback_t callback,
+                                         void *user_data) {
+  if (!g_ble_handler.initialized) {
+    ESP_LOGE(TAG, "BLE handler not initialized");
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  if (!ble_is_valid_stack_id(stack_id) || !command || cmd_len == 0 || !callback) {
+    ESP_LOGE(TAG, "Invalid arguments for raw streaming command");
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  comm_port_type_t port_type = ble_get_comm_port(stack_id);
+  if (port_type == COMM_PORT_MAX) {
+    ESP_LOGE(TAG, "Invalid comm port for stack %d", stack_id);
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  ESP_LOGI(TAG, "Sending raw streaming command (stack=%u, len=%u, duration=%lu ms)",
+           stack_id, cmd_len, duration_ms);
+  ESP_LOG_BUFFER_HEXDUMP(TAG, command, cmd_len, ESP_LOG_DEBUG);
+
+  // Step 1: Send raw command
+  esp_err_t ret = module_bus_write(stack_id, port_type, command, cmd_len);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to send raw command: %s", esp_err_to_name(ret));
+    return ret;
+  }
+
+  // Step 2: Streaming response loop
+  uint8_t response_buffer[BLE_RESPONSE_MAX_LEN];
+  uint32_t response_count = 0;
+  TickType_t stream_start = xTaskGetTickCount();
+
+  while (1) {
+    uint32_t elapsed_ms = (xTaskGetTickCount() - stream_start) * portTICK_PERIOD_MS;
+    if (elapsed_ms >= duration_ms) {
+      ESP_LOGI(TAG, "Raw streaming duration expired (%lu ms)", elapsed_ms);
+      break;
+    }
+
+    // Read with short timeout (50ms) to allow multiple reads
+    memset(response_buffer, 0, sizeof(response_buffer));
+    size_t response_len = 0;
+    uint32_t remaining_ms = duration_ms - elapsed_ms;
+    uint32_t read_timeout = (remaining_ms < 50) ? remaining_ms : 50;
+
+    ret = module_bus_read(stack_id, port_type, response_buffer,
+                          sizeof(response_buffer) - 1, read_timeout,
+                          &response_len);
+
+    if (ret == ESP_OK && response_len > 0) {
+      response_buffer[response_len] = '\0';
+      ESP_LOGD(TAG, "Raw streaming response #%lu (%zu bytes)", 
+               response_count, response_len);
+      ESP_LOG_BUFFER_HEXDUMP(TAG, response_buffer, response_len, ESP_LOG_VERBOSE);
+      
+      // Invoke callback with response
+      callback(response_buffer, response_len, user_data);
+      response_count++;
+    } else if (ret != ESP_ERR_TIMEOUT) {
+      ESP_LOGW(TAG, "Error reading raw streaming response: %s", 
+               esp_err_to_name(ret));
+    }
+
+    // Small delay between reads
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+
+  ESP_LOGI(TAG, "Raw streaming completed: %lu responses received", response_count);
   return ESP_OK;
 }

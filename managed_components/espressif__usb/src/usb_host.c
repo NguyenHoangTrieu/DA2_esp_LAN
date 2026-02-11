@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2015-2025 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2015-2026 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -554,7 +554,7 @@ esp_err_t usb_host_install(const usb_host_config_t *config)
     /*
     Install each layer of the Host stack (listed below) from the lowest layer to the highest
     - USB PHY
-    - HCD
+    - ! HCD is not installed, the HCD port is initialized by the Hub driver
     - USBH
     - Enum
     - Hub
@@ -590,34 +590,6 @@ esp_err_t usb_host_install(const usb_host_config_t *config)
             ESP_LOGE(USB_HOST_TAG, "PHY install error: %s", esp_err_to_name(ret));
             goto phy_err;
         }
-    }
-
-    // Install HCD
-    // Prepare HCD configuration
-    hcd_fifo_settings_t user_fifo_config;
-    hcd_config_t hcd_config = {
-        .intr_flags = config->intr_flags,
-        .peripheral_map = peripheral_map,
-        .fifo_config = NULL, // Default: use bias strategy from Kconfig
-    };
-
-    // Check if user has provided a custom FIFO configuration
-    if (config->fifo_settings_custom.rx_fifo_lines != 0 ||
-            config->fifo_settings_custom.nptx_fifo_lines != 0 ||
-            config->fifo_settings_custom.ptx_fifo_lines != 0) {
-
-        // Populate user FIFO configuration with provided values
-        user_fifo_config.rx_fifo_lines = config->fifo_settings_custom.rx_fifo_lines;
-        user_fifo_config.nptx_fifo_lines = config->fifo_settings_custom.nptx_fifo_lines;
-        user_fifo_config.ptx_fifo_lines = config->fifo_settings_custom.ptx_fifo_lines;
-
-        // Pass custom configuration to HCD
-        hcd_config.fifo_config = &user_fifo_config;
-    }
-    ret = hcd_install(&hcd_config);
-    if (ret != ESP_OK) {
-        ESP_LOGE(USB_HOST_TAG, "HCD install error: %s", esp_err_to_name(ret));
-        goto hcd_err;
     }
 
     // Install USBH
@@ -657,7 +629,25 @@ esp_err_t usb_host_install(const usb_host_config_t *config)
         .proc_req_cb_arg = NULL,
         .event_cb = hub_event_callback,
         .event_cb_arg = NULL,
+        .intr_flags = config->intr_flags,
+        .fifo_config = NULL,
     };
+
+    // Check if user has provided a custom FIFO configuration
+    hcd_fifo_settings_t user_fifo_config;
+    if (config->fifo_settings_custom.rx_fifo_lines != 0 ||
+            config->fifo_settings_custom.nptx_fifo_lines != 0 ||
+            config->fifo_settings_custom.ptx_fifo_lines != 0) {
+
+        // Populate user FIFO configuration with provided values
+        user_fifo_config.rx_fifo_lines = config->fifo_settings_custom.rx_fifo_lines;
+        user_fifo_config.nptx_fifo_lines = config->fifo_settings_custom.nptx_fifo_lines;
+        user_fifo_config.ptx_fifo_lines = config->fifo_settings_custom.ptx_fifo_lines;
+
+        // Pass custom configuration to HCD
+        hub_config.fifo_config = &user_fifo_config;
+    }
+
     ret = hub_install(&hub_config, &host_lib_obj->constant.hub_client);
     if (ret != ESP_OK) {
         ESP_LOGE(USB_HOST_TAG, "Hub driver Install error: %s", esp_err_to_name(ret));
@@ -689,8 +679,6 @@ hub_err:
 enum_err:
     ESP_ERROR_CHECK(usbh_uninstall());
 usbh_err:
-    ESP_ERROR_CHECK(hcd_uninstall());
-hcd_err:
     if (host_lib_obj->constant.phy_handle) {
         ESP_ERROR_CHECK(usb_del_phy(host_lib_obj->constant.phy_handle));
     }
@@ -734,13 +722,12 @@ esp_err_t usb_host_uninstall(void)
     - Hub
     - Enum
     - USBH
-    - HCD
+    - !HCD: The port is deinitialized by the Hub driver
     - USB PHY
     */
     ESP_ERROR_CHECK(hub_uninstall());
     ESP_ERROR_CHECK(enum_uninstall());
     ESP_ERROR_CHECK(usbh_uninstall());
-    ESP_ERROR_CHECK(hcd_uninstall());
     // If the USB PHY was setup, then delete it
     if (host_lib_obj->constant.phy_handle) {
         ESP_ERROR_CHECK(usb_del_phy(host_lib_obj->constant.phy_handle));
@@ -1700,6 +1687,18 @@ esp_err_t usb_host_interface_release(usb_host_client_handle_t client_hdl, usb_de
 
     // Take mux lock. This protects the client being released or other clients from claiming interfaces
     xSemaphoreTake(p_host_lib_obj->constant.mux_lock, portMAX_DELAY);
+
+    // In case the underlying pipe was halted while having an URB in-flight,
+    // usb_host_client_handle_events() may not have had a chance to process the URB yet,
+    // in case it is handled from low priority task and we are calling this function from a high priority task.
+    HOST_ENTER_CRITICAL();
+    const bool pending_ep = !TAILQ_EMPTY(&client_obj->dynamic.pending_ep_tailq);
+    HOST_EXIT_CRITICAL();
+    if (pending_ep) {
+        // We wait 10 FreeRTOS ticks to give the class driver task chance to run and process the URB.
+        vTaskDelay(10);
+    }
+
     esp_err_t ret = interface_release(client_obj, dev_hdl, bInterfaceNumber);
     xSemaphoreGive(p_host_lib_obj->constant.mux_lock);
 

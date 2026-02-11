@@ -35,8 +35,8 @@ static const char *BLE_FUNCTION_NAMES[JSON_BLE_FUNC_MAX] = {
     "MODULE_START_DISCOVERY",
     "MODULE_SEND_DATA",
     "MODULE_GET_DIAGNOSTICS",
-    "MODULE_SET_SECURITY",
-    "MODULE_MANAGE_WHITELIST"
+    "MODULE_SET_SECURITY_CONFIG",
+    "MODULE_ENTER_BOOTLOADER"
 };
 
 /* ============================================================================

@@ -42,8 +42,8 @@ typedef enum {
     BLE_FUNC_START_DISCOVERY = 15,      ///< Scan for BLE devices (optional)
     BLE_FUNC_SEND_DATA = 16,            ///< Send data in transparent mode (optional)
     BLE_FUNC_GET_DIAGNOSTICS = 17,      ///< Get RSSI, link quality (optional)
-    BLE_FUNC_SET_SECURITY = 18,         ///< Configure pairing/bonding (optional)
-    BLE_FUNC_MANAGE_WHITELIST = 19,     ///< Add/remove device MAC (optional)
+    BLE_FUNC_SET_SECURITY_CONFIG = 18,  ///< Configure security/pairing (optional)
+    BLE_FUNC_ENTER_BOOTLOADER = 19,     ///< Enter bootloader mode (optional)
     
     BLE_FUNC_COUNT = 20,                ///< Total number of functions
     BLE_FUNC_INVALID = 0xFF
@@ -99,6 +99,19 @@ typedef struct {
     uint16_t response_len;              ///< Response length
     uint32_t execution_time_ms;         ///< Total execution time
 } ble_exec_result_t;
+
+/**
+ * @brief Streaming response callback (TASK 2.1)
+ * 
+ * Called for each response received during streaming operations (e.g., SCAN).
+ * 
+ * @param data Response data buffer
+ * @param len Length of response data
+ * @param user_data User-provided context pointer
+ */
+typedef void (*ble_stream_callback_t)(const uint8_t *data, 
+                                       uint16_t len, 
+                                       void *user_data);
 
 /* ===== Public API Functions ===== */
 
@@ -297,6 +310,29 @@ esp_err_t ble_handler_manage_whitelist(uint8_t stack_id,
                                         const char *mac_address, 
                                         bool add);
 
+/* ===== Streaming Mode API (TASK 2.1) ===== */
+
+/**
+ * @brief Execute BLE function with streaming response support
+ * 
+ * Used for commands that generate multiple responses over time (e.g., SCAN).
+ * The callback will be invoked for each response received during the stream_duration_ms.
+ * 
+ * @param stack_id Stack ID (0 or 1)
+ * @param func_id Function ID to execute
+ * @param param Optional parameter string (NULL if not needed)
+ * @param stream_duration_ms Duration to collect responses (milliseconds)
+ * @param callback Function to call for each response
+ * @param user_data User context passed to callback
+ * @return ESP_OK on success, ESP_ERR_* on failure
+ */
+esp_err_t ble_execute_function_streaming(uint8_t stack_id,
+                                         ble_function_id_t func_id,
+                                         const char *param,
+                                         uint32_t stream_duration_ms,
+                                         ble_stream_callback_t callback,
+                                         void *user_data);
+
 /* ===== Device Management APIs (NEW - Task 1.1) ===== */
 
 /**
@@ -390,9 +426,10 @@ esp_err_t ble_handler_parse_frame(const uint8_t *data,
  * @brief Send command with explicit binary format
  * 
  * For modules that use binary protocol (e.g., 0xC0 0xC0 prefix).
+ * Can also handle AT commands or ASCII - format-agnostic.
  * 
  * @param stack_id Stack ID (0 or 1)
- * @param cmd_bytes Binary command bytes
+ * @param cmd_bytes Command bytes (binary/AT/ASCII)
  * @param cmd_len Command length
  * @param response Response buffer
  * @param resp_len Response buffer size
@@ -405,6 +442,51 @@ esp_err_t ble_handler_send_binary_command(uint8_t stack_id,
                                            uint8_t *response,
                                            uint16_t resp_len,
                                            uint16_t timeout_ms);
+
+/**
+ * @brief Send raw command (alias for ble_handler_send_binary_command)
+ * 
+ * Pass-through API for commands in any format (AT, binary, ASCII).
+ * Module interprets based on its configuration.
+ * 
+ * @param stack_id Stack ID (0 or 1)
+ * @param command Raw command bytes
+ * @param cmd_len Command length
+ * @param response Response buffer
+ * @param resp_len Pointer to response length (in/out)
+ * @param timeout_ms Timeout in milliseconds
+ * @return ESP_OK on success
+ */
+static inline esp_err_t ble_send_raw_command(uint8_t stack_id,
+                                             const uint8_t *command,
+                                             uint16_t cmd_len,
+                                             uint8_t *response,
+                                             uint16_t *resp_len,
+                                             uint16_t timeout_ms) {
+    return ble_handler_send_binary_command(stack_id, command, cmd_len,
+                                           response, *resp_len, timeout_ms);
+}
+
+/**
+ * @brief Send raw command with streaming response support (NEW - Phase 3)
+ * 
+ * Pass-through API for commands that generate multiple responses.
+ * Command format is module-specific (AT/binary/ASCII), not interpreted.
+ * 
+ * @param stack_id Stack ID (0 or 1)
+ * @param command Raw command bytes  
+ * @param cmd_len Command length
+ * @param duration_ms Duration to collect responses
+ * @param callback Function called for each response line
+ * @param user_data User context passed to callback
+ * @return ESP_OK on success
+ */
+esp_err_t ble_send_raw_command_streaming(uint8_t stack_id,
+                                         const uint8_t *command,
+                                         uint16_t cmd_len,
+                                         uint32_t duration_ms,
+                                         ble_stream_callback_t callback,
+                                         void *user_data);
 
 /* ===== Internal Helpers (for task layer) ===== */
 

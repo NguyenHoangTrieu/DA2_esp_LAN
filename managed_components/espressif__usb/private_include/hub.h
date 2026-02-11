@@ -1,17 +1,16 @@
 /*
- * SPDX-FileCopyrightText: 2015-2025 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2015-2026 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
 
 #pragma once
 
-#include <stdlib.h>
 #include <stdint.h>
 #include "sdkconfig.h"
 #include "esp_err.h"
 #include "usb_private.h"
-#include "usbh.h"
+#include "hcd.h"
 
 #if CONFIG_USB_HOST_HUBS_SUPPORTED
 #define ENABLE_USB_HUBS                     1
@@ -65,6 +64,8 @@ typedef struct {
     void *proc_req_cb_arg;                          /**< Processing request callback argument */
     hub_event_cb_t event_cb;                        /**< Hub event callback */
     void *event_cb_arg;                             /**< Hub event callback argument */
+    int intr_flags;                                 /**< Interrupt flags for HCD interrupt */
+    const hcd_fifo_settings_t *fifo_config;         /**< Optional pointer to custom FIFO config. If NULL, default configuration is used. */
 } hub_config_t;
 
 // ---------------------------------------------- Hub Driver Functions -------------------------------------------------
@@ -247,10 +248,10 @@ esp_err_t hub_node_active(unsigned int node_uid);
  * @param[in] node_uid  Device's node unique ID
  *
  * @return
- *    - ESP_OK:                  Port has been disabled without error
- *    - ESP_ERR_INVALID_STATE:   Port can't be disabled in current state
- *    - ESP_ERR_NOT_SUPPORTED:   This function is not supported by the selected port
- *    - ESP_ERR_NOT_FOUND:       Device's node is not found
+ *    - ESP_ERR_INVALID_STATE: If Hub driver is not installed
+ *    - ESP_ERR_NOT_SUPPORTED: If the function is not support by the selected port
+ *    - ESP_ERR_NOT_FOUND: If device's tree node is not found by uid
+ *    - ESP_OK: If Port has been disabled without error
  */
 esp_err_t hub_node_disable(unsigned int node_uid);
 

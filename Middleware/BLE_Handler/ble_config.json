@@ -1,297 +1,225 @@
 {
-  "module_id": "00",
-  "module_type": "BLE",
-  "module_name": "JDY-23",
-  "module_communication": {
-    "port_type": "uart",
-    "parameters": {
-      "baudrate": 9600,
-      "parity": "none",
-      "stopbit": 1,
-      "data_bits": 8
-    }
-  },
-  "functions": [
-    {
-      "function_id": 0,
-      "function_name": "MODULE_HW_RESET",
-      "description": "Hardware reset via GPIO pin",
-      "command": "",
-      "gpio_start_control": [
-        {
-          "pin": "02",
-          "pin_name": "RESET_PIN",
-          "state": "LOW"
+    "module_id": "002",
+    "module_type": "BLE",
+    "module_name": "STM32WB_BLE_Gateway",
+    "module_communication": {
+        "port_type": "uart",
+        "parameters": {
+            "baudrate": 115200,
+            "parity": "none",
+            "stopbit": 1
         }
-      ],
-      "delay_start_ms": 100,
-      "expect_response": "",
-      "timeout_ms": 0,
-      "gpio_end_control": [
+    },
+    "functions": [
         {
-          "pin": "02",
-          "pin_name": "RESET_PIN",
-          "state": "HIGH"
-        }
-      ],
-      "delay_end_ms": 500
-    },
-    {
-      "function_id": 1,
-      "function_name": "MODULE_SW_RESET",
-      "description": "Software reset via AT command",
-      "command": "AT+RST\r\n",
-      "gpio_start_control": [],
-      "delay_start_ms": 0,
-      "expect_response": "OK",
-      "timeout_ms": 500,
-      "gpio_end_control": [],
-      "delay_end_ms": 500
-    },
-    {
-      "function_id": 2,
-      "function_name": "MODULE_FACTORY_RESET",
-      "description": "Factory reset - clear all configuration",
-      "command": "AT+FRE\r\n",
-      "gpio_start_control": [],
-      "delay_start_ms": 0,
-      "expect_response": "OK",
-      "timeout_ms": 1000,
-      "gpio_end_control": [],
-      "delay_end_ms": 1000
-    },
-    {
-      "function_id": 3,
-      "function_name": "MODULE_GET_INFO",
-      "description": "Get module version and MAC address",
-      "command": "AT+VER\r\n",
-      "gpio_start_control": [],
-      "delay_start_ms": 0,
-      "expect_response": "JDY-23",
-      "timeout_ms": 500,
-      "gpio_end_control": [],
-      "delay_end_ms": 0
-    },
-    {
-      "function_id": 4,
-      "function_name": "MODULE_SET_NAME",
-      "description": "Set device name for advertising",
-      "command": "AT+NAME={PARAM}\r\n",
-      "gpio_start_control": [],
-      "delay_start_ms": 0,
-      "expect_response": "OK",
-      "timeout_ms": 500,
-      "gpio_end_control": [],
-      "delay_end_ms": 100
-    },
-    {
-      "function_id": 5,
-      "function_name": "MODULE_SET_COMM_CONFIG",
-      "description": "Configure UART communication parameters",
-      "command": "AT+BAUD={PARAM}\r\n",
-      "gpio_start_control": [],
-      "delay_start_ms": 0,
-      "expect_response": "OK",
-      "timeout_ms": 500,
-      "gpio_end_control": [],
-      "delay_end_ms": 500
-    },
-    {
-      "function_id": 6,
-      "function_name": "MODULE_SET_RF_PARAMS",
-      "description": "Set TX power and other RF parameters",
-      "command": "AT+TXPW={PARAM}\r\n",
-      "gpio_start_control": [],
-      "delay_start_ms": 0,
-      "expect_response": "OK",
-      "timeout_ms": 500,
-      "gpio_end_control": [],
-      "delay_end_ms": 0
-    },
-    {
-      "function_id": 7,
-      "function_name": "MODULE_ENTER_CMD_MODE",
-      "description": "Enter AT command mode (exit data mode)",
-      "command": "+++",
-      "gpio_start_control": [],
-      "delay_start_ms": 100,
-      "expect_response": "OK",
-      "timeout_ms": 500,
-      "gpio_end_control": [],
-      "delay_end_ms": 100
-    },
-    {
-      "function_id": 8,
-      "function_name": "MODULE_ENTER_DATA_MODE",
-      "description": "Enter transparent data forwarding mode",
-      "command": "AT+DATA\r\n",
-      "gpio_start_control": [],
-      "delay_start_ms": 0,
-      "expect_response": "OK",
-      "timeout_ms": 500,
-      "gpio_end_control": [],
-      "delay_end_ms": 100
-    },
-    {
-      "function_id": 9,
-      "function_name": "MODULE_START_BROADCAST",
-      "description": "Start advertising in peripheral/slave mode",
-      "command": "AT+HOSTEN=0\r\n",
-      "gpio_start_control": [
+            "function_name": "MODULE_HW_RESET",
+            "command": "",
+            "gpio_start_control": [
+                {
+                    "pin": "RST",
+                    "state": "LOW"
+                }
+            ],
+            "delay_start": 100,
+            "expect_response": "",
+            "timeout": 0,
+            "gpio_end_control": [
+                {
+                    "pin": "RST",
+                    "state": "HIGH"
+                }
+            ],
+            "delay_end": 1000
+        },
         {
-          "pin": "01",
-          "pin_name": "ENABLE_PIN",
-          "state": "HIGH"
-        }
-      ],
-      "delay_start_ms": 100,
-      "expect_response": "OK",
-      "timeout_ms": 500,
-      "gpio_end_control": [
+            "function_name": "MODULE_SW_RESET",
+            "command": "AT+RESET\r\n",
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "OK",
+            "timeout": 2000,
+            "gpio_end_control": [],
+            "delay_end": 1000
+        },
         {
-          "pin": "01",
-          "pin_name": "ENABLE_PIN",
-          "state": "LOW"
-        }
-      ],
-      "delay_end_ms": 500
-    },
-    {
-      "function_id": 10,
-      "function_name": "MODULE_CONNECT",
-      "description": "Connect to remote BLE device (master/central mode)",
-      "command": "AT+CON={PARAM}\r\n",
-      "gpio_start_control": [],
-      "delay_start_ms": 0,
-      "expect_response": "OK",
-      "timeout_ms": 2000,
-      "gpio_end_control": [],
-      "delay_end_ms": 500
-    },
-    {
-      "function_id": 11,
-      "function_name": "MODULE_DISCONNECT",
-      "description": "Disconnect from current BLE device",
-      "command": "AT+DIS\r\n",
-      "gpio_start_control": [],
-      "delay_start_ms": 0,
-      "expect_response": "OK",
-      "timeout_ms": 500,
-      "gpio_end_control": [],
-      "delay_end_ms": 200
-    },
-    {
-      "function_id": 12,
-      "function_name": "MODULE_GET_CONNECTION_STATUS",
-      "description": "Get connection status and signal strength (RSSI)",
-      "command": "AT+STS\r\n",
-      "gpio_start_control": [],
-      "delay_start_ms": 0,
-      "expect_response": "+STS",
-      "timeout_ms": 500,
-      "gpio_end_control": [],
-      "delay_end_ms": 0
-    },
-    {
-      "function_id": 13,
-      "function_name": "MODULE_ENTER_SLEEP",
-      "description": "Enter low-power sleep mode",
-      "command": "AT+SLEEP\r\n",
-      "gpio_start_control": [],
-      "delay_start_ms": 0,
-      "expect_response": "OK",
-      "timeout_ms": 500,
-      "gpio_end_control": [],
-      "delay_end_ms": 1000
-    },
-    {
-      "function_id": 14,
-      "function_name": "MODULE_WAKEUP",
-      "description": "Wake from sleep mode via GPIO pulse",
-      "command": "",
-      "gpio_start_control": [
+            "function_name": "MODULE_FACTORY_RESET",
+            "command": "AT+RESTORE\r\n",
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "OK",
+            "timeout": 3000,
+            "gpio_end_control": [],
+            "delay_end": 2000
+        },
         {
-          "pin": "03",
-          "pin_name": "WAKEUP_PIN",
-          "state": "LOW"
-        }
-      ],
-      "delay_start_ms": 100,
-      "expect_response": "",
-      "timeout_ms": 0,
-      "gpio_end_control": [
+            "function_name": "MODULE_GET_INFO",
+            "command": "AT+VER\r\n",
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "+VER:",
+            "timeout": 500,
+            "gpio_end_control": [],
+            "delay_end": 0
+        },
         {
-          "pin": "03",
-          "pin_name": "WAKEUP_PIN",
-          "state": "HIGH"
+            "function_name": "MODULE_SET_NAME",
+            "command": "AT+NAME=",
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "OK",
+            "timeout": 500,
+            "gpio_end_control": [],
+            "delay_end": 0
+        },
+        {
+            "function_name": "MODULE_SET_COMM_CONFIG",
+            "command": "AT+UART=",
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "OK",
+            "timeout": 500,
+            "gpio_end_control": [],
+            "delay_end": 100
+        },
+        {
+            "function_name": "MODULE_SET_RF_PARAMS",
+            "command": "AT+RF=",
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "OK",
+            "timeout": 500,
+            "gpio_end_control": [],
+            "delay_end": 0
+        },
+        {
+            "function_name": "MODULE_ENTER_CMD_MODE",
+            "command": "AT+CMDMODE\r\n",
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "OK",
+            "timeout": 500,
+            "gpio_end_control": [],
+            "delay_end": 0
+        },
+        {
+            "function_name": "MODULE_ENTER_DATA_MODE",
+            "command": "AT+DATAMODE=",
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "+DATAMODE",
+            "timeout": 500,
+            "gpio_end_control": [],
+            "delay_end": 0
+        },
+        {
+            "function_name": "MODULE_START_BROADCAST",
+            "command": "AT+ADV=1\r\n",
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "OK",
+            "timeout": 500,
+            "gpio_end_control": [],
+            "delay_end": 100
+        },
+        {
+            "function_name": "MODULE_CONNECT",
+            "command": "AT+CONNECT=",
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "+CONNECTED:",
+            "timeout": 5000,
+            "gpio_end_control": [],
+            "delay_end": 0
+        },
+        {
+            "function_name": "MODULE_DISCONNECT",
+            "command": "AT+DISCONNECT=",
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "+DISCONNECTED:",
+            "timeout": 1000,
+            "gpio_end_control": [],
+            "delay_end": 200
+        },
+        {
+            "function_name": "MODULE_GET_CONNECTION_STATUS",
+            "command": "AT+LIST\r\n",
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "+LIST:",
+            "timeout": 500,
+            "gpio_end_control": [],
+            "delay_end": 0
+        },
+        {
+            "function_name": "MODULE_ENTER_SLEEP",
+            "command": "AT+SLEEP\r\n",
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "OK",
+            "timeout": 500,
+            "gpio_end_control": [],
+            "delay_end": 100
+        },
+        {
+            "function_name": "MODULE_WAKEUP",
+            "command": "",
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "",
+            "timeout": 0,
+            "gpio_end_control": [],
+            "delay_end": 300
+        },
+        {
+            "function_name": "MODULE_START_DISCOVERY",
+            "command": "AT+SCAN\r\n",
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "+SCAN:",
+            "timeout": 10000,
+            "gpio_end_control": [],
+            "delay_end": 0
+        },
+        {
+            "function_name": "MODULE_SEND_DATA",
+            "command": "AT+WRITE=",
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "OK",
+            "timeout": 1000,
+            "gpio_end_control": [],
+            "delay_end": 0
+        },
+        {
+            "function_name": "MODULE_GET_DIAGNOSTICS",
+            "command": "AT+INFO=",
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "+INFO:",
+            "timeout": 500,
+            "gpio_end_control": [],
+            "delay_end": 0
+        },
+        {
+            "function_name": "MODULE_DISCOVER_SERVICES",
+            "command": "AT+DISC=",
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "OK",
+            "timeout": 5000,
+            "gpio_end_control": [],
+            "delay_end": 0
+        },
+        {
+            "function_name": "MODULE_DISCOVER_CHARACTERISTICS",
+            "command": "AT+CHARS=",
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "OK",
+            "timeout": 5000,
+            "gpio_end_control": [],
+            "delay_end": 0
         }
-      ],
-      "delay_end_ms": 500
-    },
-    {
-      "function_id": 15,
-      "function_name": "MODULE_START_DISCOVERY",
-      "description": "Start scanning for available BLE devices (optional)",
-      "command": "AT+SCAN=5\r\n",
-      "gpio_start_control": [],
-      "delay_start_ms": 0,
-      "expect_response": "+SCAN",
-      "timeout_ms": 6000,
-      "gpio_end_control": [],
-      "delay_end_ms": 500,
-      "optional": true
-    },
-    {
-      "function_id": 16,
-      "function_name": "MODULE_SEND_DATA",
-      "description": "Send data in transparent mode to connected device (optional)",
-      "command": "{PARAM}",
-      "gpio_start_control": [],
-      "delay_start_ms": 0,
-      "expect_response": "",
-      "timeout_ms": 1000,
-      "gpio_end_control": [],
-      "delay_end_ms": 0,
-      "optional": true
-    },
-    {
-      "function_id": 17,
-      "function_name": "MODULE_GET_DIAGNOSTICS",
-      "description": "Get diagnostics - RSSI, link quality, connection metrics (optional)",
-      "command": "AT+DIAG\r\n",
-      "gpio_start_control": [],
-      "delay_start_ms": 0,
-      "expect_response": "+DIAG",
-      "timeout_ms": 500,
-      "gpio_end_control": [],
-      "delay_end_ms": 0,
-      "optional": true
-    },
-    {
-      "function_id": 18,
-      "function_name": "MODULE_SET_SECURITY",
-      "description": "Configure security - pairing, bonding, PIN requirements (optional)",
-      "command": "AT+SEC={PARAM}\r\n",
-      "gpio_start_control": [],
-      "delay_start_ms": 0,
-      "expect_response": "OK",
-      "timeout_ms": 500,
-      "gpio_end_control": [],
-      "delay_end_ms": 100,
-      "optional": true
-    },
-    {
-      "function_id": 19,
-      "function_name": "MODULE_MANAGE_WHITELIST",
-      "description": "Add or remove device MAC from whitelist (optional)",
-      "command": "AT+WLIST={PARAM}\r\n",
-      "gpio_start_control": [],
-      "delay_start_ms": 0,
-      "expect_response": "OK",
-      "timeout_ms": 500,
-      "gpio_end_control": [],
-      "delay_end_ms": 0,
-      "optional": true
-    }
-  ]
+    ]
 }
