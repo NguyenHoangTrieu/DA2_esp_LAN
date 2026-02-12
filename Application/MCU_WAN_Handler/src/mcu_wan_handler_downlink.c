@@ -135,7 +135,7 @@ void mcu_wan_handler_stop_downlink_task(void) {
  *
  * Flow:
  * 1. Block on GPIO ISR notification (portMAX_DELAY)
- * 2. Acquire QSPI mutex (preempts uplink task)
+ * 2. Acquire SPI mutex (preempts uplink task)
  * 3. Poll WAN with DQ retry (10×50ms)
  * 4. Dispatch received data
  * 5. Release mutex and return to blocking
@@ -162,10 +162,10 @@ static void downlink_poll_task(void *pvParameters) {
     if (xTaskNotifyWait(0, 0xFFFFFFFF, &notification_value, portMAX_DELAY) ==
         pdTRUE) {
 
-      ESP_LOGD(TAG, "GPIO ISR triggered (#%lu) - acquiring QSPI bus",
+      ESP_LOGI(TAG, "GPIO ISR triggered (#%lu) - acquiring SPI bus",
                g_isr_trigger_count);
 
-      // Take QSPI mutex - blocks uplink task from using SPI
+      // Take SPI mutex - blocks uplink task from using SPI
       if (xSemaphoreTake(g_qspi_mutex, pdMS_TO_TICKS(GPIO_ISR_TIMEOUT_MS)) ==
           pdTRUE) {
 
@@ -179,7 +179,7 @@ static void downlink_poll_task(void *pvParameters) {
 
         if (got_valid_response) {
           g_dq_success_count++;
-          ESP_LOGD(TAG, "DQ success in %lums (total=%lu)",
+          ESP_LOGI(TAG, "DQ success in %lums (total=%lu)",
                    elapsed * portTICK_PERIOD_MS, g_dq_success_count);
         } else {
           g_dq_fail_count++;
@@ -187,13 +187,13 @@ static void downlink_poll_task(void *pvParameters) {
                    elapsed * portTICK_PERIOD_MS, g_dq_fail_count);
         }
 
-        // Release QSPI mutex - uplink task can now use SPI
+        // Release SPI mutex - uplink task can now use SPI
         xSemaphoreGive(g_qspi_mutex);
 
-        ESP_LOGV(TAG, "QSPI bus released");
+        ESP_LOGI(TAG, "SPI bus released");
 
       } else {
-        ESP_LOGE(TAG, "Failed to acquire QSPI mutex (timeout=%dms)",
+        ESP_LOGE(TAG, "Failed to acquire SPI mutex (timeout=%dms)",
                  GPIO_ISR_TIMEOUT_MS);
       }
     }
@@ -222,7 +222,7 @@ static bool poll_wan_with_retry(uint8_t *rx_buffer, size_t buffer_size) {
   for (int retry = 0; retry < DQ_RETRY_COUNT && !got_valid_response; retry++) {
 
     // Send DQ command EACH retry to ensure Slave receives it
-    ESP_LOGV(TAG, "Sending DQ command (attempt %d/%d)", retry + 1,
+    ESP_LOGI(TAG, "Sending DQ command (attempt %d/%d)", retry + 1,
              DQ_RETRY_COUNT);
     wan_comm_send_command(g_wan_handle, dq_cmd, sizeof(dq_cmd));
 
@@ -282,16 +282,16 @@ static bool poll_wan_with_retry(uint8_t *rx_buffer, size_t buffer_size) {
       else if ((rx_buffer[0] == 'C' && rx_buffer[1] == 'F' &&
                 rx_buffer[2] == 0x00 && rx_buffer[3] == 0x00) ||
                (rx_buffer[0] == 0x00 && rx_buffer[1] == 0x00)) {
-        ESP_LOGV(TAG, "Polling packet - no data pending");
+        ESP_LOGI(TAG, "Polling packet - no data pending");
         got_valid_response = true; // Not an error, just no data
       }
       // Invalid response - will retry
       else {
-        ESP_LOGD(TAG, "Invalid response [0]=0x%02X [1]=0x%02X, retry %d/%d",
+        ESP_LOGI(TAG, "Invalid response [0]=0x%02X [1]=0x%02X, retry %d/%d",
                  rx_buffer[0], rx_buffer[1], retry + 1, DQ_RETRY_COUNT);
       }
     } else {
-      ESP_LOGD(TAG, "DQ request failed: %d, retry %d/%d", comm_status,
+      ESP_LOGI(TAG, "DQ request failed: %d, retry %d/%d", comm_status,
                retry + 1, DQ_RETRY_COUNT);
     }
   }
@@ -316,7 +316,7 @@ static void send_ack_to_wan(ack_type_t ack_type) {
       wan_comm_send_command(g_wan_handle, ack_packet, sizeof(ack_packet));
 
   if (status == WAN_COMM_OK) {
-    ESP_LOGD(TAG, "ACK sent to WAN MCU: type=0x%02X", ack_type);
+    ESP_LOGI(TAG, "ACK sent to WAN MCU: type=0x%02X", ack_type);
   } else {
     ESP_LOGE(TAG, "Failed to send ACK to WAN MCU");
   }
@@ -456,9 +456,9 @@ static void send_lan_config_response(void) {
   config_packet[length_offset] = (data_length >> 8) & 0xFF;
   config_packet[length_offset + 1] = data_length & 0xFF;
 
-  // Send back to WAN MCU
+  // Send back to WAN MCU via CF frame (not DT - config uses CQ which is only 2 chars)
   wan_comm_status_t status =
-      wan_comm_send_data(g_wan_handle, config_packet, offset);
+      wan_comm_send_command(g_wan_handle, config_packet, offset);
 
   if (status == WAN_COMM_OK) {
     ESP_LOGI(TAG, "LAN config response sent to WAN MCU: %u bytes", offset);

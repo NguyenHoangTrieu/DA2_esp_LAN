@@ -1,6 +1,6 @@
 /**
  * @file mcu_wan_handler.h
- * @brief MCU WAN Handler - LAN Side (QSPI Master)
+ * @brief MCU WAN Handler - LAN Side (SPI Master)
  */
 
 #ifndef MCU_WAN_HANDLER_H

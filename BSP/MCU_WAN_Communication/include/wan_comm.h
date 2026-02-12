@@ -12,7 +12,7 @@ extern "C" {
 
 // CONFIGURATION - Timing Parameters
 
-#define WAN_COMM_QSPI_CLOCK_HZ        40000000  // 40 MHz mandatory
+#define WAN_COMM_SPI_CLOCK_HZ         40000000  // 40 MHz default
 #define WAN_COMM_DEFAULT_TX_BUFFER    16384     // 16KB per design (legacy)
 #define WAN_COMM_DEFAULT_RX_BUFFER    16384     // 16KB per design
 #define WAN_COMM_DMA_BUFFER_SIZE      4096      // 4KB DMA limit
@@ -22,6 +22,7 @@ extern "C" {
 #define WAN_COMM_DQ_RETRY_COUNT       10
 #define WAN_COMM_TIMEOUT_MS           1000
 #define WAN_COMM_MAX_TRANSFER_SIZE    8192
+#define WAN_COMM_FIXED_XFER_LEN       1024      // Fixed transfer length (bytes)
 #define WAN_COMM_DMA_DESCRIPTOR_SIZE  4092      // ESP32 max per descriptor
 #define WAN_COMM_MAX_DMA_DESCRIPTORS  8
 
@@ -51,7 +52,7 @@ typedef enum {
 // STRUCTURES
 
 /**
- * @brief QSPI Master Configuration
+ * @brief SPI Master Configuration
  */
 typedef struct {
     // GPIO pins
@@ -59,8 +60,6 @@ typedef struct {
     int gpio_cs;
     int gpio_io0;
     int gpio_io1;
-    int gpio_io2;             // -1 if not used
-    int gpio_io3;             // -1 if not used
     int gpio_data_ready_input; // GPIO46 for ISR, -1 to disable
     
     // SPI settings
@@ -73,9 +72,8 @@ typedef struct {
     size_t tx_buffer_size;
     size_t rx_buffer_size;
     
-    // Queue and features
+    // Queue
     int queue_size;
-    bool enable_quad_mode;     // false for Dual SPI, true for Quad
 } wan_comm_config_t;
 
 /**
@@ -86,17 +84,14 @@ typedef struct {
     .gpio_cs = 10, \
     .gpio_io0 = 11, \
     .gpio_io1 = 13, \
-    .gpio_io2 = -1, \
-    .gpio_io3 = -1, \
     .gpio_data_ready_input = 46, \
-    .clock_speed_hz = WAN_COMM_QSPI_CLOCK_HZ, \
+    .clock_speed_hz = WAN_COMM_SPI_CLOCK_HZ, \
     .mode = 0, \
     .host_id = SPI2_HOST, \
     .dma_channel = SPI_DMA_CH_AUTO, \
     .tx_buffer_size = WAN_COMM_DEFAULT_TX_BUFFER, \
     .rx_buffer_size = WAN_COMM_DEFAULT_RX_BUFFER, \
-    .queue_size = WAN_COMM_TRANS_QUEUE_SIZE, \
-    .enable_quad_mode = false \
+    .queue_size = WAN_COMM_TRANS_QUEUE_SIZE \
 }
 
 /**
@@ -112,7 +107,7 @@ typedef void (*wan_comm_data_ready_callback_t)(void *user_arg);
 // PUBLIC API
 
 /**
- * @brief Initialize QSPI Master with DMA buffering
+ * @brief Initialize SPI Master with DMA buffering
  * 
  * @param config Configuration structure
  * @param[out] handle Output handle
@@ -121,7 +116,7 @@ typedef void (*wan_comm_data_ready_callback_t)(void *user_arg);
 wan_comm_status_t wan_comm_init(const wan_comm_config_t *config, wan_comm_handle_t *handle);
 
 /**
- * @brief Deinitialize QSPI Master
+ * @brief Deinitialize SPI Master
  */
 wan_comm_status_t wan_comm_deinit(wan_comm_handle_t handle);
 

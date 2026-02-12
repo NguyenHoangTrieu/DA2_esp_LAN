@@ -1,6 +1,6 @@
 /**
  * @file frame_types.h
- * @brief Common frame types and data structures for LAN-WAN QSPI communication
+ * @brief Common frame types and data structures for LAN-WAN SPI communication
  */
 
 #ifndef FRAME_TYPES_H
@@ -9,7 +9,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-// ===== QSPI Frame Header Values =====
+// ===== SPI Frame Header Values =====
 #define WAN_COMM_HEADER_CF 0x4346  // "CF" - Command Frame
 #define WAN_COMM_HEADER_DT 0x4454  // "DT" - Data Frame
 #define WAN_COMM_HEADER_DQ 0x4451  // "DQ" - Data Query

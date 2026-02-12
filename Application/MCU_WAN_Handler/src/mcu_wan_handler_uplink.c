@@ -226,7 +226,7 @@ static void uplink_handler_task(void *pvParameters) {
   ESP_LOGI(TAG, "Phase 1: Handshake with WAN MCU");
 
   while (g_handler_running && !g_handshake_done) {
-    // Take QSPI mutex for handshake
+    // Take SPI mutex for handshake
     if (xSemaphoreTake(g_qspi_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
       if (perform_handshake() == ESP_OK) {
         g_handshake_done = true;
@@ -257,7 +257,7 @@ static void uplink_handler_task(void *pvParameters) {
 
     TickType_t now = xTaskGetTickCount();
 
-    // Try to acquire QSPI mutex (non-blocking / short timeout)
+    // Try to acquire SPI mutex (non-blocking / short timeout)
     // If downlink task has it, we'll skip and try next iteration
     if (xSemaphoreTake(g_qspi_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) ==
         pdTRUE) {
@@ -352,16 +352,16 @@ static void uplink_handler_task(void *pvParameters) {
 
       if ((now - last_rtc_request) >= pdMS_TO_TICKS(RTC_REQUEST_INTERVAL_MS)) {
         if (request_rtc_and_status() == ESP_OK) {
-          ESP_LOGD(TAG, "RTC and Internet status updated");
+          ESP_LOGI(TAG, "RTC and Internet status updated");
         }
         last_rtc_request = now;
       }
 
-      // Release QSPI mutex
+      // Release SPI mutex
       xSemaphoreGive(g_qspi_mutex);
     }
 
-    // D) Periodic Flush (5 seconds, outside QSPI mutex)
+    // D) Periodic Flush (5 seconds, outside SPI mutex)
 
     if ((now - last_flush) >= pdMS_TO_TICKS(5000)) {
       storage_handler_flush();
@@ -387,17 +387,19 @@ static void uplink_handler_task(void *pvParameters) {
  * Response: [ACK][0x10][internet_flag][wan_fw_version(4)]
  */
 static esp_err_t perform_handshake(void) {
-  uint8_t handshake_req[7];
-  handshake_req[0] = (WAN_COMM_HEADER_CF >> 8) & 0xFF;
-  handshake_req[1] = WAN_COMM_HEADER_CF & 0xFF;
-  handshake_req[2] = 0x01; // Handshake subtype
-  handshake_req[3] = (LAN_FW_VERSION >> 24) & 0xFF;
-  handshake_req[4] = (LAN_FW_VERSION >> 16) & 0xFF;
-  handshake_req[5] = (LAN_FW_VERSION >> 8) & 0xFF;
-  handshake_req[6] = LAN_FW_VERSION & 0xFF;
+  uint8_t handshake_req[5];
+  handshake_req[0] = 0x01; // Handshake subtype
+  handshake_req[1] = (LAN_FW_VERSION >> 24) & 0xFF;
+  handshake_req[2] = (LAN_FW_VERSION >> 16) & 0xFF;
+  handshake_req[3] = (LAN_FW_VERSION >> 8) & 0xFF;
+  handshake_req[4] = LAN_FW_VERSION & 0xFF;
 
   ESP_LOGI(TAG, "Sending handshake: LAN FW v%u.%u.%u.%u", LAN_FW_VERSION_MAJOR,
            LAN_FW_VERSION_MINOR, LAN_FW_VERSION_PATCH, LAN_FW_VERSION_BUILD);
+  
+  // Debug: Log handshake payload (CF header will be added by wan_comm_send_command)
+  ESP_LOGI(TAG, "Handshake payload (5 bytes):");
+  ESP_LOG_BUFFER_HEXDUMP(TAG, handshake_req, sizeof(handshake_req), ESP_LOG_INFO);
 
   wan_comm_status_t status =
       wan_comm_send_command(g_wan_handle, handshake_req, sizeof(handshake_req));
@@ -406,11 +408,21 @@ static esp_err_t perform_handshake(void) {
     return ESP_FAIL;
   }
 
+  // Ensure command is transmitted immediately before waiting for response
+  if (wan_comm_flush_dma_buffer(g_wan_handle) != WAN_COMM_OK) {
+    ESP_LOGE(TAG, "Failed to flush handshake request");
+    return ESP_FAIL;
+  }
+
   // Wait for ACK response from WAN MCU
   vTaskDelay(pdMS_TO_TICKS(HANDSHAKE_TIMEOUT_MS));
 
   uint8_t response[16] = {0};
   status = wan_comm_request_data(g_wan_handle, response, sizeof(response));
+
+  // Debug: Log raw response data
+  ESP_LOGI(TAG, "Handshake response (%d bytes):", sizeof(response));
+  ESP_LOG_BUFFER_HEXDUMP(TAG, response, sizeof(response), ESP_LOG_INFO);
 
   if (status == WAN_COMM_OK && response[0] == 0x02 &&
       response[1] == ACK_TYPE_HANDSHAKE) {
@@ -443,12 +455,16 @@ static esp_err_t perform_handshake(void) {
  * Response: [R][T][dd/mm/yyyy-hh:mm:ss][status]
  */
 static esp_err_t request_rtc_and_status(void) {
-  uint8_t rtc_request[4] = {(WAN_COMM_HEADER_CF >> 8) & 0xFF,
-                            WAN_COMM_HEADER_CF & 0xFF, 'R', 'T'};
+  uint8_t rtc_request[2] = {'R', 'T'};
 
   wan_comm_status_t status =
       wan_comm_send_command(g_wan_handle, rtc_request, sizeof(rtc_request));
   if (status != WAN_COMM_OK) {
+    return ESP_FAIL;
+  }
+
+  // Ensure command is transmitted immediately before waiting for response
+  if (wan_comm_flush_dma_buffer(g_wan_handle) != WAN_COMM_OK) {
     return ESP_FAIL;
   }
 
@@ -469,7 +485,7 @@ static esp_err_t request_rtc_and_status(void) {
     // Update internet status
     g_internet_status = (internet_status_t)response[22];
 
-    ESP_LOGD(TAG, "RTC: %s, Internet: %s", g_rtc_cache.rtc_string,
+    ESP_LOGI(TAG, "RTC: %s, Internet: %s", g_rtc_cache.rtc_string,
              g_internet_status ? "ONLINE" : "OFFLINE");
 
     return ESP_OK;
@@ -605,21 +621,18 @@ esp_err_t mcu_wan_handler_start(void) {
     return ESP_OK;
   }
 
-  ESP_LOGI(TAG, "Starting MCU WAN Handler (QSPI Split Architecture)");
+  ESP_LOGI(TAG, "Starting MCU WAN Handler (SPI Split Architecture)");
 
   wan_comm_config_t wan_config = {.gpio_sck = 12,
                                   .gpio_cs = 10,
                                   .gpio_io0 = 11,
                                   .gpio_io1 = 13,
-                                  .gpio_io2 = 14,
-                                  .gpio_io3 = 15,
                                   .gpio_data_ready_input = 46,
-                                  .clock_speed_hz = 40000000,
+                                  .clock_speed_hz = 10000000,
                                   .mode = 0,
                                   .host_id = SPI2_HOST,
                                   .dma_channel = SPI_DMA_CH_AUTO,
-                                  .queue_size = 7,
-                                  .enable_quad_mode = true};
+                                  .queue_size = 7};
 
   wan_comm_status_t status = wan_comm_init(&wan_config, &g_wan_handle);
   if (status != WAN_COMM_OK) {
@@ -636,7 +649,7 @@ esp_err_t mcu_wan_handler_start(void) {
 
   g_qspi_mutex = xSemaphoreCreateMutex();
   if (!g_qspi_mutex) {
-    ESP_LOGE(TAG, "Failed to create QSPI mutex");
+    ESP_LOGE(TAG, "Failed to create SPI mutex");
     vSemaphoreDelete(g_rtc_mutex);
     wan_comm_deinit(g_wan_handle);
     return ESP_FAIL;

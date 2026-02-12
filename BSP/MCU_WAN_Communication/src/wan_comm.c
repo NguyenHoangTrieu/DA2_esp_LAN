@@ -100,18 +100,13 @@ wan_comm_status_t wan_comm_init(const wan_comm_config_t *config, wan_comm_handle
     }
     
     ESP_LOGI(TAG, "============================================");
-    ESP_LOGI(TAG, "QSPI Master Initialization (LAN MCU)");
+    ESP_LOGI(TAG, "SPI Master Initialization (LAN MCU)");
     ESP_LOGI(TAG, "============================================");
     
     // Validate GPIO pins
     if (config->gpio_sck < 0 || config->gpio_cs < 0 || 
         config->gpio_io0 < 0 || config->gpio_io1 < 0) {
         ESP_LOGE(TAG, "Invalid GPIO configuration");
-        return WAN_COMM_ERR_INVALID_ARG;
-    }
-    
-    if (config->enable_quad_mode && (config->gpio_io2 < 0 || config->gpio_io3 < 0)) {
-        ESP_LOGE(TAG, "QSPI mode requires IO2 and IO3 pins");
         return WAN_COMM_ERR_INVALID_ARG;
     }
     
@@ -126,14 +121,14 @@ wan_comm_status_t wan_comm_init(const wan_comm_config_t *config, wan_comm_handle
     memcpy(&h->config, config, sizeof(wan_comm_config_t));
     
     // Set defaults
-    if (h->config.clock_speed_hz == 0) h->config.clock_speed_hz = WAN_COMM_QSPI_CLOCK_HZ;
+    if (h->config.clock_speed_hz == 0) h->config.clock_speed_hz = WAN_COMM_SPI_CLOCK_HZ;
     if (h->config.queue_size == 0) h->config.queue_size = WAN_COMM_TRANS_QUEUE_SIZE;
     if (h->config.dma_channel == 0) h->config.dma_channel = SPI_DMA_CH_AUTO;
     if (h->config.rx_buffer_size == 0) h->config.rx_buffer_size = WAN_COMM_DEFAULT_RX_BUFFER;
     
     // Warn if clock speed != 40 MHz
-    if (h->config.clock_speed_hz != WAN_COMM_QSPI_CLOCK_HZ) {
-        ESP_LOGW(TAG, "Clock speed %lu Hz differs from design doc (40 MHz)", h->config.clock_speed_hz);
+    if (h->config.clock_speed_hz != WAN_COMM_SPI_CLOCK_HZ) {
+        ESP_LOGW(TAG, "Clock speed %lu Hz differs from default (40 MHz)", h->config.clock_speed_hz);
     }
     
     // Auto-align RX buffer size
@@ -152,6 +147,7 @@ wan_comm_status_t wan_comm_init(const wan_comm_config_t *config, wan_comm_handle
     ESP_LOGI(TAG, "  DMA TX: %d bytes (fixed, buffered)", WAN_COMM_DMA_BUFFER_SIZE);
     ESP_LOGI(TAG, "  RX: %zu -> %zu bytes aligned, %zu DMA descriptors",
              h->config.rx_buffer_size, h->rx_buffer_size_aligned, rx_desc_count);
+    ESP_LOGI(TAG, "  Fixed transfer length: %u bytes", WAN_COMM_FIXED_XFER_LEN);
     
     // Allocate RX buffer only (DMA-aligned)
     h->rx_buffer = (uint8_t*)heap_caps_aligned_alloc(DMA_ALIGNMENT, 
@@ -193,8 +189,8 @@ wan_comm_status_t wan_comm_init(const wan_comm_config_t *config, wan_comm_handle
         .mosi_io_num = config->gpio_io0,
         .miso_io_num = config->gpio_io1,
         .sclk_io_num = config->gpio_sck,
-        .quadwp_io_num = config->enable_quad_mode ? config->gpio_io2 : -1,
-        .quadhd_io_num = config->enable_quad_mode ? config->gpio_io3 : -1,
+        .quadwp_io_num = -1,
+        .quadhd_io_num = -1,
         .max_transfer_sz = WAN_COMM_DMA_BUFFER_SIZE,  // Fixed 4KB for DMA buffer
         .flags = SPICOMMON_BUSFLAG_MASTER | SPICOMMON_BUSFLAG_GPIO_PINS
     };
@@ -202,13 +198,11 @@ wan_comm_status_t wan_comm_init(const wan_comm_config_t *config, wan_comm_handle
     ESP_LOGI(TAG, "SPI Master Configuration:");
     ESP_LOGI(TAG, "  Host: SPI%d, Mode: %d, Queue Size: %d",
              config->host_id + 1, config->mode, config->queue_size);
-    ESP_LOGI(TAG, "  GPIO: CLK=%d, CS=%d, IO0=%d, IO1=%d, IO2=%d, IO3=%d",
-             config->gpio_sck, config->gpio_cs, config->gpio_io0, 
-             config->gpio_io1, config->gpio_io2, config->gpio_io3);
+    ESP_LOGI(TAG, "  GPIO: CLK=%d, CS=%d, IO0=%d, IO1=%d",
+             config->gpio_sck, config->gpio_cs, config->gpio_io0,
+             config->gpio_io1);
     ESP_LOGI(TAG, "  Clock: %lu Hz (%.1f MHz)",
              h->config.clock_speed_hz, h->config.clock_speed_hz / 1000000.0);
-    ESP_LOGI(TAG, "  QSPI Mode: %s (4-bit parallel)",
-             config->enable_quad_mode ? "Enabled" : "Disabled");
     
     // Initialize SPI bus
     esp_err_t ret = spi_bus_initialize(config->host_id, &bus_cfg, config->dma_channel);
@@ -227,7 +221,7 @@ wan_comm_status_t wan_comm_init(const wan_comm_config_t *config, wan_comm_handle
         .clock_speed_hz = h->config.clock_speed_hz,
         .spics_io_num = config->gpio_cs,
         .queue_size = config->queue_size,
-        .flags = config->enable_quad_mode ? 0 : 0,  // QIO set per transaction
+        .flags = 0,
         .pre_cb = NULL,
         .post_cb = NULL,
         .input_delay_ns = 0
@@ -252,15 +246,14 @@ wan_comm_status_t wan_comm_init(const wan_comm_config_t *config, wan_comm_handle
     *handle = h;
     
     ESP_LOGI(TAG, "============================================");
-    ESP_LOGI(TAG, "QSPI Master Ready - Driving 40 MHz Clock");
+    ESP_LOGI(TAG, "SPI Master Ready - Driving 40 MHz Clock");
     ESP_LOGI(TAG, "============================================");
     
     // Calculate theoretical throughput
-    uint32_t bits_per_transfer = config->enable_quad_mode ? 4 : 1;
-    uint32_t theoretical_mbps = (h->config.clock_speed_hz * bits_per_transfer) / 1000000;
+    uint32_t theoretical_mbps = h->config.clock_speed_hz / 1000000;
     ESP_LOGI(TAG, "Theoretical Throughput: %lu Mbps (%.1f MB/s)",
              theoretical_mbps, theoretical_mbps / 8.0);
-    ESP_LOGI(TAG, "Expected Practical: 8-12 MB/s (accounting for overhead)");
+    ESP_LOGI(TAG, "Expected Practical: depends on payload and timing");
     ESP_LOGI(TAG, "Timing: ACK=%dms, DQ retry=%dms×%d",
              WAN_COMM_ACK_TIMEOUT_MS, WAN_COMM_DQ_RETRY_MS, WAN_COMM_DQ_RETRY_COUNT);
     
@@ -291,7 +284,7 @@ wan_comm_status_t wan_comm_deinit(wan_comm_handle_t handle) {
         return WAN_COMM_ERR_INVALID_ARG;
     }
     
-    ESP_LOGI(TAG, "Deinitializing QSPI master");
+    ESP_LOGI(TAG, "Deinitializing SPI master");
     
     // Flush any pending DMA buffer
     if (handle->dma_tx.used > 0) {
@@ -330,7 +323,7 @@ wan_comm_status_t wan_comm_deinit(wan_comm_handle_t handle) {
     handle->is_initialized = false;
     free(handle);
     
-    ESP_LOGI(TAG, "QSPI master deinitialized");
+    ESP_LOGI(TAG, "SPI master deinitialized");
     return WAN_COMM_OK;
 }
 
@@ -363,19 +356,59 @@ wan_comm_status_t wan_comm_send_command(wan_comm_handle_t handle,
     memcpy(&frame[WAN_COMM_HEADER_SIZE], command_payload, length);
     
     uint16_t total_length = length + WAN_COMM_HEADER_SIZE;
+
+    if (total_length > WAN_COMM_FIXED_XFER_LEN) {
+        xSemaphoreGive(handle->transfer_mutex);
+        wan_comm_report_error(handle, WAN_COMM_ERR_INVALID_ARG, "send_data length exceeds fixed transfer size");
+        return WAN_COMM_ERR_INVALID_ARG;
+    }
+
+    // Ensure DMA buffer is empty before adding a new frame
+    if (handle->dma_tx.used != 0) {
+        esp_err_t flush_ret = dma_buffer_flush(handle);
+        if (flush_ret != ESP_OK) {
+            xSemaphoreGive(handle->transfer_mutex);
+            wan_comm_report_error(handle, WAN_COMM_ERR_BUS_BUSY, "send_data pre-flush failed");
+            return WAN_COMM_ERR_BUS_BUSY;
+        }
+    }
+
+    if (total_length > WAN_COMM_FIXED_XFER_LEN) {
+        xSemaphoreGive(handle->transfer_mutex);
+        wan_comm_report_error(handle, WAN_COMM_ERR_INVALID_ARG, "send_command length exceeds fixed transfer size");
+        return WAN_COMM_ERR_INVALID_ARG;
+    }
     
+    // Ensure DMA buffer is empty before adding a new frame
+    if (handle->dma_tx.used != 0) {
+        esp_err_t flush_ret = dma_buffer_flush(handle);
+        if (flush_ret != ESP_OK) {
+            xSemaphoreGive(handle->transfer_mutex);
+            wan_comm_report_error(handle, WAN_COMM_ERR_BUS_BUSY, "send_command pre-flush failed");
+            return WAN_COMM_ERR_BUS_BUSY;
+        }
+    }
+
     // Add to DMA buffer
     esp_err_t ret = dma_buffer_add_frame(handle, frame, total_length);
     
-    xSemaphoreGive(handle->transfer_mutex);
-    
     if (ret != ESP_OK) {
+        xSemaphoreGive(handle->transfer_mutex);
         wan_comm_report_error(handle, WAN_COMM_ERR_BUS_BUSY, "send_command DMA error");
+        return WAN_COMM_ERR_BUS_BUSY;
+    }
+
+    // Flush immediately to transmit a fixed-length frame
+    ret = dma_buffer_flush(handle);
+    xSemaphoreGive(handle->transfer_mutex);
+
+    if (ret != ESP_OK) {
+        wan_comm_report_error(handle, WAN_COMM_ERR_BUS_BUSY, "send_command flush failed");
         return WAN_COMM_ERR_BUS_BUSY;
     }
     
     handle->packets_sent++;
-    ESP_LOGD(TAG, "QSPI TX: CF %u bytes (total=%lu)", total_length, handle->packets_sent);
+    ESP_LOGI(TAG, "SPI TX: CF %u bytes (total=%lu)", total_length, handle->packets_sent);
     
     return WAN_COMM_OK;
 }
@@ -413,15 +446,23 @@ wan_comm_status_t wan_comm_send_data(wan_comm_handle_t handle,
     // Add to DMA buffer
     esp_err_t ret = dma_buffer_add_frame(handle, frame, total_length);
     
-    xSemaphoreGive(handle->transfer_mutex);
-    
     if (ret != ESP_OK) {
+        xSemaphoreGive(handle->transfer_mutex);
         wan_comm_report_error(handle, WAN_COMM_ERR_BUS_BUSY, "send_data DMA error");
+        return WAN_COMM_ERR_BUS_BUSY;
+    }
+
+    // Flush immediately to transmit a fixed-length frame
+    ret = dma_buffer_flush(handle);
+    xSemaphoreGive(handle->transfer_mutex);
+
+    if (ret != ESP_OK) {
+        wan_comm_report_error(handle, WAN_COMM_ERR_BUS_BUSY, "send_data flush failed");
         return WAN_COMM_ERR_BUS_BUSY;
     }
     
     handle->packets_sent++;
-    ESP_LOGD(TAG, "QSPI TX: DT %u bytes (total=%lu)", total_length, handle->packets_sent);
+    ESP_LOGI(TAG, "SPI TX: DT %u bytes (total=%lu)", total_length, handle->packets_sent);
     
     return WAN_COMM_OK;
 }
@@ -437,7 +478,12 @@ wan_comm_status_t wan_comm_request_data(wan_comm_handle_t handle,
         return WAN_COMM_ERR_INVALID_ARG;
     }
     
-    wan_comm_status_t status = wan_comm_validate_transaction(handle, length_to_read);
+    uint16_t transfer_len = WAN_COMM_FIXED_XFER_LEN;
+    if (length_to_read > transfer_len) {
+        transfer_len = length_to_read;
+    }
+
+    wan_comm_status_t status = wan_comm_validate_transaction(handle, transfer_len);
     if (status != WAN_COMM_OK) {
         return status;
     }
@@ -448,32 +494,53 @@ wan_comm_status_t wan_comm_request_data(wan_comm_handle_t handle,
         return WAN_COMM_ERR_TIMEOUT;
     }
     
-    // Build dummy TX packet: [DQ header][zeros] - polling
-    memset(handle->rx_buffer, 0, length_to_read);
-    handle->rx_buffer[0] = (WAN_COMM_HEADER_DQ >> 8) & 0xFF;
-    handle->rx_buffer[1] = WAN_COMM_HEADER_DQ & 0xFF;
+    // Create separate DMA-aligned TX buffer for DQ polling packet
+    // This prevents SPI state machine confusion from residual data
+    uint8_t *tx_buffer = (uint8_t*)heap_caps_aligned_alloc(DMA_ALIGNMENT, 
+                                                             transfer_len, 
+                                                             MALLOC_CAP_DMA);
+    if (!tx_buffer) {
+        xSemaphoreGive(handle->transfer_mutex);
+        wan_comm_report_error(handle, WAN_COMM_ERR_NOMEM, "request_data TX buffer alloc failed");
+        return WAN_COMM_ERR_NOMEM;
+    }
     
-    // Setup full-duplex transaction (QIO mode if enabled)
+    // Build polling packet in separate TX buffer
+    memset(tx_buffer, 0, transfer_len);
+    tx_buffer[0] = (WAN_COMM_HEADER_DQ >> 8) & 0xFF;
+    tx_buffer[1] = WAN_COMM_HEADER_DQ & 0xFF;
+    
+    // Clear RX buffer before full-duplex transaction
+    memset(handle->rx_buffer, 0, transfer_len);
+    
+    // Setup full-duplex transaction
     spi_transaction_t trans = {0};
-    trans.flags = handle->config.enable_quad_mode ? SPI_TRANS_MODE_QIO : 0;
-    trans.length = length_to_read * 8;      // Total bits to transfer
-    trans.rxlength = length_to_read * 8;    // Bits to receive
-    trans.tx_buffer = handle->rx_buffer;    // TX: DQ header + zeros (reuse RX buffer)
-    trans.rx_buffer = handle->rx_buffer;    // RX: Slave response
+    trans.flags = 0;
+    trans.length = transfer_len * 8;      // Total bits to transfer
+    trans.rxlength = transfer_len * 8;    // Bits to receive
+    trans.tx_buffer = tx_buffer;          // TX: DQ header + zeros (SEPARATE buffer)
+    trans.rx_buffer = handle->rx_buffer;  // RX: Slave response (CLEANED buffer)
     
     // Transmit (blocking, full-duplex)
     esp_err_t ret = spi_device_transmit(handle->spi_device, &trans);
     
     if (ret == ESP_OK) {
         // Copy received data to user buffer
-        memcpy(rx_buffer, handle->rx_buffer, length_to_read);
-        ESP_LOGD(TAG, "QSPI RX: DQ %u bytes", length_to_read);
+        uint16_t copy_len = length_to_read;
+        if (copy_len > transfer_len) {
+            copy_len = transfer_len;
+        }
+        memcpy(rx_buffer, handle->rx_buffer, copy_len);
+        ESP_LOGI(TAG, "SPI RX: DQ %u bytes (xfer=%u)", copy_len, transfer_len);
     }
     
     xSemaphoreGive(handle->transfer_mutex);
     
+    // Free temporary TX buffer
+    heap_caps_free(tx_buffer);
+    
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "QSPI RX failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "SPI RX failed: %s", esp_err_to_name(ret));
         wan_comm_report_error(handle, WAN_COMM_ERR_BUS_BUSY, "request_data SPI error");
         return WAN_COMM_ERR_BUS_BUSY;
     }
@@ -510,9 +577,9 @@ wan_comm_status_t wan_comm_transceive(wan_comm_handle_t handle,
     memset(handle->rx_buffer, 0, handle->rx_buffer_size_aligned);
     memcpy(handle->rx_buffer, tx_data, tx_length);
     
-    // Setup full-duplex transaction (QIO mode if enabled)
+    // Setup full-duplex transaction
     spi_transaction_t trans = {0};
-    trans.flags = handle->config.enable_quad_mode ? SPI_TRANS_MODE_QIO : 0;
+    trans.flags = 0;
     trans.length = max_length * 8;
     trans.rxlength = rx_length * 8;
     trans.tx_buffer = handle->rx_buffer;
@@ -524,13 +591,13 @@ wan_comm_status_t wan_comm_transceive(wan_comm_handle_t handle,
     if (ret == ESP_OK) {
         memcpy(rx_buffer, handle->rx_buffer, rx_length);
         handle->packets_sent++;
-        ESP_LOGD(TAG, "QSPI Transceive: TX=%u, RX=%u bytes", tx_length, rx_length);
+        ESP_LOGI(TAG, "SPI Transceive: TX=%u, RX=%u bytes", tx_length, rx_length);
     }
     
     xSemaphoreGive(handle->transfer_mutex);
     
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "QSPI transceive failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "SPI transceive failed: %s", esp_err_to_name(ret));
         wan_comm_report_error(handle, WAN_COMM_ERR_BUS_BUSY, "transceive SPI error");
         return WAN_COMM_ERR_BUS_BUSY;
     }
@@ -620,7 +687,7 @@ static esp_err_t dma_buffer_add_frame(wan_comm_handle_t handle, const uint8_t *f
         handle->dma_tx.used += len;
         handle->dma_tx.frame_count++;
         
-        ESP_LOGV(TAG, "Frame added to DMA buffer: %zu bytes (%zu/%d used, %lu frames)",
+        ESP_LOGI(TAG, "Frame added to DMA buffer: %zu bytes (%zu/%d used, %lu frames)",
                  len, handle->dma_tx.used, WAN_COMM_DMA_BUFFER_SIZE, handle->dma_tx.frame_count);
         
         return ESP_OK;
@@ -630,7 +697,7 @@ static esp_err_t dma_buffer_add_frame(wan_comm_handle_t handle, const uint8_t *f
         memset(&handle->dma_tx.buffer[handle->dma_tx.used], 0x00, padding);  // Dummy bytes
         handle->dma_tx.used = WAN_COMM_DMA_BUFFER_SIZE;
         
-        ESP_LOGD(TAG, "DMA buffer full - flushing with %zu bytes 0x00 padding", padding);
+        ESP_LOGI(TAG, "DMA buffer full - flushing with %zu bytes 0x00 padding", padding);
         
         // Flush buffer
         esp_err_t ret = dma_buffer_flush(handle);
@@ -643,38 +710,46 @@ static esp_err_t dma_buffer_add_frame(wan_comm_handle_t handle, const uint8_t *f
         handle->dma_tx.used = len;
         handle->dma_tx.frame_count = 1;
         
-        ESP_LOGV(TAG, "New DMA buffer started: %zu bytes", len);
+        ESP_LOGI(TAG, "New DMA buffer started: %zu bytes", len);
         
         return ESP_OK;
     }
 }
 
 /**
- * @brief Flush DMA buffer to QSPI hardware
+ * @brief Flush DMA buffer to SPI hardware
  * 
  * @param handle Handle
  * @return ESP_OK on success
  */
 static esp_err_t dma_buffer_flush(wan_comm_handle_t handle) {
     if (handle->dma_tx.used == 0) {
-        ESP_LOGV(TAG, "DMA buffer empty, nothing to flush");
+        ESP_LOGI(TAG, "DMA buffer empty, nothing to flush");
         return ESP_OK;
     }
     
-    ESP_LOGD(TAG, "Flushing DMA buffer: %zu bytes, %lu frames",
+    ESP_LOGI(TAG, "Flushing DMA buffer: %zu bytes, %lu frames",
              handle->dma_tx.used, handle->dma_tx.frame_count);
     
-    // Pad to 4-byte alignment if needed
+    // Debug: Dump DMA buffer content before flush
+    ESP_LOG_BUFFER_HEXDUMP(TAG, handle->dma_tx.buffer, 
+                          handle->dma_tx.used > 64 ? 64 : handle->dma_tx.used, 
+                          ESP_LOG_INFO);
+    
+    // Pad to fixed transfer length and 4-byte alignment
     size_t aligned_size = DMA_ALIGN_SIZE(handle->dma_tx.used);
+    if (aligned_size < WAN_COMM_FIXED_XFER_LEN) {
+        aligned_size = WAN_COMM_FIXED_XFER_LEN;
+    }
     if (aligned_size > handle->dma_tx.used) {
         size_t padding = aligned_size - handle->dma_tx.used;
         memset(&handle->dma_tx.buffer[handle->dma_tx.used], 0x00, padding);
-        ESP_LOGV(TAG, "Added %zu bytes padding for DMA alignment", padding);
+        ESP_LOGI(TAG, "Added %zu bytes padding for DMA alignment", padding);
     }
     
-    // Setup QSPI transaction (QIO mode if enabled)
+    // Setup SPI transaction
     spi_transaction_t trans = {0};
-    trans.flags = handle->config.enable_quad_mode ? SPI_TRANS_MODE_QIO : 0;
+    trans.flags = 0;
     trans.length = aligned_size * 8;  // Bits
     trans.tx_buffer = handle->dma_tx.buffer;
     trans.rx_buffer = NULL;  // TX-only for flushing accumulated frames
@@ -684,7 +759,7 @@ static esp_err_t dma_buffer_flush(wan_comm_handle_t handle) {
     
     if (ret == ESP_OK) {
         handle->dma_flushes++;
-        ESP_LOGD(TAG, "DMA buffer flushed successfully (flush #%lu)", handle->dma_flushes);
+        ESP_LOGI(TAG, "DMA buffer flushed successfully (flush #%lu)", handle->dma_flushes);
         
         // Reset buffer
         handle->dma_tx.used = 0;

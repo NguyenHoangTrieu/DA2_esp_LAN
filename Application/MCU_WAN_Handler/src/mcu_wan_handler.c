@@ -350,14 +350,11 @@ esp_err_t mcu_wan_handler_start(void) {
                                   .gpio_cs = 10,
                                   .gpio_io0 = 11,
                                   .gpio_io1 = 13,
-                                  .gpio_io2 = -1,
-                                  .gpio_io3 = -1,
                                   .clock_speed_hz = 10000000,
                                   .mode = 0,
                                   .host_id = SPI2_HOST,
                                   .dma_channel = SPI_DMA_CH_AUTO,
-                                  .queue_size = 7,
-                                  .enable_quad_mode = false};
+                                  .queue_size = 7};
 
   wan_comm_status_t status = wan_comm_init(&wan_config, &g_wan_handle);
   if (status != WAN_COMM_OK) {
@@ -788,6 +785,11 @@ static esp_err_t perform_handshake(void) {
     return ESP_FAIL;
   }
 
+  // Ensure command is transmitted immediately before waiting for response
+  if (wan_comm_flush_dma_buffer(g_wan_handle) != WAN_COMM_OK) {
+    return ESP_FAIL;
+  }
+
   // Wait for ACK response from WAN MCU
   vTaskDelay(pdMS_TO_TICKS(100));
   uint8_t response[16] = {0};
@@ -810,6 +812,11 @@ static esp_err_t request_rtc_and_status(void) {
   wan_comm_status_t status =
       wan_comm_send_command(g_wan_handle, rtc_request, 2);
   if (status != WAN_COMM_OK) {
+    return ESP_FAIL;
+  }
+
+  // Ensure command is transmitted immediately before waiting for response
+  if (wan_comm_flush_dma_buffer(g_wan_handle) != WAN_COMM_OK) {
     return ESP_FAIL;
   }
 
