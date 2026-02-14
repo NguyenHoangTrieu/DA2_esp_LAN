@@ -13,9 +13,9 @@
 
 // ===== Firmware Version =====
 #define LAN_FW_VERSION_MAJOR 1
-#define LAN_FW_VERSION_MINOR 2
-#define LAN_FW_VERSION_PATCH 3
-#define LAN_FW_VERSION_BUILD 5 // Increment after FOTA
+#define LAN_FW_VERSION_MINOR 1
+#define LAN_FW_VERSION_PATCH 1
+#define LAN_FW_VERSION_BUILD 2 // Increment after FOTA
 
 #define LAN_FW_VERSION                                                         \
   FW_VERSION_MAKE(LAN_FW_VERSION_MAJOR, LAN_FW_VERSION_MINOR,                  \

@@ -28,6 +28,8 @@ static const char *TAG = "WAN_UL";
 #define HANDSHAKE_INTERVAL_MS 1000
 #define HANDSHAKE_TIMEOUT_MS 100
 #define MUTEX_TIMEOUT_MS 50
+#define SD_RETRY_DELAY_MS 2000  // Delay between SD retryattempts
+#define MAX_FILE_RETRY_ATTEMPTS 3  // Max retry per file before delete
 
 // FW Version
 // FW Version macros removed (defined in frame_types.h and mcu_wan_handler.h)
@@ -251,6 +253,9 @@ static void uplink_handler_task(void *pvParameters) {
 
   TickType_t last_rtc_request = xTaskGetTickCount();
   TickType_t last_flush = xTaskGetTickCount();
+  TickType_t last_mismatch_check = xTaskGetTickCount();
+  TickType_t last_sd_retry_attempt = 0;  // Track last SD retry to avoid spam
+  uint8_t consecutive_sd_failures = 0;   // Track consecutive failures for same file
   uplink_item_t uplink_item;
 
   while (g_handler_running) {
@@ -308,6 +313,14 @@ static void uplink_handler_task(void *pvParameters) {
       if (storage_handler_has_data() &&
           g_internet_status == INTERNET_STATUS_ONLINE) {
 
+        // Rate limiting: Only retry every SD_RETRY_DELAY_MS
+        if ((now - last_sd_retry_attempt) < pdMS_TO_TICKS(SD_RETRY_DELAY_MS)) {
+          // Skip this iteration - wait for delay period
+          goto skip_sd_retry;
+        }
+        
+        last_sd_retry_attempt = now;
+
         // Prepare retry session (open oldest file)
         if (storage_handler_prepare_retry() == ESP_OK) {
           ESP_LOGI(TAG, "Starting SD card retry session");
@@ -315,10 +328,21 @@ static void uplink_handler_task(void *pvParameters) {
           bool session_success = true;
           uint8_t sd_buffer[MAX_PAYLOAD_SIZE + DATA_PACKET_HEADER_SIZE + 20];
           uint16_t sd_length = 0; // Changed to uint16_t to match new API
+          uint16_t packets_sent = 0;
 
           // Process all packets in the file stream
           while (storage_handler_get_next_packet(sd_buffer, &sd_length,
                                                  sizeof(sd_buffer)) == ESP_OK) {
+
+            // ===== CORRUPT FILE DETECTION =====
+            // Minimum valid packet: [handler(3)][len(2)][rtc(19)] = 24 bytes
+            if (sd_length < 24) {
+              ESP_LOGE(TAG, "Corrupt packet detected: only %u bytes (min 24)", sd_length);
+              ESP_LOGE(TAG, "Aborting and DELETING corrupt file");
+              session_success = false;  // Mark as failed
+              consecutive_sd_failures++;  // Increment failure counter
+              break;  // Abort immediately
+            }
 
             ESP_LOGI(TAG, "Retrying SD packet: %u bytes", sd_length);
 
@@ -329,6 +353,7 @@ static void uplink_handler_task(void *pvParameters) {
 
             if (send_result == ESP_OK && ack_result == ACK_TYPE_INTERNET_OK) {
               g_sd_retry_success_count++;
+              packets_sent++;
               ESP_LOGI(TAG, "SD packet sent OK (#%lu)",
                        g_sd_retry_success_count);
               // Continue to next packet
@@ -336,6 +361,7 @@ static void uplink_handler_task(void *pvParameters) {
               ESP_LOGW(TAG,
                        "SD packet send failed/timeout, aborting retry session");
               session_success = false;
+              consecutive_sd_failures++;
 
               if (ack_result == ACK_TYPE_NO_INTERNET) {
                 g_internet_status = INTERNET_STATUS_OFFLINE;
@@ -344,9 +370,22 @@ static void uplink_handler_task(void *pvParameters) {
             }
           }
 
-          storage_handler_finish_retry(session_success);
+          // ===== FORCED DELETE AFTER MAX ATTEMPTS =====
+          if (!session_success && consecutive_sd_failures >= MAX_FILE_RETRY_ATTEMPTS) {
+            ESP_LOGE(TAG, "File failed %u times consecutively - FORCE DELETING",
+                     consecutive_sd_failures);
+            storage_handler_finish_retry(true);  // Force delete (true = success)
+            consecutive_sd_failures = 0;  // Reset counter for next file
+          } else {
+            storage_handler_finish_retry(session_success);
+            if (session_success) {
+              consecutive_sd_failures = 0;  // Reset on success
+            }
+          }
         }
       }
+      
+skip_sd_retry:
 
       // C) RTC Periodic Timer (1 second interval)
 
@@ -361,9 +400,10 @@ static void uplink_handler_task(void *pvParameters) {
       xSemaphoreGive(g_qspi_mutex);
     }
 
-    // D) Periodic Flush (5 seconds, outside SPI mutex)
+    // D) Periodic Flush (500ms to match timeout batching, outside SPI mutex)
+    // This handles timeout flushes set by storage handler timer callback
 
-    if ((now - last_flush) >= pdMS_TO_TICKS(5000)) {
+    if ((now - last_flush) >= pdMS_TO_TICKS(500)) {
       storage_handler_flush();
       wan_comm_flush_dma_buffer(g_wan_handle);
       last_flush = now;
@@ -432,14 +472,6 @@ static esp_err_t perform_handshake(void) {
         ((uint32_t)response[3] << 24) | ((uint32_t)response[4] << 16) |
         ((uint32_t)response[5] << 8) | ((uint32_t)response[6]);
 
-    ESP_LOGI(TAG, "Handshake ACK received:");
-    ESP_LOGI(TAG, "  Internet: %s", g_internet_status ? "ONLINE" : "OFFLINE");
-    ESP_LOGI(TAG, "  WAN FW: v%u.%u.%u.%u",
-             FW_VERSION_MAJOR(g_cached_wan_fw_version),
-             FW_VERSION_MINOR(g_cached_wan_fw_version),
-             FW_VERSION_PATCH(g_cached_wan_fw_version),
-             FW_VERSION_BUILD(g_cached_wan_fw_version));
-
     return ESP_OK;
   }
 
@@ -498,7 +530,7 @@ static esp_err_t request_rtc_and_status(void) {
  * @brief Send data with retry and ACK
  * NOTE: Caller must hold g_qspi_mutex
  *
- * @param data Complete packet (DT header + payload)
+ * @param data Payload without DT header (wan_comm_send_data adds DT)
  * @param length Packet length
  * @param[out] ack_out ACK type received
  * @return ESP_OK on success
@@ -553,15 +585,11 @@ static esp_err_t send_data_to_wan(const uint8_t *data, uint16_t length,
 }
 
 /**
- * @brief Build data packet: [DT][handler_type(3)][length(2)][rtc(19)][data]
+ * @brief Build data payload: [handler_type(3)][length(2)][rtc(19)][data]
  */
 static void build_data_packet(const uplink_item_t *item, uint8_t *packet,
                               uint16_t *packet_len) {
   uint8_t *p = packet;
-
-  // DT header
-  *p++ = (WAN_COMM_HEADER_DT >> 8) & 0xFF;
-  *p++ = WAN_COMM_HEADER_DT & 0xFF;
 
   // Handler type (3 bytes)
   const char *type_str = handler_id_to_string(item->source_id);
@@ -580,7 +608,7 @@ static void build_data_packet(const uplink_item_t *item, uint8_t *packet,
   // Payload
   memcpy(p, item->data, item->length);
 
-  *packet_len = DATA_PACKET_HEADER_SIZE + 19 + item->length;
+  *packet_len = 3 + 2 + 19 + item->length;
 }
 
 /**

@@ -121,6 +121,7 @@ static void event_handler(void *arg, esp_event_base_t event_base,
     switch (event_id) {
     case ESP_HTTPS_OTA_START:
       ESP_LOGI(TAG, "OTA started");
+      ESP_LOGI(TAG, "Free heap: %d", esp_get_free_heap_size());
       break;
     case ESP_HTTPS_OTA_CONNECTED:
       ESP_LOGI(TAG, "Connected to server");
@@ -230,7 +231,7 @@ void advanced_ota_task(void *pvParameter) {
   esp_netif_t *netif = get_netif_from_desc(bind_interface_name);
   if (netif == NULL) {
     ESP_LOGE(TAG, "Can't find netif from interface description");
-    fota_handler_task_stop();
+    fota_lan_handler_task_stop();
     vTaskDelete(NULL);
   }
 
@@ -248,8 +249,11 @@ void advanced_ota_task(void *pvParameter) {
 #endif
       .timeout_ms = FOTA_CONFIG_LAN_OTA_RECV_TIMEOUT,
       .keep_alive_enable = true,
-      .buffer_size = 8 * 1024,
-      .buffer_size_tx = 8 * 1024,
+      .keep_alive_idle = 30,      // Send keepalive after 5s idle
+      .keep_alive_interval = 10,  // Keepalive probe interval
+      .keep_alive_count = 5,     // Max failed probes before disconnect
+      .buffer_size = 4 * 1024,
+      .buffer_size_tx = 4 * 1024,
 #if FOTA_CONFIG_LAN_FIRMWARE_UPGRADE_BIND_IF
       .if_name = &ifr,
 #endif
@@ -271,7 +275,7 @@ void advanced_ota_task(void *pvParameter) {
     config.url = url_buf;
   } else {
     ESP_LOGE(TAG, "Configuration mismatch: wrong firmware upgrade image url");
-    fota_handler_task_stop();
+    fota_lan_handler_task_stop();
     vTaskDelete(NULL);
   }
 #endif
@@ -286,7 +290,7 @@ void advanced_ota_task(void *pvParameter) {
                  &nvs_ota_resumption_handle);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Error (%s) opening NVS handle!", esp_err_to_name(err));
-    fota_handler_task_stop();
+    fota_lan_handler_task_stop();
     vTaskDelete(NULL);
   }
 
@@ -319,23 +323,31 @@ void advanced_ota_task(void *pvParameter) {
   esp_https_ota_handle_t https_ota_handle = NULL;
   err = esp_https_ota_begin(&ota_config, &https_ota_handle);
   if (err != ESP_OK) {
-    ESP_LOGE(TAG, "ESP HTTPS OTA Begin failed");
+    ESP_LOGE(TAG, "ESP HTTPS OTA Begin failed: %s", esp_err_to_name(err));
     fota_lan_handler_task_stop();
-    vTaskDelete(NULL);
+    ESP_LOGI(TAG, "FOTA error - restarting device");
+    vTaskDelay(pdMS_TO_TICKS(1000));
     esp_restart();
   }
-
   esp_app_desc_t app_desc = {};
   err = esp_https_ota_get_img_desc(https_ota_handle, &app_desc);
   if (err != ESP_OK) {
-    ESP_LOGE(TAG, "esp_https_ota_get_img_desc failed");
-    goto ota_end;
+    ESP_LOGE(TAG, "esp_https_ota_get_img_desc failed: %s", esp_err_to_name(err));
+    esp_https_ota_abort(https_ota_handle);
+    fota_lan_handler_task_stop();
+    ESP_LOGI(TAG, "FOTA error - restarting device");
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_restart();
   }
 
   err = validate_image_header(&app_desc);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "image header verification failed");
-    goto ota_end;
+    esp_https_ota_abort(https_ota_handle);
+    fota_lan_handler_task_stop();
+    ESP_LOGI(TAG, "FOTA error - restarting device");
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_restart();
   }
 
   while (1) {
@@ -346,7 +358,16 @@ void advanced_ota_task(void *pvParameter) {
 
     // Monitor OTA progress
     const size_t len = esp_https_ota_get_image_len_read(https_ota_handle);
-    ESP_LOGD(TAG, "Image bytes read: %d", len);
+    static size_t last_logged_len = 0;
+    static TickType_t last_log_time = 0;
+    TickType_t now = xTaskGetTickCount();
+    
+    // Log progress every 5 seconds or every 50KB
+    if (len - last_logged_len >= 51200 || (now - last_log_time) >= pdMS_TO_TICKS(5000)) {
+      ESP_LOGI(TAG, "OTA Progress: %d bytes downloaded (%.1f KB)", len, len / 1024.0);
+      last_logged_len = len;
+      last_log_time = now;
+    }
 
 #if FOTA_CONFIG_LAN_ENABLE_OTA_RESUMPTION
     err = ota_res_save_cfg_to_nvs(nvs_ota_resumption_handle, len, config.url);
@@ -378,16 +399,17 @@ void advanced_ota_task(void *pvParameter) {
       }
       ESP_LOGE(TAG, "ESP_HTTPS_OTA upgrade failed 0x%x", ota_finish_err);
       fota_lan_handler_task_stop();
-      vTaskDelete(NULL);
+      ESP_LOGI(TAG, "FOTA error - restarting device");
+      vTaskDelay(pdMS_TO_TICKS(1000));
       esp_restart();
     }
   }
 
-ota_end:
   esp_https_ota_abort(https_ota_handle);
   ESP_LOGE(TAG, "ESP_HTTPS_OTA upgrade failed");
   fota_lan_handler_task_stop();
-  vTaskDelete(NULL);
+  ESP_LOGI(TAG, "FOTA error - restarting device");
+  vTaskDelay(pdMS_TO_TICKS(1000));
   esp_restart();
 }
 

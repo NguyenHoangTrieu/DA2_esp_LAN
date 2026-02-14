@@ -1,6 +1,7 @@
 #include "can_driver.h"
 #include "can_handler.h"
 #include "esp_log.h"
+#include "fota_lan_handler.h"
 #include "frame_types.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"

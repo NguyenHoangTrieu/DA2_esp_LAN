@@ -17,10 +17,10 @@
 
 static const char *TAG = "STORAGE";
 
-/* Configuration - 100KB buffer per design doc */
-#define BATCH_BUFFER_SIZE 102400 // 100 KB
+/* Configuration - 5KB buffer with 500ms timeout for packet batching */
+#define BATCH_BUFFER_SIZE 5120   // 5 KB buffer
 #define MAX_PACKET_SIZE 8192     // Max single packet size
-#define FLUSH_TIMEOUT_MS 5000    // 5 seconds idle timeout
+#define FLUSH_TIMEOUT_MS 500     // 500ms idle timeout - packets within 500ms batched to same file
 
 /* Batch Buffer Structure */
 typedef struct {
@@ -34,8 +34,9 @@ typedef struct {
 static SemaphoreHandle_t g_storage_mutex = NULL;
 static bool g_storage_initialized = false;
 static batch_buffer_t *g_batch_buffer = NULL;
-static TimerHandle_t g_flush_timer = NULL; // Timer for 5s flush
+static TimerHandle_t g_flush_timer = NULL; // Timer for 500ms flush
 static int64_t g_last_write_us = 0;        // Track last write timestamp
+static bool g_timeout_flush_pending = false; // Flag: timeout condition met, ready to flush
 
 /* Retry State */
 static FILE *g_retry_file = NULL;
@@ -49,20 +50,22 @@ static void flush_timer_callback(TimerHandle_t xTimer);
 /* ========== Private Helper: Timer Callback ========== */
 
 /**
- * @brief Timer callback to check for 5s timeout flush
+ * @brief Timer callback to check for 500ms timeout flush
+ * @note Sets flag for main task to perform flush (avoids blocking I/O in timer context)
  */
 static void flush_timer_callback(TimerHandle_t xTimer) {
-  if (xSemaphoreTake(g_storage_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-    // Check if buffer has data and 5s elapsed since last write
+  if (xSemaphoreTake(g_storage_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    // Check if buffer has data and 500ms elapsed since last write
     int64_t now_us = esp_timer_get_time();
     bool timeout_elapsed =
         (now_us - g_last_write_us) >= (FLUSH_TIMEOUT_MS * 1000);
 
     if (g_batch_buffer->needs_flush && g_batch_buffer->write_pos > 0 &&
         timeout_elapsed) {
-      ESP_LOGI(TAG, "Timeout flush: %u bytes after %ums idle",
+      ESP_LOGI(TAG, "Timeout condition met: %u bytes after %ums idle",
                g_batch_buffer->write_pos, FLUSH_TIMEOUT_MS);
-      flush_batch_buffer();
+      // Set flag for main task to perform actual flush
+      g_timeout_flush_pending = true;
     }
     xSemaphoreGive(g_storage_mutex);
   }
@@ -115,9 +118,9 @@ esp_err_t storage_handler_init(void) {
   memset(g_batch_buffer, 0, sizeof(batch_buffer_t));
   g_last_write_us = esp_timer_get_time(); // Initialize timestamp
 
-  /* Create 5-second flush timer */
+  /* Create 500ms flush timer - check every 100ms for responsive batching */
   g_flush_timer = xTimerCreate("sd_flush",
-                               pdMS_TO_TICKS(1000), // Check every 1s
+                               pdMS_TO_TICKS(100), // Check every 100ms
                                pdTRUE,              // Auto-reload
                                NULL, flush_timer_callback);
   if (g_flush_timer == NULL) {
@@ -145,7 +148,7 @@ esp_err_t storage_handler_init(void) {
   g_storage_initialized = true;
   ESP_LOGI(
       TAG,
-      "Storage handler initialized: 100KB batch buffer with %ums flush timer",
+      "Storage handler initialized: 5KB batch buffer with %ums flush timer",
       FLUSH_TIMEOUT_MS);
   ESP_LOGI(TAG, "Buffer allocated from: %s",
            heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0 ? "PSRAM" : "DRAM");
@@ -281,10 +284,29 @@ esp_err_t storage_handler_flush(void) {
   }
 
   esp_err_t ret = ESP_OK;
-  if (g_batch_buffer->write_pos > 0) {
-    ESP_LOGI(TAG, "Manual flush requested: %u bytes, %lu packets",
-             g_batch_buffer->write_pos, g_batch_buffer->packet_count);
+  
+  // Only flush if:
+  // 1. Timeout condition met (data idle > 500ms), OR
+  // 2. Buffer is nearly full (> 90% = ~4608 bytes), OR
+  // 3. Deinitialize explicitly called
+  bool should_flush = g_batch_buffer->write_pos > 0 &&
+                      (g_timeout_flush_pending || 
+                       g_batch_buffer->write_pos > (BATCH_BUFFER_SIZE * 9 / 10));
+
+  if (should_flush) {
+    if (g_timeout_flush_pending) {
+      ESP_LOGI(TAG, "Timeout flush: %u bytes, %lu packets",
+               g_batch_buffer->write_pos, g_batch_buffer->packet_count);
+    } else {
+      ESP_LOGI(TAG, "Buffer nearly full flush: %u bytes, %lu packets",
+               g_batch_buffer->write_pos, g_batch_buffer->packet_count);
+    }
     ret = flush_batch_buffer();
+    g_timeout_flush_pending = false; // Clear flag after flush
+  } else if (g_batch_buffer->write_pos > 0) {
+    ESP_LOGD(TAG, "Waiting for timeout: %u bytes buffered, %lu ms idle",
+             g_batch_buffer->write_pos,
+             (esp_timer_get_time() - g_last_write_us) / 1000);
   } else {
     ESP_LOGD(TAG, "Batch buffer empty, nothing to flush");
   }
@@ -396,7 +418,7 @@ uint32_t storage_handler_get_file_count(void) {
 /* ========== Private Helper Functions ========== */
 
 /**
- * @brief Flush batch buffer to SD card with 0xFF padding to 100KB
+ * @brief Flush batch buffer to SD card (exact size, no padding)
  * @note Caller must hold g_storage_mutex
  * @return ESP_OK on success
  */
@@ -407,23 +429,16 @@ static esp_err_t flush_batch_buffer(void) {
   }
 
   ESP_LOGI(TAG,
-           "Flushing batch buffer: %u bytes, %lu packets (padding to 100KB)",
+           "Flushing batch buffer: %u bytes, %lu packets",
            g_batch_buffer->write_pos, g_batch_buffer->packet_count);
 
-  /* Pad to 100KB with 0xFF (SD card erase state) */
-  size_t padding = BATCH_BUFFER_SIZE - g_batch_buffer->write_pos;
-  if (padding > 0) {
-    memset(&g_batch_buffer->buffer[g_batch_buffer->write_pos], 0xFF, padding);
-    ESP_LOGD(TAG, "Added %u bytes of 0xFF padding", padding);
-  }
-
-  /* Write entire 100KB buffer to SD card as a single file */
-  esp_err_t ret = sd_card_save(g_batch_buffer->buffer, BATCH_BUFFER_SIZE);
+  /* Write exact size to SD card (no padding needed) */
+  esp_err_t ret = sd_card_save(g_batch_buffer->buffer, g_batch_buffer->write_pos);
 
   if (ret == ESP_OK) {
     ESP_LOGI(TAG,
-             "Batch buffer flushed successfully (100KB), total SD files: %lu",
-             sd_card_get_file_count());
+             "Batch buffer flushed successfully (%u bytes), total SD files: %lu",
+             g_batch_buffer->write_pos, sd_card_get_file_count());
     /* Reset batch buffer */
     g_batch_buffer->write_pos = 0;
     g_batch_buffer->packet_count = 0;
