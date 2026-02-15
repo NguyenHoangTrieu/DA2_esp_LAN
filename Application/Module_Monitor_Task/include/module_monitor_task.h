@@ -151,34 +151,6 @@ handler_status_t module_monitor_get_handler_status(uint8_t stack_id);
  */
 const module_info_t* module_monitor_get_info(uint8_t stack_id);
 
-/**
- * @brief Save config to NVS (for persistence)
- *
- * @param stack_id Stack ID (0 or 1)
- * @param json_str JSON config string
- * @param json_len JSON string length
- * @return esp_err_t
- *         - ESP_OK: Config saved to NVS
- *         - ESP_ERR_INVALID_ARG: Invalid arguments
- *         - ESP_FAIL: NVS write failed
- */
-esp_err_t module_monitor_save_config_to_nvs(uint8_t stack_id, const char *json_str, uint16_t json_len);
-
-/**
- * @brief Load config from NVS
- *
- * Allocates buffer for JSON string - caller must free
- *
- * @param stack_id Stack ID (0 or 1)
- * @param json_str Output: pointer to JSON string (malloc'd)
- * @param json_len Output: JSON string length
- * @return esp_err_t
- *         - ESP_OK: Config loaded from NVS
- *         - ESP_ERR_NOT_FOUND: No config in NVS
- *         - ESP_FAIL: NVS read failed
- */
-esp_err_t module_monitor_load_config_from_nvs(uint8_t stack_id, char **json_str, uint16_t *json_len);
-
 #ifdef __cplusplus
 }
 #endif

@@ -10,7 +10,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
-#include "stack_handler.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -74,37 +73,42 @@ void config_handler_task_stop(void);
  */
 config_type_t config_parse_type(const char *cmd, uint16_t len);
 
-/**
- * @brief Save CAN configuration to NVS
- */
-esp_err_t config_save_can_config_to_nvs(void);
+/* ===== Module JSON Config NVS Functions ===== */
 
 /**
- * @brief Save LoRa TDMA configuration (g_lora_handler_cfg and crypto key) to
- * NVS
+ * @brief Save module JSON config to NVS
+ * @param stack_id Stack ID (0 or 1)
+ * @param json_str JSON config string
+ * @param json_len JSON string length
+ * @return esp_err_t ESP_OK on success
  */
-esp_err_t config_save_lora_handler_config_to_nvs(void);
+esp_err_t config_save_module_json_to_nvs(uint8_t stack_id, const char *json_str, uint16_t json_len);
 
 /**
- * @brief Save LoRa E32 radio configuration (g_lora_e32_params and baud rate) to
- * NVS
+ * @brief Load module JSON config from NVS
+ * @param stack_id Stack ID (0 or 1)
+ * @param json_str Output: pointer to JSON string (malloc'd, caller must free)
+ * @param json_len Output: JSON string length
+ * @return esp_err_t ESP_OK on success, ESP_ERR_NOT_FOUND if no config
  */
-esp_err_t config_save_lora_e32_config_to_nvs(void);
+esp_err_t config_load_module_json_from_nvs(uint8_t stack_id, char **json_str, uint16_t *json_len);
 
 /**
- * @brief Save stack type to NVS
+ * @brief Save global config variables to NVS (stack IDs, etc.)
+ * @return esp_err_t ESP_OK on success
  */
-esp_err_t config_save_stack_type(uint8_t stack_id, stack_comm_type_t type);
+esp_err_t config_save_global_vars_to_nvs(void);
+
+/**
+ * @brief Load global config variables from NVS
+ * @return esp_err_t ESP_OK on success
+ */
+esp_err_t config_load_global_vars_from_nvs(void);
 
 /**
  * @brief Save RS485 baud rate to NVS
  */
 esp_err_t config_save_rs485_baud(uint32_t baud_rate);
-
-/**
- * @brief Erase all gateway configurations from NVS
- */
-esp_err_t erase_all_configs_from_nvs(void);
 
 /**
  * @brief Initialize configuration system (load or save defaults)

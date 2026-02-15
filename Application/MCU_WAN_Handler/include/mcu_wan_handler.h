@@ -34,7 +34,7 @@ esp_err_t mcu_wan_handler_start(void);
 esp_err_t mcu_wan_handler_stop(void);
 
 /**
- * @brief Enqueue uplink data from LAN handlers
+ * @brief Enqueue uplink data from WAN handlers to be sent to WAN MCU
  */
 bool mcu_wan_enqueue_uplink(handler_id_t source_id, uint8_t *data,
                             uint16_t len);

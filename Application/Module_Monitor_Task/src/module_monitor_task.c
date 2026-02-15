@@ -4,14 +4,16 @@
  */
 
 #include "module_monitor_task.h"
+#include "config_handler.h"
+#include "config_global.h"
+#include "stack_handler.h"
+#include "ble_handler_task.h"
 #include "cJSON.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
-#include "nvs.h"
-#include "nvs_flash.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -22,10 +24,7 @@ static const char *TAG = "MODULE_MONITOR";
 #define MODULE_MONITOR_TASK_STACK_SIZE 4096
 #define MODULE_MONITOR_TASK_PRIORITY 3
 #define MODULE_MONITOR_CONFIG_QUEUE_SIZE 10
-#define MODULE_MONITOR_MAX_STACKS 2 // Stack 0 and Stack 1
-#define NVS_NAMESPACE_MODULE_CONFIG "mod_config"
-#define NVS_KEY_STACK0_JSON "stack0_json"
-#define NVS_KEY_STACK1_JSON "stack1_json"
+#define MODULE_MONITOR_MAX_STACKS 2
 
 /* ===== Global State ===== */
 
@@ -57,41 +56,12 @@ static esp_err_t module_start_handler_task(uint8_t stack_id,
                                            module_type_t module_type);
 static esp_err_t module_stop_handler_task(uint8_t stack_id);
 
-/* ===== NVS Helper Functions ===== */
-
-/**
- * @brief Open NVS handle
- */
-static esp_err_t nvs_open_config(nvs_handle_t *handle) {
-  return nvs_open(NVS_NAMESPACE_MODULE_CONFIG, NVS_READWRITE, handle);
-}
-
-/**
- * @brief Get NVS key for stack
- */
-static const char *nvs_get_key(uint8_t stack_id) {
-  return (stack_id == 0) ? NVS_KEY_STACK0_JSON : NVS_KEY_STACK1_JSON;
-}
-
 /* ===== Implementation ===== */
 
 esp_err_t module_monitor_task_start(void) {
   if (g_monitor_state.initialized) {
     ESP_LOGW(TAG, "Monitor task already initialized");
     return ESP_OK;
-  }
-
-  // Initialize NVS
-  esp_err_t ret = nvs_flash_init();
-  if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
-      ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-    ESP_LOGI(TAG, "NVS partition needs erasing");
-    nvs_flash_erase();
-    ret = nvs_flash_init();
-  }
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "NVS init failed: %s", esp_err_to_name(ret));
-    return ret;
   }
 
   // Create mutex
@@ -124,13 +94,22 @@ esp_err_t module_monitor_task_start(void) {
 
   g_monitor_state.initialized = true;
 
-  // Try to load saved configs from NVS
+  // Detect module IDs and save to config_global
+  const char* stack_0_id = stack_handler_get_module_id(0);
+  const char* stack_1_id = stack_handler_get_module_id(1);
+  
+  config_set_stack_1_id(stack_0_id);  // Stack 0 -> g_stack_1_id
+  config_set_stack_2_id(stack_1_id);  // Stack 1 -> g_stack_2_id
+  
+  ESP_LOGI(TAG, "Module IDs detected: Stack_1=%s, Stack_2=%s", 
+           config_get_stack_1_id(), config_get_stack_2_id());
+
+  // Try to load saved JSON configs from NVS
   for (int i = 0; i < MODULE_MONITOR_MAX_STACKS; i++) {
     char *json_str = NULL;
     uint16_t json_len = 0;
 
-    if (module_monitor_load_config_from_nvs(i, &json_str, &json_len) ==
-        ESP_OK) {
+    if (config_load_module_json_from_nvs(i, &json_str, &json_len) == ESP_OK) {
       ESP_LOGI(TAG, "Loaded saved config for Stack %d from NVS", i);
       if (module_parse_json_config(i, json_str, json_len) == ESP_OK) {
         g_monitor_state.module_info[i].is_configured = true;
@@ -340,113 +319,6 @@ const module_info_t *module_monitor_get_info(uint8_t stack_id) {
   return &g_monitor_state.module_info[stack_id];
 }
 
-esp_err_t module_monitor_save_config_to_nvs(uint8_t stack_id,
-                                            const char *json_str,
-                                            uint16_t json_len) {
-  if (stack_id > 1 || !json_str || json_len == 0) {
-    return ESP_ERR_INVALID_ARG;
-  }
-
-  nvs_handle_t handle;
-  esp_err_t ret = nvs_open_config(&handle);
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to open NVS: %s", esp_err_to_name(ret));
-    return ret;
-  }
-
-  const char *key = nvs_get_key(stack_id);
-
-  // Store JSON string
-  ret = nvs_set_blob(handle, key, (const void *)json_str, json_len);
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to write JSON to NVS: %s", esp_err_to_name(ret));
-    nvs_close(handle);
-    return ret;
-  }
-
-  // Commit
-  ret = nvs_commit(handle);
-  nvs_close(handle);
-
-  if (ret == ESP_OK) {
-    ESP_LOGI(TAG, "Config saved to NVS for Stack %d (%u bytes)", stack_id,
-             json_len);
-  } else {
-    ESP_LOGE(TAG, "Failed to commit NVS: %s", esp_err_to_name(ret));
-  }
-
-  return ret;
-}
-
-esp_err_t module_monitor_load_config_from_nvs(uint8_t stack_id, char **json_str,
-                                              uint16_t *json_len) {
-  if (stack_id > 1 || !json_str || !json_len) {
-    return ESP_ERR_INVALID_ARG;
-  }
-
-  nvs_handle_t handle;
-  esp_err_t ret = nvs_open_config(&handle);
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to open NVS: %s", esp_err_to_name(ret));
-    return ret;
-  }
-
-  const char *key = nvs_get_key(stack_id);
-  uint32_t required_size = 0;
-
-  // Get size first
-  ret = nvs_get_blob(handle, key, NULL, (size_t *)&required_size);
-  if (ret == ESP_ERR_NVS_NOT_FOUND) {
-    nvs_close(handle);
-    return ESP_ERR_NOT_FOUND;
-  }
-  if (ret != ESP_OK) {
-    nvs_close(handle);
-    return ret;
-  }
-
-  if (required_size == 0 || required_size > 8192) { // Sanity check
-    nvs_close(handle);
-    return ESP_ERR_INVALID_ARG;
-  }
-
-  // Allocate buffer
-  char *buffer = (char *)malloc(required_size);
-  if (!buffer) {
-    nvs_close(handle);
-    return ESP_ERR_NO_MEM;
-  }
-
-  // Read blob
-  ret = nvs_get_blob(handle, key, buffer, (size_t *)&required_size);
-
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "NVS blob read error: %s", esp_err_to_name(ret));
-
-    // Handle NVS corruption - erase corrupted data
-    if (ret == ESP_ERR_NVS_INVALID_LENGTH || ret == ESP_ERR_NVS_INVALID_NAME) {
-      ESP_LOGW(TAG,
-               "Detected NVS corruption for Stack %d, erasing corrupted config",
-               stack_id);
-      nvs_erase_key(handle, key);
-      nvs_commit(handle);
-    }
-
-    nvs_close(handle);
-    free(buffer);
-    return ret;
-  }
-
-  nvs_close(handle);
-
-  *json_str = buffer;
-  *json_len = (uint16_t)required_size;
-
-  ESP_LOGI(TAG, "Config loaded from NVS for Stack %d (%u bytes)", stack_id,
-           *json_len);
-  return ESP_OK;
-}
-
 /* ===== Internal Helper Functions ===== */
 
 /**
@@ -545,19 +417,19 @@ static esp_err_t module_start_handler_task(uint8_t stack_id,
   switch (module_type) {
   case MODULE_TYPE_BLE:
     ESP_LOGI(TAG, "Starting BLE handler for Stack %d", stack_id);
-    // Call to ble_handler_task_start() - will be implemented in Task 1.2
-    // return ble_handler_task_start(stack_id);
-    return ESP_OK; // TODO: Implement when BLE task is ready
+    return ble_handler_task_start(stack_id);
 
   case MODULE_TYPE_ZIGBEE:
     ESP_LOGI(TAG, "Starting Zigbee handler for Stack %d", stack_id);
-    // Call to zigbee_handler_task_start() - for future
-    return ESP_OK;
+    // TODO: Call zigbee_handler_task_start(stack_id) when implemented
+    ESP_LOGW(TAG, "Zigbee handler not yet implemented");
+    return ESP_ERR_NOT_SUPPORTED;
 
   case MODULE_TYPE_LORA:
     ESP_LOGI(TAG, "Starting LoRa handler for Stack %d", stack_id);
-    // Call to lora_handler_task_start() - for future
-    return ESP_OK;
+    // TODO: Call lora_handler_task_start(stack_id) when implemented
+    ESP_LOGW(TAG, "LoRa handler not yet implemented");
+    return ESP_ERR_NOT_SUPPORTED;
 
   default:
     ESP_LOGE(TAG, "Unknown module type: %d", module_type);
@@ -576,15 +448,14 @@ static esp_err_t module_stop_handler_task(uint8_t stack_id) {
 
   switch (info->module_type) {
   case MODULE_TYPE_BLE:
-    // Call ble_handler_task_stop() - will be implemented
-    return ESP_OK;
+    return ble_handler_task_stop(stack_id);
 
   case MODULE_TYPE_ZIGBEE:
-    // Call zigbee_handler_task_stop() - for future
+    // TODO: Call zigbee_handler_task_stop(stack_id) when implemented
     return ESP_OK;
 
   case MODULE_TYPE_LORA:
-    // Call lora_handler_task_stop() - for future
+    // TODO: Call lora_handler_task_stop(stack_id) when implemented
     return ESP_OK;
 
   default:
@@ -615,8 +486,8 @@ static void module_monitor_task_impl(void *pvParameters) {
           module_parse_json_config(msg.stack_id, msg.json_str, msg.json_len);
       if (ret == ESP_OK) {
         // Save to NVS for persistence
-        module_monitor_save_config_to_nvs(msg.stack_id, msg.json_str,
-                                          msg.json_len);
+        config_save_module_json_to_nvs(msg.stack_id, msg.json_str,
+                                       msg.json_len);
 
         // Auto-start handler task
         ret = module_monitor_start_handler(msg.stack_id);

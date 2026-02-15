@@ -1,17 +1,14 @@
-#include "can_handler.h"
 #include "esp_log.h"
 #include "frame_types.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
-#include "lora_tdma_connect.h"
 #include "mcu_wan_handler.h"
 #include "rs485_handler.h"
 #include "stack_handler.h"
 #include "storage_handler.h"
 #include "wan_comm.h"
-#include "zigbee_nostack_connect.h"
 #include <string.h>
 
 static const char *TAG = "WAN_UL";
@@ -55,8 +52,6 @@ extern SemaphoreHandle_t g_qspi_mutex;
 extern SemaphoreHandle_t g_rtc_mutex;
 extern volatile bool g_handshake_done;
 extern bool g_handler_running;
-extern stack_comm_type_t g_stack_1_type;
-extern stack_comm_type_t g_stack_2_type;
 
 // MODULE STATE
 
@@ -81,7 +76,6 @@ static esp_err_t send_data_to_wan(const uint8_t *data, uint16_t length,
                                   ack_type_t *ack_out);
 static void build_data_packet(const uplink_item_t *item, uint8_t *packet,
                               uint16_t *packet_len);
-static void stack_handler_start(stack_comm_type_t stack_type);
 static const char *handler_id_to_string(handler_id_t id);
 
 // Downlink
@@ -243,9 +237,7 @@ static void uplink_handler_task(void *pvParameters) {
     vTaskDelay(pdMS_TO_TICKS(HANDSHAKE_INTERVAL_MS));
   }
 
-  // Start stack handlers after handshake
-  stack_handler_start(g_stack_1_type);
-  stack_handler_start(g_stack_2_type);
+  ESP_LOGI(TAG, "Module handlers managed by Module Monitor Task");
 
   // PHASE 2: Uplink/RTC/SD Loop
 
@@ -609,29 +601,6 @@ static void build_data_packet(const uplink_item_t *item, uint8_t *packet,
   memcpy(p, item->data, item->length);
 
   *packet_len = 3 + 2 + 19 + item->length;
-}
-
-/**
- * @brief Start stack handler based on type
- */
-static void stack_handler_start(stack_comm_type_t stack_type) {
-  switch (stack_type) {
-  case STACK_COMM_TYPE_CAN:
-    can_handler_start();
-    break;
-  case STACK_COMM_TYPE_ZIGBEE:
-    zigbee_nostack_connect_start();
-    break;
-  case STACK_COMM_TYPE_LORA:
-    lora_tdma_connect_start();
-    break;
-  case STACK_COMM_TYPE_RS485:
-    rs485_handler_start();
-    break;
-  default:
-    ESP_LOGW(TAG, "Unknown stack type: %d", stack_type);
-    break;
-  }
 }
 
 // ===== GLOBAL VARIABLES (shared with downlink) =====

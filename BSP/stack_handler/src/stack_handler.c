@@ -46,24 +46,7 @@ static const struct {
     {TCA_PORT_0, 3}  // GPIO 9 -> P03
 };
 
-/* ===== Global Variables ===== */
-stack_comm_type_t g_stack_1_type  = STACK_COMM_TYPE_NONE;
-stack_comm_type_t g_stack_2_type = STACK_COMM_TYPE_NONE;
-
 /* ===== Internal State ===== */
-static stack_config_t g_stack_configs[STACK_HANDLER_MAX_STACKS] = {
-    {.comm_type = STACK_COMM_TYPE_NONE,
-     .gpio_port = STACK_PORT_1,
-     .uart_port = 2,
-     .tx_pin = 17,
-     .rx_pin = 18,
-     .enabled = false},
-    {.comm_type = STACK_COMM_TYPE_NONE,
-     .gpio_port = STACK_PORT_2,
-     .uart_port = 1,
-     .tx_pin = 15,
-     .rx_pin = 16,
-     .enabled = false}};
 
 static bool g_initialized = false;
 static SemaphoreHandle_t g_stack_mutex[STACK_HANDLER_MAX_STACKS];
@@ -147,32 +130,6 @@ esp_err_t stack_handler_init(void) {
   return ESP_OK;
 }
 
-esp_err_t stack_handler_set_config(uint8_t stack_id,
-                                   const stack_config_t *config) {
-  if (!g_initialized) {
-    ESP_LOGE(TAG, "Not initialized");
-    return ESP_ERR_INVALID_STATE;
-  }
-
-  if (!is_valid_stack_id(stack_id) || !config) {
-    ESP_LOGE(TAG, "Invalid arguments");
-    return ESP_ERR_INVALID_ARG;
-  }
-
-  memcpy(&g_stack_configs[stack_id], config, sizeof(stack_config_t));
-
-  if (stack_id == 0) {
-    g_stack_1_type = config->comm_type;
-  } else {
-    g_stack_2_type = config->comm_type;
-  }
-
-  ESP_LOGI(TAG, "Stack %d configured: type=%d, UART%d", stack_id + 1,
-           config->comm_type, config->uart_port);
-
-  return ESP_OK;
-}
-
 esp_err_t stack_handler_gpio_write(uint8_t stack_id, stack_gpio_pin_num_t pin,
                                    bool level) {
   if (!g_initialized) {
@@ -233,23 +190,6 @@ esp_err_t stack_handler_gpio_read(uint8_t stack_id, stack_gpio_pin_num_t pin,
   }
 
   return ret;
-}
-
-const char *stack_handler_type_to_string(stack_comm_type_t type) {
-  switch (type) {
-  case STACK_COMM_TYPE_NONE:
-    return "NONE";
-  case STACK_COMM_TYPE_LORA:
-    return "LORA";
-  case STACK_COMM_TYPE_RS485:
-    return "RS485";
-  case STACK_COMM_TYPE_ZIGBEE:
-    return "ZIGBEE";
-  case STACK_COMM_TYPE_CAN:
-    return "CAN";
-  default:
-    return "UNKNOWN";
-  }
 }
 
 esp_err_t stack_handler_gpio_set_direction(uint8_t stack_id,
@@ -428,4 +368,30 @@ esp_err_t stack_handler_unlock(uint8_t stack_id) {
   ESP_LOGD(TAG, "Stack%d unlocked", stack_id + 1);
 
   return ESP_OK;
+}
+
+/**
+ * @brief Get stack module ID for Module Base Setting architecture (trial version)
+ * 
+ * For trial phase (BLE-only):
+ * - Stack 0: Returns "002" (BLE STM32WB module)
+ * - Stack 1: Returns "000" (no module)
+ * 
+ * This is a pseudo-implementation for testing Module Base Setting concept.
+ * In production, this should detect actual module hardware.
+ */
+const char* stack_handler_get_module_id(uint8_t stack_id) {
+  if (!is_valid_stack_id(stack_id)) {
+    ESP_LOGW(TAG, "Invalid stack_id %d, returning '000'", stack_id);
+    return "000";
+  }
+  
+  // Trial version (BLE-only): Stack 0 has BLE STM32WB module
+  if (stack_id == 0) {
+    ESP_LOGI(TAG, "Stack %d module ID: 002 (BLE STM32WB)", stack_id);
+    return "002";
+  } else {
+    ESP_LOGI(TAG, "Stack %d module ID: 000 (No module)", stack_id);
+    return "000";
+  }
 }

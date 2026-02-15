@@ -1,18 +1,14 @@
-#include "can_driver.h"
-#include "can_handler.h"
+#include "config_global.h"
 #include "esp_log.h"
 #include "fota_lan_handler.h"
 #include "frame_types.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
-#include "lora_tdma_connect.h"
-#include "mcu_wan_handler.h"
 // #include "ble_handler_task.h"
 #include "rs485_handler.h"
 #include "storage_handler.h"
 #include "wan_comm.h"
-#include "zigbee_nostack_connect.h"
 #include <string.h>
 
 static const char *TAG = "WAN_DL";
@@ -326,10 +322,17 @@ static void send_ack_to_wan(ack_type_t ack_type) {
 /**
  * @brief Build and send LAN configuration response to WAN MCU
  * NOTE: Caller must hold g_qspi_mutex
+ * 
+ * New simplified format for Module Base Setting architecture (BLE trial):
+ * - g_stack_1_id: "002" (BLE module) or "000" (no module)
+ * - g_stack_2_id: "000" (no module) 
+ * - rs485_baudrate: If using RS485 module
+ * - stack1_json: JSON config for stack 1 (if configured)
+ * - stack2_json: JSON config for stack 2 (if configured)
  */
 static void send_lan_config_response(void) {
   // Build config response packet: [C][Q][length(2)][config_data]
-  uint8_t config_packet[512];
+  uint8_t config_packet[4096];  // Increased buffer for JSON configs
   uint16_t offset = 0;
 
   // Prefix: CQ (Config Query Response)
@@ -342,127 +345,67 @@ static void send_lan_config_response(void) {
 
   // Format: key=value|key=value|...
 
-  // CAN CONFIG (extern globals from can_handler.c)
-  extern can_config_t g_can_config;
-  extern uint16_t g_can_whitelist[];
-  extern uint16_t g_can_whitelist_count;
-
+  // STACK MODULE IDs (from config_global)
   offset +=
       snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
-               "can_baudrate=%lu|", g_can_config.baud_rate);
-
-  const char *can_mode_str = (g_can_config.operating_mode == CAN_MODE_NORMAL)
-                                 ? "NORMAL"
-                                 : "LISTEN_ONLY";
+               "stack1_id=%s|", config_get_stack_1_id());
   offset +=
       snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
-               "can_mode=%s|", can_mode_str);
+               "stack2_id=%s|", config_get_stack_2_id());
 
+  // RS485 CONFIG (if any stack is RS485)
   offset +=
       snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
-               "can_whitelist_count=%d|", g_can_whitelist_count);
+               "rs485_baudrate=%lu|", (unsigned long)config_get_rs485_baudrate());
 
-  // CAN whitelist (comma-separated)
-  if (g_can_whitelist_count > 0) {
-    offset += snprintf((char *)&config_packet[offset],
-                       sizeof(config_packet) - offset, "can_whitelist=");
-    for (uint16_t i = 0; i < g_can_whitelist_count && i < MAX_WHITELISTED_IDS;
-         i++) {
-      if (i > 0) {
-        offset += snprintf((char *)&config_packet[offset],
-                           sizeof(config_packet) - offset, ",");
-      }
-      offset += snprintf((char *)&config_packet[offset],
-                         sizeof(config_packet) - offset, "0x%03X",
-                         g_can_whitelist[i]);
-    }
+  // STACK 1 JSON CONFIG (if configured)
+  uint16_t stack1_json_len = 0;
+  const char* stack1_json = config_get_stack_1_json(&stack1_json_len);
+  if (stack1_json_len > 0 && stack1_json_len < (sizeof(config_packet) - offset - 20)) {
+    offset += snprintf((char *)&config_packet[offset], 
+                      sizeof(config_packet) - offset,
+                      "stack1_json_len=%u|", stack1_json_len);
+    memcpy(&config_packet[offset], stack1_json, stack1_json_len);
+    offset += stack1_json_len;
     config_packet[offset++] = '|';
+  } else {
+    offset += snprintf((char *)&config_packet[offset], 
+                      sizeof(config_packet) - offset,
+                      "stack1_json_len=0|");
   }
 
-  // STACK HANDLERS (extern from stack_handler.c)
-  extern stack_comm_type_t g_stack_1_type;
-  extern stack_comm_type_t g_stack_2_type;
-
-  offset +=
-      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
-               "stack1_type=%s|", stack_handler_type_to_string(g_stack_1_type));
-  offset +=
-      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
-               "stack2_type=%s|", stack_handler_type_to_string(g_stack_2_type));
-
-  // LORA TDMA CONFIG (extern from lora_tdma_handler.c)
-  extern lora_handler_config_t g_lora_handler_cfg;
-  extern uint8_t g_lora_handler_crypto_key_len;
-
-  const char *lora_role_str =
-      (g_lora_handler_cfg.role == LORA_HANDLER_ROLE_GATEWAY) ? "GATEWAY"
-                                                             : "NODE";
-  offset +=
-      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
-               "lora_role=%s|", lora_role_str);
-  offset +=
-      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
-               "lora_node_id=0x%04X|", g_lora_handler_cfg.node_id);
-  offset +=
-      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
-               "lora_gateway_id=0x%04X|", g_lora_handler_cfg.gateway_id);
-  offset +=
-      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
-               "lora_num_slots=%u|", g_lora_handler_cfg.num_slots);
-  offset +=
-      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
-               "lora_my_slot=%u|", g_lora_handler_cfg.my_slot);
-  offset += snprintf(
-      (char *)&config_packet[offset], sizeof(config_packet) - offset,
-      "lora_slot_duration_ms=%lu|", g_lora_handler_cfg.slot_duration_ms);
-  offset +=
-      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
-               "lora_crypto_key_len=%u|", g_lora_handler_crypto_key_len);
-
-  // LORA E32 CONFIG (extern from lora_e32_comm.c)
-  extern e32_params_t g_lora_e32_params;
-  extern int g_lora_e32_baud_rate;
-
-  offset +=
-      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
-               "lora_e32_baud=%d|", g_lora_e32_baud_rate);
-  offset +=
-      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
-               "lora_e32_header=0x%02X|", g_lora_e32_params.head);
-  offset +=
-      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
-               "lora_e32_addh=0x%02X|", g_lora_e32_params.addh);
-  offset +=
-      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
-               "lora_e32_addl=0x%02X|", g_lora_e32_params.addl);
-  offset +=
-      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
-               "lora_e32_sped=0x%02X|", g_lora_e32_params.sped);
-  offset +=
-      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
-               "lora_e32_chan=%u|", g_lora_e32_params.chan);
-  offset +=
-      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
-               "lora_e32_option=0x%02X|", g_lora_e32_params.option);
-
-  // RS485 CONFIG (extern from rs485_handler.c)
-  extern uint32_t g_rs485_baud_rate;
-
-  offset +=
-      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
-               "rs485_baudrate=%lu", (unsigned long)g_rs485_baud_rate);
+  // STACK 2 JSON CONFIG (if configured)
+  uint16_t stack2_json_len = 0;
+  const char* stack2_json = config_get_stack_2_json(&stack2_json_len);
+  if (stack2_json_len > 0 && stack2_json_len < (sizeof(config_packet) - offset - 20)) {
+    offset += snprintf((char *)&config_packet[offset], 
+                      sizeof(config_packet) - offset,
+                      "stack2_json_len=%u|", stack2_json_len);
+    memcpy(&config_packet[offset], stack2_json, stack2_json_len);
+    offset += stack2_json_len;
+    config_packet[offset++] = '|';
+  } else {
+    offset += snprintf((char *)&config_packet[offset], 
+                      sizeof(config_packet) - offset,
+                      "stack2_json_len=0|");
+  }
 
   // Fill in the length (excluding prefix and length field itself)
   uint16_t data_length = offset - 4;
   config_packet[length_offset] = (data_length >> 8) & 0xFF;
   config_packet[length_offset + 1] = data_length & 0xFF;
 
-  // Send back to WAN MCU via CF frame (not DT - config uses CQ which is only 2 chars)
+  // Send back to WAN MCU via CF frame
   wan_comm_status_t status =
       wan_comm_send_command(g_wan_handle, config_packet, offset);
 
   if (status == WAN_COMM_OK) {
     ESP_LOGI(TAG, "LAN config response sent to WAN MCU: %u bytes", offset);
+    ESP_LOGI(TAG, "  Stack 1 ID: %s", config_get_stack_1_id());
+    ESP_LOGI(TAG, "  Stack 2 ID: %s", config_get_stack_2_id());
+    ESP_LOGI(TAG, "  RS485 baudrate: %lu", config_get_rs485_baudrate());
+    ESP_LOGI(TAG, "  Stack 1 JSON: %u bytes", stack1_json_len);
+    ESP_LOGI(TAG, "  Stack 2 JSON: %u bytes", stack2_json_len);
   } else {
     ESP_LOGE(TAG, "Failed to send LAN config response");
   }
@@ -470,24 +413,14 @@ static void send_lan_config_response(void) {
 
 /**
  * @brief Dispatch downlink data to appropriate handler
+ * 
+ * For Module Base Setting trial (BLE-only), only RS485 and BLE handlers supported.
  */
 static void dispatch_downlink_to_handler(handler_id_t target_id,
                                          const uint8_t *data, uint16_t length) {
   bool success = false;
 
   switch (target_id) {
-  case HANDLER_CAN:
-    success = can_handler_enqueue_downlink((uint8_t *)data, length);
-    break;
-
-  case HANDLER_LORA:
-    success = lora_tdma_connect_enqueue_downlink((uint8_t *)data, length);
-    break;
-
-  case HANDLER_ZIGBEE:
-    success = zigbee_nostack_connect_enqueue_downlink((uint8_t *)data, length);
-    break;
-
   case HANDLER_RS485:
     success = rs485_handler_enqueue_downlink((uint8_t *)data, length);
     break;
@@ -497,7 +430,7 @@ static void dispatch_downlink_to_handler(handler_id_t target_id,
     //   break;
 
   default:
-    ESP_LOGW(TAG, "Unknown target handler: %d", target_id);
+    ESP_LOGW(TAG, "Unsupported or unknown target handler: %d (CAN/LoRa/Zigbee not supported in trial)", target_id);
     return;
   }
 
@@ -512,15 +445,11 @@ static void dispatch_downlink_to_handler(handler_id_t target_id,
 // HELPER FUNCTIONS
 
 static handler_id_t string_to_handler_id(const uint8_t *type_str) {
-  if (memcmp(type_str, "CAN", 3) == 0)
-    return HANDLER_CAN;
-  if (memcmp(type_str, "LOR", 3) == 0)
-    return HANDLER_LORA;
-  if (memcmp(type_str, "ZIG", 3) == 0)
-    return HANDLER_ZIGBEE;
   if (memcmp(type_str, "RS4", 3) == 0)
     return HANDLER_RS485;
   // if (memcmp(type_str, "BLE", 3) == 0)
   //   return HANDLER_BLE;
+  
+  // CAN, LoRa, Zigbee not supported in Module Base Setting trial
   return HANDLER_UNKNOWN;
 }

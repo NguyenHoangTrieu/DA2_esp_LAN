@@ -28,15 +28,12 @@ struct rs485_comm_handle_s {
 
 /**
  * @brief Get current active stack ID based on global stack types
- * @return uint8_t Stack ID (0 or 1), default to 0 if no RS485 stack found
+ * Module Base Setting: RS485 can be configured via JSON config
+ * @return uint8_t Stack ID (0 or 1), default to 0
  */
 static uint8_t get_active_rs485_stack(void) {
-  if (g_stack_1_type == STACK_COMM_TYPE_RS485) {
-    return 0; // Stack 1
-  } else if (g_stack_2_type == STACK_COMM_TYPE_RS485) {
-    return 1; // Stack 2
-  }
-  return 0; // Default to Stack 1
+  // Module Base Setting: RS485 stack determined by JSON config, not global type
+  return 0; // Default to Stack 0 for trial version
 }
 
 /**

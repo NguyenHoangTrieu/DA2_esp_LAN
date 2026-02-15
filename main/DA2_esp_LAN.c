@@ -44,12 +44,20 @@ void app_main(void)
     led_on();
     ESP_ERROR_CHECK(i2c_dev_support_init());
     ESP_ERROR_CHECK(tca_init());
-    // ESP_ERROR_CHECK(ble_handler_init());
-    // ESP_LOGI(TAG, "BLE handler initialized");
+    
     ESP_ERROR_CHECK(stack_handler_init());
+    ESP_LOGI(TAG, "Stack handler initialized");
+    
     config_init();
     config_handler_task_start();
+    ESP_LOGI(TAG, "Config handler started");
+    
+    // Start Module Monitor Task - Module Base Setting Core
+    ESP_ERROR_CHECK(module_monitor_task_start());
+    ESP_LOGI(TAG, "Module Monitor Task started (Module Base Setting enabled)");
+    
     mcu_wan_handler_start();
+    ESP_LOGI(TAG, "MCU WAN handler started");
     while (1) {
       vTaskDelay(pdMS_TO_TICKS(1000));
     }
