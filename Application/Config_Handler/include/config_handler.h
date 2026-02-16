@@ -27,9 +27,8 @@ typedef enum {
   CONFIG_UPDATE_SCAN = 3,      // "CFSC" - Config query command1
   CONFIG_UPDATE_STACK = 4,     // "CFST" - Stack config command
   CONFIG_UPDATE_RS485 = 5,     // "CFRS" - RS485 config command
-  CONFIG_UPDATE_BLE_JSON = 6,  // "CFBL:JSON" - BLE JSON config (NEW)
-  CONFIG_UPDATE_BLE_DISC = 7,  // "CFBL:DISC" - BLE discovery (NEW)
-  CONFIG_UPDATE_BLE_SETUP = 8, // "CFBL:SETUP" - BLE setup command (NEW)
+  CONFIG_UPDATE_BLE_JSON = 6,  // "CFBL:JSON" - BLE JSON config
+  CONFIG_UPDATE_BLE_CMD = 7,   // "CFBL:<stack>:<cmd>" - Unified BLE command parser
   CONFIG_TYPE_UNKNOWN = 0xFF
 } config_type_t;
 

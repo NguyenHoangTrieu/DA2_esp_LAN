@@ -20,48 +20,21 @@ extern "C" {
 #endif
 
 /**
- * @brief Streaming response callback - forwards BLE responses to WAN MCU
+ * @brief Unified BLE command parser using JSON configuration
  * 
- * This callback is invoked by ble_execute_function_streaming() for each
- * response received during streaming operations (e.g., SCAN).
+ * Format: "CFBL:<stack_id>:<command>"
+ * Example: "CFBL:0:AT+SCAN" (matches prefix AT+SCAN in JSON)
+ * Example: "CFBL:1:AT+CONNECT=001122334455" (matches prefix AT+CONNECT=)
+ * Example: "CFBL:0:HW_RESET" (exact match)
  * 
- * @param data Response data from BLE module
- * @param len Length of response
- * @param user_data User context (unused)
- */
-void ble_stream_response_to_wan_callback(const uint8_t *data,
-                                        uint16_t len,
-                                        void *user_data);
-
-/**
- * @brief Parse and execute BLE SCAN command with streaming responses
- * 
- * Format: "CFBL:SCAN:<timeout>:<stack_id>"
- * Example: "CFBL:SCAN:5000:0"
- * 
- * All scan results are streamed back to WAN MCU via callback as they arrive.
- * Sends "BR:SCAN:DONE" marker when completed.
+ * Matches command against JSON config (prefix or exact match), extracts
+ * GPIO controls and delays from JSON, then executes via command queue.
  * 
  * @param data Command data buffer
  * @param len Length of command
  * @return ESP_OK on success
  */
-esp_err_t config_parse_ble_scan(const uint8_t *data, uint16_t len);
-
-/**
- * @brief Parse and execute BLE SETUP command
- * 
- * Format: "CFBL:SETUP:<function_id>:<stack_id>:<params>"
- * Example: "CFBL:SETUP:4:0:TestDevice"
- * 
- * Executes function and sends result to WAN MCU as:
- * "BR:SETUP:<func>:<status>:<response>"
- * 
- * @param data Command data buffer
- * @param len Length of command
- * @return ESP_OK on success
- */
-esp_err_t config_parse_ble_setup(const uint8_t *data, uint16_t len);
+esp_err_t config_parse_ble_command(const uint8_t *data, uint16_t len);
 
 /**
  * @brief Parse and load BLE JSON configuration

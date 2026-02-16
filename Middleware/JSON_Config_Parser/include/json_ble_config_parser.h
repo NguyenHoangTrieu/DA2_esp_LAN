@@ -65,6 +65,7 @@ typedef struct {
   bool available;
   json_ble_function_id_t function_id;
   char command[BLE_COMMAND_LEN];
+  bool is_prefix;
   gpio_control_t gpio_start[MAX_GPIO_ACTIONS];
   uint8_t gpio_start_count;
   uint16_t delay_start_ms;

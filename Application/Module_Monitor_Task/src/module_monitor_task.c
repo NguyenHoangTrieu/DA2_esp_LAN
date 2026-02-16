@@ -184,67 +184,7 @@ esp_err_t module_monitor_task_stop(void) {
   return ESP_OK;
 }
 
-esp_err_t module_monitor_load_config(uint8_t stack_id, const char *json_str,
-                                     uint16_t json_len) {
-  if (!g_monitor_state.initialized || !json_str || json_len == 0 ||
-      stack_id > 1) {
-    return ESP_ERR_INVALID_ARG;
-  }
-
-  // Allocate and copy JSON string
-  char *json_copy = (char *)malloc(json_len + 1);
-  if (!json_copy) {
-    return ESP_ERR_NO_MEM;
-  }
-
-  memcpy(json_copy, json_str, json_len);
-  json_copy[json_len] = '\0';
-
-  // Create message
-  module_config_msg_t msg = {
-      .stack_id = stack_id, .json_str = json_copy, .json_len = json_len};
-
-  // Send to monitor task queue
-  if (xQueueSend(g_monitor_state.config_queue, &msg, pdMS_TO_TICKS(1000)) !=
-      pdTRUE) {
-    ESP_LOGE(TAG, "Failed to send config to monitor queue");
-    free(json_copy);
-    return ESP_FAIL;
-  }
-
-  ESP_LOGI(TAG, "Config queued for Stack %d (%u bytes)", stack_id, json_len);
-  return ESP_OK;
-}
-
-module_type_t module_monitor_get_stack_type(uint8_t stack_id) {
-  if (stack_id > 1 || !g_monitor_state.initialized) {
-    return MODULE_TYPE_UNKNOWN;
-  }
-
-  if (xSemaphoreTake(g_monitor_state.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-    module_type_t type = g_monitor_state.module_info[stack_id].module_type;
-    xSemaphoreGive(g_monitor_state.mutex);
-    return type;
-  }
-
-  return MODULE_TYPE_UNKNOWN;
-}
-
-bool module_monitor_is_configured(uint8_t stack_id) {
-  if (stack_id > 1 || !g_monitor_state.initialized) {
-    return false;
-  }
-
-  if (xSemaphoreTake(g_monitor_state.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-    bool configured = g_monitor_state.module_info[stack_id].is_configured;
-    xSemaphoreGive(g_monitor_state.mutex);
-    return configured;
-  }
-
-  return false;
-}
-
-esp_err_t module_monitor_start_handler(uint8_t stack_id) {
+static esp_err_t module_monitor_start_handler(uint8_t stack_id) {
   if (stack_id > 1 || !g_monitor_state.initialized) {
     return ESP_ERR_INVALID_ARG;
   }
@@ -268,55 +208,6 @@ esp_err_t module_monitor_start_handler(uint8_t stack_id) {
 
   xSemaphoreGive(g_monitor_state.mutex);
   return ret;
-}
-
-esp_err_t module_monitor_stop_handler(uint8_t stack_id) {
-  if (stack_id > 1 || !g_monitor_state.initialized) {
-    return ESP_ERR_INVALID_ARG;
-  }
-
-  if (xSemaphoreTake(g_monitor_state.mutex, pdMS_TO_TICKS(500)) != pdTRUE) {
-    return ESP_ERR_TIMEOUT;
-  }
-
-  module_info_t *info = &g_monitor_state.module_info[stack_id];
-
-  if (!info->is_running) {
-    xSemaphoreGive(g_monitor_state.mutex);
-    return ESP_ERR_INVALID_STATE;
-  }
-
-  esp_err_t ret = module_stop_handler_task(stack_id);
-  if (ret == ESP_OK) {
-    info->is_running = false;
-    info->handler_status = HANDLER_STATUS_STOPPED;
-  }
-
-  xSemaphoreGive(g_monitor_state.mutex);
-  return ret;
-}
-
-handler_status_t module_monitor_get_handler_status(uint8_t stack_id) {
-  if (stack_id > 1 || !g_monitor_state.initialized) {
-    return HANDLER_STATUS_ERROR;
-  }
-
-  if (xSemaphoreTake(g_monitor_state.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-    handler_status_t status =
-        g_monitor_state.module_info[stack_id].handler_status;
-    xSemaphoreGive(g_monitor_state.mutex);
-    return status;
-  }
-
-  return HANDLER_STATUS_ERROR;
-}
-
-const module_info_t *module_monitor_get_info(uint8_t stack_id) {
-  if (stack_id > 1 || !g_monitor_state.initialized) {
-    return NULL;
-  }
-
-  return &g_monitor_state.module_info[stack_id];
 }
 
 /* ===== Internal Helper Functions ===== */
@@ -488,6 +379,17 @@ static void module_monitor_task_impl(void *pvParameters) {
         // Save to NVS for persistence
         config_save_module_json_to_nvs(msg.stack_id, msg.json_str,
                                        msg.json_len);
+
+        // Load config into handler task BEFORE starting
+        module_info_t *info = &g_monitor_state.module_info[msg.stack_id];
+        if (info->module_type == MODULE_TYPE_BLE) {
+          esp_err_t cfg_ret = ble_handler_task_load_config(msg.stack_id, 
+                                                            info->json_config_str, 
+                                                            info->json_config_len);
+          if (cfg_ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to load config into BLE handler for Stack %d", msg.stack_id);
+          }
+        }
 
         // Auto-start handler task
         ret = module_monitor_start_handler(msg.stack_id);

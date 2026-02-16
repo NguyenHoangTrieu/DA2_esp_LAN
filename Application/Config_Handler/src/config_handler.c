@@ -43,10 +43,9 @@ config_type_t config_parse_type(const char *cmd, uint16_t len) {
     // BLE commands - check subcommand
     if (len >= 10 && strncmp(cmd + 5, "JSON:", 5) == 0) {
       return CONFIG_UPDATE_BLE_JSON;
-    } else if (len >= 10 && strncmp(cmd + 5, "DISC:", 5) == 0) {
-      return CONFIG_UPDATE_BLE_DISC;
-    } else if (len >= 11 && strncmp(cmd + 5, "SETUP:", 6) == 0) {
-      return CONFIG_UPDATE_BLE_SETUP;
+    } else {
+      // All other BLE commands use unified parser
+      return CONFIG_UPDATE_BLE_CMD;
     }
   }
   return CONFIG_TYPE_UNKNOWN;
@@ -277,21 +276,12 @@ static void config_handler_task(void *arg) {
         }
         break;
       }
-      case CONFIG_UPDATE_BLE_DISC: {
-        if (config_parse_ble_scan((const uint8_t *)cmd.raw_data,
-                                  cmd.data_len) == ESP_OK) {
-          ESP_LOGI(TAG, "BLE SCAN completed");
+      case CONFIG_UPDATE_BLE_CMD: {
+        if (config_parse_ble_command((const uint8_t *)cmd.raw_data,
+                                     cmd.data_len) == ESP_OK) {
+          ESP_LOGI(TAG, "BLE command executed successfully");
         } else {
-          ESP_LOGE(TAG, "Failed to execute BLE SCAN");
-        }
-        break;
-      }
-      case CONFIG_UPDATE_BLE_SETUP: {
-        if (config_parse_ble_setup((const uint8_t *)cmd.raw_data,
-                                   cmd.data_len) == ESP_OK) {
-          ESP_LOGI(TAG, "BLE SETUP command executed");
-        } else {
-          ESP_LOGE(TAG, "Failed to execute BLE SETUP");
+          ESP_LOGE(TAG, "Failed to execute BLE command");
         }
         break;
       }

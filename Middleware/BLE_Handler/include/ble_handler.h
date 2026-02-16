@@ -100,19 +100,6 @@ typedef struct {
     uint32_t execution_time_ms;         ///< Total execution time
 } ble_exec_result_t;
 
-/**
- * @brief Streaming response callback (TASK 2.1)
- * 
- * Called for each response received during streaming operations (e.g., SCAN).
- * 
- * @param data Response data buffer
- * @param len Length of response data
- * @param user_data User-provided context pointer
- */
-typedef void (*ble_stream_callback_t)(const uint8_t *data, 
-                                       uint16_t len, 
-                                       void *user_data);
-
 /* ===== Public API Functions ===== */
 
 /**
@@ -136,291 +123,104 @@ esp_err_t ble_handler_load_config(uint8_t stack_id,
                                    const char *json_config, 
                                    uint16_t json_len);
 
-/* --- Core Functions (0-14) --- */
+/* --- Core Non-Prefix Functions (for baseboard initialization) --- */
 
 /**
- * @brief Execute hardware reset via GPIO
+ * @brief Hardware reset BLE module
  * @param stack_id Stack ID (0 or 1)
  * @return ESP_OK on success
  */
 esp_err_t ble_handler_hw_reset(uint8_t stack_id);
 
 /**
- * @brief Execute software reset via AT command
+ * @brief Software reset BLE module
  * @param stack_id Stack ID (0 or 1)
  * @return ESP_OK on success
  */
 esp_err_t ble_handler_sw_reset(uint8_t stack_id);
 
 /**
- * @brief Execute factory reset
+ * @brief Factory reset BLE module
  * @param stack_id Stack ID (0 or 1)
  * @return ESP_OK on success
  */
 esp_err_t ble_handler_factory_reset(uint8_t stack_id);
 
 /**
- * @brief Get module info (version, MAC, etc.)
+ * @brief Get BLE module info
  * @param stack_id Stack ID (0 or 1)
- * @param buffer Output buffer for info
+ * @param buffer Output buffer for info string
  * @param max_len Maximum buffer length
  * @return ESP_OK on success
  */
-esp_err_t ble_handler_get_info(uint8_t stack_id, 
-                                char *buffer, 
-                                size_t max_len);
+esp_err_t ble_handler_get_info(uint8_t stack_id, char *buffer, size_t max_len);
 
 /**
- * @brief Set device name
- * @param stack_id Stack ID (0 or 1)
- * @param name Device name (max 32 chars)
- * @return ESP_OK on success
- */
-esp_err_t ble_handler_set_name(uint8_t stack_id, 
-                                const char *name);
-
-/**
- * @brief Configure communication parameters (UART baudrate, SPI mode, etc.)
- * @param stack_id Stack ID (0 or 1)
- * @param config_param Configuration parameter string
- * @return ESP_OK on success
- */
-esp_err_t ble_handler_set_comm_config(uint8_t stack_id, 
-                                       const char *config_param);
-
-/**
- * @brief Set RF parameters (TX power, frequency, channel)
- * @param stack_id Stack ID (0 or 1)
- * @param rf_param RF parameter string
- * @return ESP_OK on success
- */
-esp_err_t ble_handler_set_rf_params(uint8_t stack_id, 
-                                     const char *rf_param);
-
-/**
- * @brief Enter AT command mode
+ * @brief Enter command mode
  * @param stack_id Stack ID (0 or 1)
  * @return ESP_OK on success
  */
 esp_err_t ble_handler_enter_cmd_mode(uint8_t stack_id);
 
 /**
- * @brief Enter transparent data mode
+ * @brief Get connection status
  * @param stack_id Stack ID (0 or 1)
- * @return ESP_OK on success
- */
-esp_err_t ble_handler_enter_data_mode(uint8_t stack_id);
-
-/**
- * @brief Start broadcasting (advertising in peripheral mode)
- * @param stack_id Stack ID (0 or 1)
- * @return ESP_OK on success
- */
-esp_err_t ble_handler_start_broadcast(uint8_t stack_id);
-
-/**
- * @brief Connect to remote BLE device
- * @param stack_id Stack ID (0 or 1)
- * @param address Remote device address (MAC format)
- * @return ESP_OK on success
- */
-esp_err_t ble_handler_connect(uint8_t stack_id, 
-                               const char *address);
-
-/**
- * @brief Disconnect from current device
- * @param stack_id Stack ID (0 or 1)
- * @return ESP_OK on success
- */
-esp_err_t ble_handler_disconnect(uint8_t stack_id);
-
-/**
- * @brief Get connection status and signal strength
- * @param stack_id Stack ID (0 or 1)
- * @param buffer Output buffer for status
+ * @param buffer Output buffer for status string
  * @param max_len Maximum buffer length
  * @return ESP_OK on success
  */
-esp_err_t ble_handler_get_connection_status(uint8_t stack_id, 
-                                             char *buffer, 
-                                             size_t max_len);
+esp_err_t ble_handler_get_connection_status(uint8_t stack_id, char *buffer, size_t max_len);
 
 /**
- * @brief Enter low-power sleep mode
+ * @brief Enter sleep mode
  * @param stack_id Stack ID (0 or 1)
  * @return ESP_OK on success
  */
 esp_err_t ble_handler_enter_sleep(uint8_t stack_id);
 
 /**
- * @brief Wake from sleep mode
+ * @brief Wakeup from sleep mode
  * @param stack_id Stack ID (0 or 1)
  * @return ESP_OK on success
  */
 esp_err_t ble_handler_wakeup(uint8_t stack_id);
 
-/* --- Optional Functions (15-19) --- */
+/* --- Command Matching & Execution Functions (for prefix commands) --- */
 
 /**
- * @brief Start BLE device discovery (scan)
- * @param stack_id Stack ID (0 or 1)
- * @return ESP_OK on success, ESP_ERR_NOT_SUPPORTED if not configured
- */
-esp_err_t ble_handler_start_discovery(uint8_t stack_id);
-
-/**
- * @brief Send data in transparent mode
- * @param stack_id Stack ID (0 or 1)
- * @param data Data to send
- * @param len Data length
- * @return ESP_OK on success, ESP_ERR_NOT_SUPPORTED if not configured
- */
-esp_err_t ble_handler_send_data(uint8_t stack_id, 
-                                 const uint8_t *data, 
-                                 uint16_t len);
-
-/**
- * @brief Get diagnostics (RSSI, link quality, etc.)
- * @param stack_id Stack ID (0 or 1)
- * @param buffer Output buffer for diagnostics
- * @param max_len Maximum buffer length
- * @return ESP_OK on success, ESP_ERR_NOT_SUPPORTED if not configured
- */
-esp_err_t ble_handler_get_diagnostics(uint8_t stack_id, 
-                                       char *buffer, 
-                                       size_t max_len);
-
-/**
- * @brief Configure security (pairing, bonding, PIN)
- * @param stack_id Stack ID (0 or 1)
- * @param security_param Security parameter string
- * @return ESP_OK on success, ESP_ERR_NOT_SUPPORTED if not configured
- */
-esp_err_t ble_handler_set_security(uint8_t stack_id, 
-                                    const char *security_param);
-
-/**
- * @brief Manage whitelist (add/remove device MAC)
- * @param stack_id Stack ID (0 or 1)
- * @param mac_address Device MAC address
- * @param add true=add to whitelist, false=remove
- * @return ESP_OK on success, ESP_ERR_NOT_SUPPORTED if not configured
- */
-esp_err_t ble_handler_manage_whitelist(uint8_t stack_id, 
-                                        const char *mac_address, 
-                                        bool add);
-
-/* ===== Streaming Mode API (TASK 2.1) ===== */
-
-/**
- * @brief Execute BLE function with streaming response support
+ * @brief Get function configuration by matching command prefix
  * 
- * Used for commands that generate multiple responses over time (e.g., SCAN).
- * The callback will be invoked for each response received during the stream_duration_ms.
+ * Searches through loaded BLE config to find function matching the command.
+ * Used by config handler to build command execution requests with proper
+ * GPIO controls and delays.
  * 
  * @param stack_id Stack ID (0 or 1)
- * @param func_id Function ID to execute
- * @param param Optional parameter string (NULL if not needed)
- * @param stream_duration_ms Duration to collect responses (milliseconds)
- * @param callback Function to call for each response
- * @param user_data User context passed to callback
- * @return ESP_OK on success, ESP_ERR_* on failure
+ * @param command Command string to match (prefix or exact)
+ * @param func_config Output buffer for matched function config
+ * @return ESP_OK if matched, ESP_ERR_NOT_FOUND if no match
  */
-esp_err_t ble_execute_function_streaming(uint8_t stack_id,
-                                         ble_function_id_t func_id,
-                                         const char *param,
-                                         uint32_t stream_duration_ms,
-                                         ble_stream_callback_t callback,
-                                         void *user_data);
-
-/* ===== Device Management APIs (NEW - Task 1.1) ===== */
+esp_err_t ble_handler_get_function_by_command(uint8_t stack_id,
+                                               const char *command,
+                                               ble_function_config_t *func_config);
 
 /**
- * @brief Add a BLE device to tracked list
+ * @brief Execute command with pre-matched function config (for task layer)
+ * 
+ * Executes command using function_config already matched by config handler.
+ * Logic identical to ble_execute_function_internal but takes config directly.
+ * 
+ * Used by task layer after config handler calls ble_handler_get_function_by_command().
+ * 
  * @param stack_id Stack ID (0 or 1)
- * @param mac_address Device MAC address (6 bytes)
- * @param device_name Optional device name
- * @return ESP_OK on success, ESP_ERR_NO_MEM if list full
- */
-esp_err_t ble_handler_add_device(uint8_t stack_id,
-                                  const uint8_t *mac_address,
-                                  const char *device_name);
-
-/**
- * @brief Remove a BLE device from tracked list
- * @param stack_id Stack ID (0 or 1)
- * @param mac_address Device MAC address (6 bytes)
- * @return ESP_OK on success, ESP_ERR_NOT_FOUND if not tracked
- */
-esp_err_t ble_handler_remove_device(uint8_t stack_id,
-                                     const uint8_t *mac_address);
-
-/**
- * @brief Get number of tracked devices
- * @param stack_id Stack ID (0 or 1)
- * @return Device count, or 0 if invalid stack
- */
-uint8_t ble_handler_get_device_count(uint8_t stack_id);
-
-/**
- * @brief Get device info by MAC address
- * @param stack_id Stack ID (0 or 1)
- * @param mac_address Device MAC address (6 bytes)
- * @param device_out Output device structure
- * @return ESP_OK on success, ESP_ERR_NOT_FOUND if not tracked
- */
-esp_err_t ble_handler_get_device(uint8_t stack_id,
-                                  const uint8_t *mac_address,
-                                  ble_device_t *device_out);
-
-/**
- * @brief Update device last activity timestamp
- * @param stack_id Stack ID (0 or 1)
- * @param mac_address Device MAC address (6 bytes)
+ * @param command Raw command string (e.g., "AT+SCAN=5000")
+ * @param func_config Function config from JSON (GPIO, delays, timeout)
+ * @param result Output execution result
  * @return ESP_OK on success
  */
-esp_err_t ble_handler_update_device_activity(uint8_t stack_id,
-                                              const uint8_t *mac_address);
-
-/* ===== Enhanced Features (NEW - Task 1.1 Approved Enhancements) ===== */
-
-/**
- * @brief Execute function with automatic retry on timeout
- * 
- * Implements automatic recovery:
- * - Retry command up to 3 times on timeout
- * - Fallback to SW reset if all retries fail
- * - Fallback to HW reset if SW reset fails
- * 
- * @param stack_id Stack ID (0 or 1)
- * @param func_id Function ID to execute
- * @param param Optional parameter
- * @param result Output execution result
- * @return ESP_OK on success, ESP_FAIL if all recovery attempts fail
- */
-esp_err_t ble_handler_execute_with_recovery(uint8_t stack_id,
-                                             ble_function_id_t func_id,
-                                             const char *param,
-                                             ble_exec_result_t *result);
-
-/**
- * @brief Parse incoming frame from BLE device
- * 
- * Extracts MAC address and payload from UART/SPI frame.
- * Supports both ASCII and binary protocols.
- * 
- * @param data Raw frame data
- * @param len Frame length
- * @param mac_out Output MAC address (6 bytes)
- * @param payload_out Output payload buffer
- * @param payload_len_out Output payload length
- * @return ESP_OK on success, ESP_ERR_INVALID_ARG if parse fails
- */
-esp_err_t ble_handler_parse_frame(const uint8_t *data,
-                                   uint16_t len,
-                                   uint8_t *mac_out,
-                                   uint8_t *payload_out,
-                                   uint16_t *payload_len_out);
+esp_err_t ble_handler_execute_command_with_config(uint8_t stack_id,
+                                                   const char *command,
+                                                   const ble_function_config_t *func_config,
+                                                   ble_exec_result_t *result);
 
 /**
  * @brief Send command with explicit binary format
@@ -442,66 +242,6 @@ esp_err_t ble_handler_send_binary_command(uint8_t stack_id,
                                            uint8_t *response,
                                            uint16_t resp_len,
                                            uint16_t timeout_ms);
-
-/**
- * @brief Send raw command (alias for ble_handler_send_binary_command)
- * 
- * Pass-through API for commands in any format (AT, binary, ASCII).
- * Module interprets based on its configuration.
- * 
- * @param stack_id Stack ID (0 or 1)
- * @param command Raw command bytes
- * @param cmd_len Command length
- * @param response Response buffer
- * @param resp_len Pointer to response length (in/out)
- * @param timeout_ms Timeout in milliseconds
- * @return ESP_OK on success
- */
-static inline esp_err_t ble_send_raw_command(uint8_t stack_id,
-                                             const uint8_t *command,
-                                             uint16_t cmd_len,
-                                             uint8_t *response,
-                                             uint16_t *resp_len,
-                                             uint16_t timeout_ms) {
-    return ble_handler_send_binary_command(stack_id, command, cmd_len,
-                                           response, *resp_len, timeout_ms);
-}
-
-/**
- * @brief Send raw command with streaming response support (NEW - Phase 3)
- * 
- * Pass-through API for commands that generate multiple responses.
- * Command format is module-specific (AT/binary/ASCII), not interpreted.
- * 
- * @param stack_id Stack ID (0 or 1)
- * @param command Raw command bytes  
- * @param cmd_len Command length
- * @param duration_ms Duration to collect responses
- * @param callback Function called for each response line
- * @param user_data User context passed to callback
- * @return ESP_OK on success
- */
-esp_err_t ble_send_raw_command_streaming(uint8_t stack_id,
-                                         const uint8_t *command,
-                                         uint16_t cmd_len,
-                                         uint32_t duration_ms,
-                                         ble_stream_callback_t callback,
-                                         void *user_data);
-
-/* ===== Internal Helpers (for task layer) ===== */
-
-/**
- * @brief Execute a function internally (used by task layer)
- * @param stack_id Stack ID
- * @param func_id Function ID
- * @param param Optional parameter for functions that need it
- * @param result Output execution result
- * @return ESP_OK on success
- */
-esp_err_t ble_handler_execute_function(uint8_t stack_id,
-                                        ble_function_id_t func_id,
-                                        const char *param,
-                                        ble_exec_result_t *result);
 
 #ifdef __cplusplus
 }

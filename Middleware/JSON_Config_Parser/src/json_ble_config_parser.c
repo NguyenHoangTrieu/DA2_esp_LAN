@@ -138,6 +138,10 @@ static esp_err_t parse_function(cJSON *func_json,
     func_out->command[0] = '\0';
   }
 
+  // Extract is_prefix
+  cJSON *is_prefix = cJSON_GetObjectItem(func_json, "is_prefix");
+  func_out->is_prefix = cJSON_IsBool(is_prefix) ? cJSON_IsTrue(is_prefix) : false;
+
   // Extract GPIO start control
   cJSON *gpio_start = cJSON_GetObjectItem(func_json, "gpio_start_control");
   esp_err_t ret = parse_gpio_array(gpio_start, func_out->gpio_start,

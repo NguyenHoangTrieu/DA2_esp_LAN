@@ -1,18 +1,6 @@
 /**
  * @file ble_handler_task.h
  * @brief BLE Handler Task - Transportation Layer Gateway
- * 
- * FreeRTOS task that manages BLE device connections and routes data
- * between BLE devices and the server via WAN MCU.
- * 
- * This layer handles:
- * - Device discovery and connection management
- * - Bidirectional data routing (uplink/downlink)
- * - Configuration loading from NVS
- * - PC App command execution
- * 
- * @author Embedded Team
- * @date February 2026
  */
 
 #ifndef BLE_HANDLER_TASK_H
@@ -21,6 +9,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "esp_err.h"
+#include "ble_handler.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -33,7 +22,6 @@ extern "C" {
  */
 typedef struct {
     uint8_t stack_id;                   ///< Stack ID (0 or 1) - NEW for multi-stack support
-    uint8_t device_address[6];          ///< Source device MAC
     uint32_t timestamp_ms;              ///< Timestamp
     uint8_t payload[256];               ///< Sensor data or response
     uint16_t payload_len;               ///< Payload length
@@ -44,11 +32,24 @@ typedef struct {
  */
 typedef struct {
     uint8_t stack_id;                   ///< Stack ID (0 or 1) - NEW for multi-stack support
-    uint8_t device_address[6];          ///< Target device MAC
     uint32_t timeout_ms;                ///< Send timeout
     uint8_t payload[256];               ///< Command or data
     uint16_t payload_len;               ///< Payload length
 } ble_downlink_packet_t;
+
+/**
+ * @brief BLE command execution request (from config handler)
+ * 
+ * Reuses ble_function_config_t from middleware to avoid field duplication.
+ * Config handler enqueues this after matching command prefix from JSON.
+ */
+typedef struct {
+    uint8_t stack_id;                       ///< Stack ID (0 or 1)
+    char command[256];                      ///< Full command string from server
+    uint16_t command_len;                   ///< Command length
+    bool is_streaming;                      ///< true=streaming responses, false=single response
+    ble_function_config_t func_config;      ///< Embedded function config (GPIO/delays/timeout)
+} ble_command_request_t;
 
 /* ===== Public API Functions ===== */
 
@@ -92,19 +93,31 @@ esp_err_t ble_handler_task_stop(uint8_t stack_id);
 esp_err_t ble_handler_task_load_config(uint8_t stack_id, const char *json_config, uint16_t len);
 
 /**
+ * @brief Execute BLE command with full GPIO/delay/timeout control
+ * 
+ * Called by config_handler after parsing command and matching with JSON config.
+ * Command is enqueued to BLE task for execution.
+ * 
+ * @param request Command request packet
+ * @return ESP_OK if enqueued successfully
+ */
+esp_err_t ble_handler_task_execute_command(const ble_command_request_t *request);
+
+/**
  * @brief Enqueue uplink data from BLE device to server
  * 
  * Called by BLE handler task when data is received from BLE device.
  * Data will be forwarded to WAN MCU via MCU_WAN_Handler.
  * 
+ * Gateway doesn't care about individual device MAC addresses - it only
+ * manages communication with the BLE module itself.
+ * 
  * @param stack_id Stack ID (0 or 1) - NEW for multi-stack support
- * @param device_address Source device MAC address
  * @param data Sensor data or device response
  * @param len Data length
  * @return true if queued successfully, false if queue full
  */
 bool ble_handler_task_enqueue_uplink(uint8_t stack_id,
-                                      const uint8_t *device_address,
                                       const uint8_t *data,
                                       uint16_t len);
 
@@ -112,53 +125,18 @@ bool ble_handler_task_enqueue_uplink(uint8_t stack_id,
  * @brief Enqueue downlink data from server to BLE device
  * 
  * Called by MCU_WAN_Handler when command/data arrives from server.
- * Data will be sent to target BLE device.
+ * Data will be sent to BLE module.
  * 
- * Format: [Stack ID (1B)][Target MAC (6B)][Data (NB)]
+ * Gateway doesn't route to specific devices - it forwards data to the
+ * BLE module which handles device-level routing.
  * 
- * @param data Downlink data (stack_id + MAC + payload)
- * @param len Data length (min 7 bytes for stack_id + MAC)
+ * Format: [Stack ID (1B)][Data (NB)]
+ * 
+ * @param data Downlink data (stack_id + payload)
+ * @param len Data length (min 1 byte for stack_id)
  * @return true if queued successfully, false if queue full
  */
 bool ble_handler_task_enqueue_downlink(const uint8_t *data, uint16_t len);
-
-/**
- * @brief Get connected devices list for specific stack
- * 
- * Returns information about currently connected BLE devices.
- * 
- * @param stack_id Stack ID (0 or 1) - NEW for multi-stack support
- * @param device_count Output device count
- * @param devices Output buffer for device array
- * @return Number of connected devices returned
- */
-uint8_t ble_handler_task_get_connected_devices(uint8_t stack_id,
-                                                uint8_t *device_count,
-                                                uint8_t devices[][6]);
-
-/**
- * @brief Manually trigger device discovery on specific stack
- * 
- * Used by PC App for device scanning. Results will be available
- * via ble_handler_task_get_discovered_devices().
- * 
- * @param stack_id Stack ID (0 or 1) - NEW for multi-stack support
- * @param scan_duration_ms Scan duration in milliseconds
- * @return ESP_OK if scan started
- */
-esp_err_t ble_handler_task_start_discovery(uint8_t stack_id, uint32_t scan_duration_ms);
-
-/**
- * @brief Get discovered devices from last scan on specific stack
- * 
- * @param stack_id Stack ID (0 or 1) - NEW for multi-stack support
- * @param devices Output buffer for discovered devices (MAC addresses)
- * @param max_count Maximum number of devices to return
- * @return Number of discovered devices
- */
-uint8_t ble_handler_task_get_discovered_devices(uint8_t stack_id,
-                                                 uint8_t devices[][6],
-                                                 uint8_t max_count);
 
 #ifdef __cplusplus
 }

@@ -18,8 +18,6 @@ static const char *TAG = "BLE_HANDLER";
 
 /* ===== Configuration Constants ===== */
 
-#define BLE_MAX_DEVICES_PER_STACK 16 // Max tracked devices per stack
-#define BLE_CMD_MAX_RETRIES 3        // Auto-recovery retry count
 #define BLE_BINARY_CMD_MARKER 0xC0   // Binary protocol marker
 #define BLE_CMD_MAX_LEN 128          // Max command string length
 #define BLE_RESPONSE_MAX_LEN 256     // Max response buffer size
@@ -31,9 +29,6 @@ static const char *TAG = "BLE_HANDLER";
 static struct {
   bool initialized;
   ble_module_config_t config[BLE_MAX_STACKS]; // Stack 0 and Stack 1
-  ble_device_t devices[BLE_MAX_STACKS]
-                      [BLE_MAX_DEVICES_PER_STACK]; // Device tracking
-  uint8_t device_count[BLE_MAX_STACKS];            // Device count per stack
 } g_ble_handler = {0};
 
 static bool g_module_ctrl_initialized = false;
@@ -260,7 +255,7 @@ static esp_err_t ble_execute_function_internal(uint8_t stack_id,
     strncpy(final_command, func_cfg->command, sizeof(final_command) - 1);
   }
 
-  // TASK 1.1: Check for GPIO-only functions (no command, no response)
+  // Check for GPIO-only functions (no command, no response)
   size_t cmd_len = strlen(final_command);
   size_t expect_len = strlen(func_cfg->expect_response);
   bool is_gpio_only = (cmd_len == 0 && expect_len == 0);
@@ -328,7 +323,6 @@ static esp_err_t ble_execute_function_internal(uint8_t stack_id,
     return ret;
   }
 
-  // TASK 1.3: Optimize no-response timeout
   // Skip module_bus_read if no response expected and timeout is 0
   uint8_t response_buffer[BLE_RESPONSE_MAX_LEN] = {0};
   size_t response_len = 0;
@@ -662,66 +656,6 @@ esp_err_t ble_handler_get_info(uint8_t stack_id, char *buffer, size_t max_len) {
   return ret;
 }
 
-esp_err_t ble_handler_set_name(uint8_t stack_id, const char *name) {
-  if (!g_ble_handler.initialized || !name || strlen(name) > 31) {
-    ESP_LOGE(TAG, "Invalid arguments");
-    return ESP_ERR_INVALID_ARG;
-  }
-
-  ble_exec_result_t result = {0};
-  esp_err_t ret =
-      ble_execute_function_internal(stack_id, BLE_FUNC_SET_NAME, name, &result);
-
-  if (ret == ESP_OK) {
-    ESP_LOGI(TAG, "Device name set to '%s' on stack %d", name, stack_id);
-  } else {
-    ESP_LOGE(TAG, "Set name failed on stack %d: %s", stack_id, result.response);
-  }
-
-  return ret;
-}
-
-esp_err_t ble_handler_set_comm_config(uint8_t stack_id,
-                                      const char *config_param) {
-  if (!g_ble_handler.initialized || !config_param) {
-    ESP_LOGE(TAG, "Invalid arguments");
-    return ESP_ERR_INVALID_ARG;
-  }
-
-  ble_exec_result_t result = {0};
-  esp_err_t ret = ble_execute_function_internal(
-      stack_id, BLE_FUNC_SET_COMM_CONFIG, config_param, &result);
-
-  if (ret == ESP_OK) {
-    ESP_LOGI(TAG, "Comm config updated on stack %d", stack_id);
-  } else {
-    ESP_LOGE(TAG, "Set comm config failed on stack %d: %s", stack_id,
-             result.response);
-  }
-
-  return ret;
-}
-
-esp_err_t ble_handler_set_rf_params(uint8_t stack_id, const char *rf_param) {
-  if (!g_ble_handler.initialized || !rf_param) {
-    ESP_LOGE(TAG, "Invalid arguments");
-    return ESP_ERR_INVALID_ARG;
-  }
-
-  ble_exec_result_t result = {0};
-  esp_err_t ret = ble_execute_function_internal(
-      stack_id, BLE_FUNC_SET_RF_PARAMS, rf_param, &result);
-
-  if (ret == ESP_OK) {
-    ESP_LOGI(TAG, "RF params set on stack %d", stack_id);
-  } else {
-    ESP_LOGE(TAG, "Set RF params failed on stack %d: %s", stack_id,
-             result.response);
-  }
-
-  return ret;
-}
-
 esp_err_t ble_handler_enter_cmd_mode(uint8_t stack_id) {
   if (!g_ble_handler.initialized) {
     ESP_LOGE(TAG, "BLE handler not initialized");
@@ -742,84 +676,7 @@ esp_err_t ble_handler_enter_cmd_mode(uint8_t stack_id) {
   return ret;
 }
 
-esp_err_t ble_handler_enter_data_mode(uint8_t stack_id) {
-  if (!g_ble_handler.initialized) {
-    ESP_LOGE(TAG, "BLE handler not initialized");
-    return ESP_ERR_INVALID_STATE;
-  }
 
-  ble_exec_result_t result = {0};
-  esp_err_t ret = ble_execute_function_internal(
-      stack_id, BLE_FUNC_ENTER_DATA_MODE, NULL, &result);
-
-  if (ret == ESP_OK) {
-    ESP_LOGI(TAG, "Entered DATA mode on stack %d", stack_id);
-  } else {
-    ESP_LOGE(TAG, "Enter DATA mode failed on stack %d: %s", stack_id,
-             result.response);
-  }
-
-  return ret;
-}
-
-esp_err_t ble_handler_start_broadcast(uint8_t stack_id) {
-  if (!g_ble_handler.initialized) {
-    ESP_LOGE(TAG, "BLE handler not initialized");
-    return ESP_ERR_INVALID_STATE;
-  }
-
-  ble_exec_result_t result = {0};
-  esp_err_t ret = ble_execute_function_internal(
-      stack_id, BLE_FUNC_START_BROADCAST, NULL, &result);
-
-  if (ret == ESP_OK) {
-    ESP_LOGI(TAG, "Broadcasting started on stack %d", stack_id);
-  } else {
-    ESP_LOGE(TAG, "Start broadcast failed on stack %d: %s", stack_id,
-             result.response);
-  }
-
-  return ret;
-}
-
-esp_err_t ble_handler_connect(uint8_t stack_id, const char *address) {
-  if (!g_ble_handler.initialized || !address || strlen(address) < 11) {
-    ESP_LOGE(TAG, "Invalid arguments");
-    return ESP_ERR_INVALID_ARG;
-  }
-
-  ble_exec_result_t result = {0};
-  esp_err_t ret = ble_execute_function_internal(stack_id, BLE_FUNC_CONNECT,
-                                                address, &result);
-
-  if (ret == ESP_OK) {
-    ESP_LOGI(TAG, "Connected to %s on stack %d", address, stack_id);
-  } else {
-    ESP_LOGE(TAG, "Connect failed on stack %d: %s", stack_id, result.response);
-  }
-
-  return ret;
-}
-
-esp_err_t ble_handler_disconnect(uint8_t stack_id) {
-  if (!g_ble_handler.initialized) {
-    ESP_LOGE(TAG, "BLE handler not initialized");
-    return ESP_ERR_INVALID_STATE;
-  }
-
-  ble_exec_result_t result = {0};
-  esp_err_t ret = ble_execute_function_internal(stack_id, BLE_FUNC_DISCONNECT,
-                                                NULL, &result);
-
-  if (ret == ESP_OK) {
-    ESP_LOGI(TAG, "Disconnected on stack %d", stack_id);
-  } else {
-    ESP_LOGE(TAG, "Disconnect failed on stack %d: %s", stack_id,
-             result.response);
-  }
-
-  return ret;
-}
 
 esp_err_t ble_handler_get_connection_status(uint8_t stack_id, char *buffer,
                                             size_t max_len) {
@@ -882,526 +739,223 @@ esp_err_t ble_handler_wakeup(uint8_t stack_id) {
   return ret;
 }
 
-/* ===== Optional Functions (15-19) ===== */
+/* ===== Optional Functions & Command Matching ===== */
 
-esp_err_t ble_handler_start_discovery(uint8_t stack_id) {
-  if (!g_ble_handler.initialized) {
-    ESP_LOGE(TAG, "BLE handler not initialized");
-    return ESP_ERR_INVALID_STATE;
-  }
-
-  ble_exec_result_t result = {0};
-  esp_err_t ret = ble_execute_function_internal(
-      stack_id, BLE_FUNC_START_DISCOVERY, NULL, &result);
-
-  if (ret == ESP_ERR_NOT_SUPPORTED) {
-    ESP_LOGW(TAG, "Discovery not configured for stack %d", stack_id);
-  } else if (ret == ESP_OK) {
-    ESP_LOGI(TAG, "Discovery started on stack %d", stack_id);
-  }
-
-  return ret;
-}
-
-esp_err_t ble_handler_send_data(uint8_t stack_id, const uint8_t *data,
-                                uint16_t len) {
-  if (!g_ble_handler.initialized || !data || len == 0) {
-    ESP_LOGE(TAG, "Invalid arguments");
+esp_err_t ble_handler_get_function_by_command(uint8_t stack_id,
+                                               const char *command,
+                                               ble_function_config_t *func_config) {
+  if (!g_ble_handler.initialized || !command || !func_config) {
     return ESP_ERR_INVALID_ARG;
   }
 
-  // Convert binary data to hex string for AT command
-  // Use heap allocation to avoid stack overflow (512 bytes is too large for
-  // stack)
-  uint16_t max_data_len = (len < 256) ? len : 256;
-  char *hex_data = (char *)malloc(max_data_len * 2 + 1);
-  if (!hex_data) {
-    ESP_LOGE(TAG, "Failed to allocate hex_data buffer");
-    return ESP_ERR_NO_MEM;
-  }
-
-  for (uint16_t i = 0; i < max_data_len; i++) {
-    snprintf(&hex_data[i * 2], 3, "%02X", data[i]);
-  }
-  hex_data[max_data_len * 2] = '\0';
-
-  ble_exec_result_t result = {0};
-  esp_err_t ret = ble_execute_function_internal(stack_id, BLE_FUNC_SEND_DATA,
-                                                hex_data, &result);
-
-  free(hex_data);
-
-  if (ret == ESP_ERR_NOT_SUPPORTED) {
-    ESP_LOGW(TAG, "Send data not configured for stack %d", stack_id);
-  } else if (ret == ESP_OK) {
-    ESP_LOGI(TAG, "Data sent on stack %d (%d bytes)", stack_id, len);
-  }
-
-  return ret;
-}
-
-esp_err_t ble_handler_get_diagnostics(uint8_t stack_id, char *buffer,
-                                      size_t max_len) {
-  if (!g_ble_handler.initialized || !buffer || max_len == 0) {
-    ESP_LOGE(TAG, "Invalid arguments");
-    return ESP_ERR_INVALID_ARG;
-  }
-
-  ble_exec_result_t result = {0};
-  esp_err_t ret = ble_execute_function_internal(
-      stack_id, BLE_FUNC_GET_DIAGNOSTICS, NULL, &result);
-
-  if (ret == ESP_ERR_NOT_SUPPORTED) {
-    ESP_LOGW(TAG, "Diagnostics not configured for stack %d", stack_id);
-  } else if (ret == ESP_OK) {
-    strncpy(buffer, result.response, max_len - 1);
-    buffer[max_len - 1] = '\0';
-    ESP_LOGI(TAG, "Diagnostics on stack %d: %s", stack_id, buffer);
-  }
-
-  return ret;
-}
-
-esp_err_t ble_handler_set_security(uint8_t stack_id,
-                                   const char *security_param) {
-  if (!g_ble_handler.initialized || !security_param) {
-    ESP_LOGE(TAG, "Invalid arguments");
-    return ESP_ERR_INVALID_ARG;
-  }
-
-  ble_exec_result_t result = {0};
-  esp_err_t ret = ble_execute_function_internal(stack_id, JSON_BLE_FUNC_SET_SECURITY,
-                                                security_param, &result);
-
-  if (ret == ESP_ERR_NOT_SUPPORTED) {
-    ESP_LOGW(TAG, "Security not configured for stack %d", stack_id);
-  } else if (ret == ESP_OK) {
-    ESP_LOGI(TAG, "Security configured on stack %d", stack_id);
-  }
-
-  return ret;
-}
-
-esp_err_t ble_handler_manage_whitelist(uint8_t stack_id,
-                                       const char *mac_address, bool add) {
-  if (!g_ble_handler.initialized || !mac_address || strlen(mac_address) < 11) {
-    ESP_LOGE(TAG, "Invalid arguments");
-    return ESP_ERR_INVALID_ARG;
-  }
-
-  char param[64];
-  snprintf(param, sizeof(param), "%s,%d", mac_address, add ? 1 : 0);
-
-  ble_exec_result_t result = {0};
-  esp_err_t ret = ble_execute_function_internal(
-      stack_id, JSON_BLE_FUNC_MANAGE_WHITELIST, param, &result);
-
-  if (ret == ESP_ERR_NOT_SUPPORTED) {
-    ESP_LOGW(TAG, "Whitelist management not configured for stack %d", stack_id);
-  } else if (ret == ESP_OK) {
-    ESP_LOGI(TAG, "Whitelist updated on stack %d", stack_id);
-  }
-
-  return ret;
-}
-
-/* ===== Internal Helper for Task Layer ===== */
-
-esp_err_t ble_handler_execute_function(uint8_t stack_id,
-                                       ble_function_id_t func_id,
-                                       const char *param,
-                                       ble_exec_result_t *result) {
-  if (!g_ble_handler.initialized) {
-    if (result)
-      result->status = ESP_ERR_INVALID_STATE;
-    return ESP_ERR_INVALID_STATE;
-  }
-
-  return ble_execute_function_internal(stack_id, func_id, param, result);
-}
-
-/* ===== Device Management Implementation (NEW - Task 1.1) ===== */
-
-esp_err_t ble_handler_add_device(uint8_t stack_id, const uint8_t *mac_address,
-                                 const char *device_name) {
-  if (!ble_is_valid_stack_id(stack_id) || !mac_address) {
-    return ESP_ERR_INVALID_ARG;
-  }
-
-  // Check if device already exists
-  for (uint8_t i = 0; i < g_ble_handler.device_count[stack_id]; i++) {
-    if (memcmp(g_ble_handler.devices[stack_id][i].mac_address, mac_address,
-               6) == 0) {
-      ESP_LOGD(TAG, "Device already tracked on stack %d", stack_id);
-      // Update name if provided
-      if (device_name) {
-        strncpy(g_ble_handler.devices[stack_id][i].device_name, device_name,
-                sizeof(g_ble_handler.devices[stack_id][i].device_name) - 1);
-      }
-      return ESP_OK;
-    }
-  }
-
-  // Check capacity
-  if (g_ble_handler.device_count[stack_id] >= BLE_MAX_DEVICES_PER_STACK) {
-    ESP_LOGW(TAG, "Device list full for stack %d", stack_id);
-    return ESP_ERR_NO_MEM;
-  }
-
-  // Add new device
-  uint8_t idx = g_ble_handler.device_count[stack_id];
-  memcpy(g_ble_handler.devices[stack_id][idx].mac_address, mac_address, 6);
-  if (device_name) {
-    strncpy(g_ble_handler.devices[stack_id][idx].device_name, device_name,
-            sizeof(g_ble_handler.devices[stack_id][idx].device_name) - 1);
-  } else {
-    g_ble_handler.devices[stack_id][idx].device_name[0] = '\0';
-  }
-  g_ble_handler.devices[stack_id][idx].connected = true;
-  g_ble_handler.devices[stack_id][idx].rssi = 0;
-  g_ble_handler.devices[stack_id][idx].last_activity_ms =
-      xTaskGetTickCount() * portTICK_PERIOD_MS;
-
-  g_ble_handler.device_count[stack_id]++;
-
-  ESP_LOGI(TAG, "Device added to stack %d (total: %d)", stack_id,
-           g_ble_handler.device_count[stack_id]);
-  return ESP_OK;
-}
-
-esp_err_t ble_handler_remove_device(uint8_t stack_id,
-                                    const uint8_t *mac_address) {
-  if (!ble_is_valid_stack_id(stack_id) || !mac_address) {
-    return ESP_ERR_INVALID_ARG;
-  }
-
-  // Find device
-  for (uint8_t i = 0; i < g_ble_handler.device_count[stack_id]; i++) {
-    if (memcmp(g_ble_handler.devices[stack_id][i].mac_address, mac_address,
-               6) == 0) {
-      // Shift remaining devices down
-      for (uint8_t j = i; j < g_ble_handler.device_count[stack_id] - 1; j++) {
-        memcpy(&g_ble_handler.devices[stack_id][j],
-               &g_ble_handler.devices[stack_id][j + 1], sizeof(ble_device_t));
-      }
-      g_ble_handler.device_count[stack_id]--;
-
-      ESP_LOGI(TAG, "Device removed from stack %d (remaining: %d)", stack_id,
-               g_ble_handler.device_count[stack_id]);
-      return ESP_OK;
-    }
-  }
-
-  return ESP_ERR_NOT_FOUND;
-}
-
-uint8_t ble_handler_get_device_count(uint8_t stack_id) {
   if (!ble_is_valid_stack_id(stack_id)) {
-    return 0;
-  }
-  return g_ble_handler.device_count[stack_id];
-}
-
-esp_err_t ble_handler_get_device(uint8_t stack_id, const uint8_t *mac_address,
-                                 ble_device_t *device_out) {
-  if (!ble_is_valid_stack_id(stack_id) || !mac_address || !device_out) {
     return ESP_ERR_INVALID_ARG;
   }
 
-  for (uint8_t i = 0; i < g_ble_handler.device_count[stack_id]; i++) {
-    if (memcmp(g_ble_handler.devices[stack_id][i].mac_address, mac_address,
-               6) == 0) {
-      memcpy(device_out, &g_ble_handler.devices[stack_id][i],
-             sizeof(ble_device_t));
-      return ESP_OK;
+  size_t cmd_len = strlen(command);
+  
+  // Search all functions for prefix or exact match
+  for (int func_id = 0; func_id < BLE_FUNC_COUNT; func_id++) {
+    ble_function_config_t *cfg = &g_ble_handler.config[stack_id].functions[func_id];
+    
+    if (!cfg->available) {
+      continue;
     }
-  }
-
-  return ESP_ERR_NOT_FOUND;
-}
-
-esp_err_t ble_handler_update_device_activity(uint8_t stack_id,
-                                             const uint8_t *mac_address) {
-  if (!ble_is_valid_stack_id(stack_id) || !mac_address) {
-    return ESP_ERR_INVALID_ARG;
-  }
-
-  for (uint8_t i = 0; i < g_ble_handler.device_count[stack_id]; i++) {
-    if (memcmp(g_ble_handler.devices[stack_id][i].mac_address, mac_address,
-               6) == 0) {
-      g_ble_handler.devices[stack_id][i].last_activity_ms =
-          xTaskGetTickCount() * portTICK_PERIOD_MS;
-      return ESP_OK;
-    }
-  }
-
-  return ESP_ERR_NOT_FOUND;
-}
-
-/* ===== Enhanced Features Implementation (NEW - Task 1.1) ===== */
-
-esp_err_t ble_handler_execute_with_recovery(uint8_t stack_id,
-                                            ble_function_id_t func_id,
-                                            const char *param,
-                                            ble_exec_result_t *result) {
-  if (!g_ble_handler.initialized) {
-    if (result)
-      result->status = ESP_ERR_INVALID_STATE;
-    return ESP_ERR_INVALID_STATE;
-  }
-
-  esp_err_t ret = ESP_FAIL;
-
-  // Try executing function with retries
-  for (int retry = 0; retry < BLE_CMD_MAX_RETRIES; retry++) {
-    ret = ble_execute_function_internal(stack_id, func_id, param, result);
-
-    if (ret == ESP_OK) {
-      if (retry > 0) {
-        ESP_LOGI(TAG, "Function %d succeeded after %d retries", func_id, retry);
+    
+    size_t cfg_cmd_len = strlen(cfg->command);
+    
+    // For commands starting with "AT+" - try prefix match
+    if (strncmp(cfg->command, "AT+", 3) == 0) {
+      // Prefix match: command must start with cfg->command
+      if (cmd_len >= cfg_cmd_len && 
+          strncmp(command, cfg->command, cfg_cmd_len) == 0) {
+        memcpy(func_config, cfg, sizeof(ble_function_config_t));
+        ESP_LOGI(TAG, "Matched prefix: %s (func_id=%d)", cfg->command, func_id);
+        return ESP_OK;
       }
-      return ESP_OK;
-    }
-
-    if (ret == ESP_ERR_TIMEOUT || ret == ESP_ERR_INVALID_RESPONSE) {
-      ESP_LOGW(TAG, "Function %d failed (attempt %d/%d): %s", func_id,
-               retry + 1, BLE_CMD_MAX_RETRIES, esp_err_to_name(ret));
-      vTaskDelay(pdMS_TO_TICKS(100)); // Wait 100ms between retries
     } else {
-      // Non-recoverable error
-      return ret;
+      // Exact match for non-AT commands (HW_RESET, etc.)
+      if (cmd_len == cfg_cmd_len && strcmp(command, cfg->command) == 0) {
+        memcpy(func_config, cfg, sizeof(ble_function_config_t));
+        ESP_LOGI(TAG, "Matched exact: %s (func_id=%d)", cfg->command, func_id);
+        return ESP_OK;
+      }
     }
   }
-
-  // All retries failed - try SW reset recovery
-  ESP_LOGW(TAG, "All retries failed for function %d, attempting SW reset",
-           func_id);
-  ret = ble_handler_sw_reset(stack_id);
-  if (ret != ESP_OK) {
-    // SW reset failed - try HW reset as last resort
-    ESP_LOGE(TAG, "SW reset failed, attempting HW reset");
-    ret = ble_handler_hw_reset(stack_id);
-    if (ret != ESP_OK) {
-      ESP_LOGE(TAG, "HW reset failed - module may be unrecoverable");
-      if (result)
-        result->status = ESP_FAIL;
-      return ESP_FAIL;
-    }
-  }
-
-  // Wait for module to stabilize after reset
-  vTaskDelay(pdMS_TO_TICKS(2000));
-
-  // Retry original function after reset
-  ret = ble_execute_function_internal(stack_id, func_id, param, result);
-  if (ret == ESP_OK) {
-    ESP_LOGI(TAG, "Function %d succeeded after reset recovery", func_id);
-  } else {
-    ESP_LOGE(TAG, "Function %d failed even after reset recovery", func_id);
-  }
-
-  return ret;
+  
+  ESP_LOGW(TAG, "No function match for command: %s", command);
+  return ESP_ERR_NOT_FOUND;
 }
-
-/* ===== Streaming Mode Implementation (TASK 2.1) ===== */
 
 /**
- * @brief Execute BLE function with streaming response support
- * 
- * This function is designed for commands that generate multiple responses
- * over time (e.g., BLE SCAN commands that return discovered devices).
+ * @brief Execute command with pre-matched function config (for task layer)
  * 
  * Flow:
- * 1. Execute GPIO start sequences
- * 2. Send command
- * 3. Loop for stream_duration_ms:
- *    - Read response with short timeout (50ms)
- *    - If data received, invoke callback
- *    - Continue until duration expires
- * 4. Execute GPIO end sequences
+ * 1. Apply GPIO start sequences from func_config
+ * 2. Wait delay_start_ms from func_config
+ * 3. Send command (full string from server: e.g., "AT+SCAN=5000")
+ * 4. Wait for response with timeout from func_config
+ * 5. Apply GPIO end sequences from func_config
+ * 6. Wait delay_end_ms from func_config
  * 
  * @param stack_id Stack ID (0 or 1)
- * @param func_id Function ID to execute
- * @param param Optional parameter string
- * @param stream_duration_ms Total duration to collect responses
- * @param callback Function called for each response
- * @param user_data User context passed to callback
+ * @param command Raw command string (e.g., "AT+SCAN=5000")
+ * @param func_config Function config already matched from JSON
+ * @param result Output execution result
  * @return ESP_OK on success
  */
-esp_err_t ble_execute_function_streaming(uint8_t stack_id,
-                                         ble_function_id_t func_id,
-                                         const char *param,
-                                         uint32_t stream_duration_ms,
-                                         ble_stream_callback_t callback,
-                                         void *user_data) {
-  if (!g_ble_handler.initialized) {
-    ESP_LOGE(TAG, "BLE handler not initialized");
-    return ESP_ERR_INVALID_STATE;
-  }
-
-  if (!ble_is_valid_stack_id(stack_id) || func_id >= BLE_FUNC_COUNT || !callback) {
-    ESP_LOGE(TAG, "Invalid arguments for streaming function");
+esp_err_t ble_handler_execute_command_with_config(uint8_t stack_id,
+                                                   const char *command,
+                                                   const ble_function_config_t *func_config,
+                                                   ble_exec_result_t *result) {
+  if (!g_ble_handler.initialized || !command || !func_config) {
+    if (result) result->status = ESP_ERR_INVALID_ARG;
     return ESP_ERR_INVALID_ARG;
   }
 
-  ble_function_config_t *func_cfg = ble_get_function_config(stack_id, func_id);
-  if (!func_cfg || !func_cfg->available) {
-    ESP_LOGW(TAG, "Function %d not configured for stack %d", func_id, stack_id);
-    return ESP_ERR_NOT_SUPPORTED;
+  if (!ble_is_valid_stack_id(stack_id)) {
+    if (result) result->status = ESP_ERR_INVALID_ARG;
+    return ESP_ERR_INVALID_ARG;
   }
 
-  ESP_LOGI(TAG, "Starting streaming function %d on stack %d (duration=%lu ms)",
-           func_id, stack_id, stream_duration_ms);
+  ESP_LOGI(TAG, "Executing command '%s' on stack %d with JSON config", command, stack_id);
 
   esp_err_t ret = ESP_OK;
   TickType_t start_tick = xTaskGetTickCount();
 
-  // Step 1: Execute GPIO start sequences
-  for (uint8_t i = 0; i < func_cfg->gpio_start_count; i++) {
+  // Step 1: Execute GPIO start sequences (from JSON config)
+  for (uint8_t i = 0; i < func_config->gpio_start_count; i++) {
     char pin_str[8];
-    snprintf(pin_str, sizeof(pin_str), "%d%d", stack_id, func_cfg->gpio_start[i]);
-    bool state = func_cfg->gpio_start_state[i];
+    snprintf(pin_str, sizeof(pin_str), "%d%d", stack_id, func_config->gpio_start[i]);
+    bool state = func_config->gpio_start_state[i];
 
     ret = module_gpio_write(stack_id, pin_str, state);
     if (ret != ESP_OK) {
-      ESP_LOGE(TAG, "Failed to control GPIO start pin %s: %s", pin_str,
-               esp_err_to_name(ret));
+      ESP_LOGE(TAG, "Failed to control GPIO start pin %s: %s", pin_str, esp_err_to_name(ret));
+      if (result) result->status = ret;
       return ret;
     }
+    ESP_LOGD(TAG, "GPIO pin %s set to %d", pin_str, state);
   }
 
-  // Step 2: Delay start
-  if (func_cfg->delay_start_ms > 0) {
-    vTaskDelay(pdMS_TO_TICKS(func_cfg->delay_start_ms));
+  // Step 2: Wait delay_start_ms (from JSON config)
+  if (func_config->delay_start_ms > 0) {
+    ESP_LOGD(TAG, "Waiting %lu ms before command", func_config->delay_start_ms);
+    vTaskDelay(pdMS_TO_TICKS(func_config->delay_start_ms));
   }
 
-  // Step 3: Build and send command
-  char final_command[BLE_CMD_MAX_LEN] = {0};
-  if (param && strstr(func_cfg->command, "{PARAM}")) {
-    char *src = func_cfg->command;
-    char *dest = final_command;
-    size_t dest_remaining = sizeof(final_command) - 1;
+  // Step 3: Validate and send command
+  size_t cmd_len = strlen(command);
+  size_t expect_len = strlen(func_config->expect_response);
+  bool is_gpio_only = (cmd_len == 0 && expect_len == 0);
 
-    while (*src && dest_remaining > 0) {
-      if (strncmp(src, "{PARAM}", 7) == 0) {
-        size_t param_len = strlen(param);
-        if (param_len > dest_remaining) {
-          ESP_LOGE(TAG, "Parameter too long");
-          return ESP_ERR_INVALID_SIZE;
-        }
-        memcpy(dest, param, param_len);
-        dest += param_len;
-        dest_remaining -= param_len;
-        src += 7;
-      } else {
-        *dest++ = *src++;
-        dest_remaining--;
-      }
-    }
-    *dest = '\0';
+  if (is_gpio_only) {
+    // GPIO-only function: skip command sending
+    ESP_LOGI(TAG, "GPIO-only function - no command/response expected");
   } else {
-    strncpy(final_command, func_cfg->command, sizeof(final_command) - 1);
-  }
+    // Validate command string
+    if (!ble_validate_command_string(command, BLE_CMD_MAX_LEN)) {
+      ESP_LOGE(TAG, "Command validation failed");
+      if (result) result->status = ESP_ERR_INVALID_ARG;
+      return ESP_ERR_INVALID_ARG;
+    }
 
-  // Validate and send command
-  if (strlen(final_command) > 0) {
+    // Send command via Module_Config_Controller
+    ESP_LOGD(TAG, "Sending command: %s", command);
     comm_port_type_t port_type = ble_get_comm_port(stack_id);
     if (port_type == COMM_PORT_MAX) {
       ESP_LOGE(TAG, "Invalid comm port type for stack %d", stack_id);
+      if (result) result->status = ESP_ERR_INVALID_STATE;
       return ESP_ERR_INVALID_STATE;
     }
 
-    ESP_LOGD(TAG, "Sending streaming command: %s", final_command);
-    ret = module_bus_write(stack_id, port_type, (const uint8_t *)final_command,
-                           strlen(final_command));
+    ret = module_bus_write(stack_id, port_type, (const uint8_t *)command, cmd_len);
     if (ret != ESP_OK) {
-      ESP_LOGE(TAG, "Failed to send streaming command: %s", esp_err_to_name(ret));
+      ESP_LOGE(TAG, "Failed to send command: %s", esp_err_to_name(ret));
+      if (result) result->status = ret;
       return ret;
     }
-  }
 
-  // Step 4: Streaming response loop
-  uint8_t response_buffer[BLE_RESPONSE_MAX_LEN];
-  uint32_t response_count = 0;
-  TickType_t stream_start = xTaskGetTickCount();
-  comm_port_type_t port_type = ble_get_comm_port(stack_id);
-
-  while (1) {
-    uint32_t elapsed_ms = (xTaskGetTickCount() - stream_start) * portTICK_PERIOD_MS;
-    if (elapsed_ms >= stream_duration_ms) {
-      ESP_LOGI(TAG, "Streaming duration expired (%lu ms)", elapsed_ms);
-      break;
-    }
-
-    // Read with short timeout (50ms) to allow multiple reads
-    memset(response_buffer, 0, sizeof(response_buffer));
+    // Step 4: Wait for response (from JSON config timeout)
+    uint8_t response_buffer[BLE_RESPONSE_MAX_LEN] = {0};
     size_t response_len = 0;
-    uint32_t remaining_ms = stream_duration_ms - elapsed_ms;
-    uint32_t read_timeout = (remaining_ms < 50) ? remaining_ms : 50;
+    bool skip_read = (expect_len == 0 && func_config->timeout_ms == 0);
 
-    ret = module_bus_read(stack_id, port_type, response_buffer,
-                          sizeof(response_buffer) - 1, read_timeout,
-                          &response_len);
+    if (!skip_read) {
+      ret = module_bus_read(stack_id, port_type, response_buffer,
+                            sizeof(response_buffer) - 1, func_config->timeout_ms,
+                            &response_len);
+      if (ret != ESP_OK && ret != ESP_ERR_TIMEOUT) {
+        ESP_LOGE(TAG, "Failed to receive response: %s", esp_err_to_name(ret));
+        if (result) result->status = ret;
+        return ret;
+      }
 
-    if (ret == ESP_OK && response_len > 0) {
-      response_buffer[response_len] = '\0';
-      ESP_LOGD(TAG, "Streaming response #%lu: %s", response_count, response_buffer);
-      
-      // Invoke callback with response
-      callback(response_buffer, response_len, user_data);
-      response_count++;
-    } else if (ret != ESP_ERR_TIMEOUT) {
-      ESP_LOGW(TAG, "Error reading streaming response: %s", esp_err_to_name(ret));
+      // Verify response matches expect_response (from JSON)
+      bool response_valid = false;
+      if (response_len > 0) {
+        response_buffer[response_len] = '\0';
+        ESP_LOGD(TAG, "Received response: %s", (char *)response_buffer);
+
+        if (expect_len == 0 ||
+            strstr((const char *)response_buffer, func_config->expect_response) != NULL) {
+          response_valid = true;
+        }
+      }
+
+      if (!response_valid && expect_len > 0) {
+        ESP_LOGW(TAG, "Response validation failed: expected '%s'",
+                 func_config->expect_response);
+        if (result) {
+          result->status = ESP_ERR_INVALID_RESPONSE;
+          snprintf(result->response, sizeof(result->response), "%s",
+                   response_len > 0 ? (const char *)response_buffer : "TIMEOUT");
+          result->response_len = response_len;
+        }
+        return ESP_ERR_INVALID_RESPONSE;
+      }
+
+      // Copy response to result
+      if (result && response_len > 0) {
+        snprintf(result->response, sizeof(result->response), "%s",
+                 (const char *)response_buffer);
+        result->response_len = response_len;
+      }
+    } else {
+      ESP_LOGD(TAG, "Skipping response read (no response expected, timeout=0)");
     }
-
-    // Small delay between reads
-    vTaskDelay(pdMS_TO_TICKS(10));
   }
 
-  ESP_LOGI(TAG, "Streaming completed: %lu responses received", response_count);
-
-  // Step 5: Execute GPIO end sequences
-  for (uint8_t i = 0; i < func_cfg->gpio_end_count; i++) {
+  // Step 5: Execute GPIO end sequences (from JSON config)
+  for (uint8_t i = 0; i < func_config->gpio_end_count; i++) {
     char pin_str[8];
-    snprintf(pin_str, sizeof(pin_str), "%d%d", stack_id, func_cfg->gpio_end[i]);
-    bool state = func_cfg->gpio_end_state[i];
+    snprintf(pin_str, sizeof(pin_str), "%d%d", stack_id, func_config->gpio_end[i]);
+    bool state = func_config->gpio_end_state[i];
 
-    module_gpio_write(stack_id, pin_str, state);
+    ret = module_gpio_write(stack_id, pin_str, state);
+    if (ret != ESP_OK) {
+      ESP_LOGW(TAG, "Failed to control GPIO end pin %s: %s", pin_str,
+               esp_err_to_name(ret));
+    }
   }
 
-  // Step 6: Delay end
-  if (func_cfg->delay_end_ms > 0) {
-    vTaskDelay(pdMS_TO_TICKS(func_cfg->delay_end_ms));
+  // Step 6: Wait delay_end_ms (from JSON config)
+  if (func_config->delay_end_ms > 0) {
+    ESP_LOGD(TAG, "Waiting %lu ms after command", func_config->delay_end_ms);
+    vTaskDelay(pdMS_TO_TICKS(func_config->delay_end_ms));
   }
 
-  uint32_t total_time = (xTaskGetTickCount() - start_tick) * portTICK_PERIOD_MS;
-  ESP_LOGI(TAG, "Streaming function %d completed on stack %d (took %lu ms, %lu responses)",
-           func_id, stack_id, total_time, response_count);
-
-  return ESP_OK;
-}
-
-esp_err_t ble_handler_parse_frame(const uint8_t *data, uint16_t len,
-                                  uint8_t *mac_out, uint8_t *payload_out,
-                                  uint16_t *payload_len_out) {
-  if (!data || len < 8 || !mac_out || !payload_out || !payload_len_out) {
-    return ESP_ERR_INVALID_ARG;
+  uint32_t exec_time = (xTaskGetTickCount() - start_tick) * portTICK_PERIOD_MS;
+  if (result) {
+    result->status = ESP_OK;
+    if (result->response[0] == '\0') {
+      snprintf(result->response, sizeof(result->response), "OK");
+    }
+    result->execution_time_ms = exec_time;
   }
 
-  // Simple frame format: [MAC:6][PAYLOAD:N]
-  // For more complex protocols, extend this logic
-
-  memcpy(mac_out, data, 6);
-
-  uint16_t payload_len = len - 6;
-  memcpy(payload_out, data + 6, payload_len);
-  *payload_len_out = payload_len;
-
-  ESP_LOGD(TAG,
-           "Frame parsed: MAC=%02X:%02X:%02X:%02X:%02X:%02X, payload_len=%d",
-           mac_out[0], mac_out[1], mac_out[2], mac_out[3], mac_out[4],
-           mac_out[5], payload_len);
-
+  ESP_LOGI(TAG, "Command executed successfully on stack %d (took %lu ms)",
+           stack_id, exec_time);
   return ESP_OK;
 }
 
@@ -1443,96 +997,5 @@ esp_err_t ble_handler_send_binary_command(uint8_t stack_id,
     ESP_LOGD(TAG, "Binary response received: %zu bytes", received_len);
   }
 
-  return ESP_OK;
-}
-
-/**
- * @brief Send raw command with streaming response support (NEW - Phase 3)
- * 
- * Generic pass-through streaming for commands in any format (AT/binary/ASCII).
- * No JSON config lookup, no GPIO sequences, no function_id mapping.
- * 
- * @param stack_id Stack ID (0 or 1)
- * @param command Raw command bytes
- * @param cmd_len Command length
- * @param duration_ms Duration to collect responses
- * @param callback Function called for each response
- * @param user_data User context passed to callback
- * @return ESP_OK on success
- */
-esp_err_t ble_send_raw_command_streaming(uint8_t stack_id,
-                                         const uint8_t *command,
-                                         uint16_t cmd_len,
-                                         uint32_t duration_ms,
-                                         ble_stream_callback_t callback,
-                                         void *user_data) {
-  if (!g_ble_handler.initialized) {
-    ESP_LOGE(TAG, "BLE handler not initialized");
-    return ESP_ERR_INVALID_STATE;
-  }
-
-  if (!ble_is_valid_stack_id(stack_id) || !command || cmd_len == 0 || !callback) {
-    ESP_LOGE(TAG, "Invalid arguments for raw streaming command");
-    return ESP_ERR_INVALID_ARG;
-  }
-
-  comm_port_type_t port_type = ble_get_comm_port(stack_id);
-  if (port_type == COMM_PORT_MAX) {
-    ESP_LOGE(TAG, "Invalid comm port for stack %d", stack_id);
-    return ESP_ERR_INVALID_STATE;
-  }
-
-  ESP_LOGI(TAG, "Sending raw streaming command (stack=%u, len=%u, duration=%lu ms)",
-           stack_id, cmd_len, duration_ms);
-  ESP_LOG_BUFFER_HEXDUMP(TAG, command, cmd_len, ESP_LOG_DEBUG);
-
-  // Step 1: Send raw command
-  esp_err_t ret = module_bus_write(stack_id, port_type, command, cmd_len);
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to send raw command: %s", esp_err_to_name(ret));
-    return ret;
-  }
-
-  // Step 2: Streaming response loop
-  uint8_t response_buffer[BLE_RESPONSE_MAX_LEN];
-  uint32_t response_count = 0;
-  TickType_t stream_start = xTaskGetTickCount();
-
-  while (1) {
-    uint32_t elapsed_ms = (xTaskGetTickCount() - stream_start) * portTICK_PERIOD_MS;
-    if (elapsed_ms >= duration_ms) {
-      ESP_LOGI(TAG, "Raw streaming duration expired (%lu ms)", elapsed_ms);
-      break;
-    }
-
-    // Read with short timeout (50ms) to allow multiple reads
-    memset(response_buffer, 0, sizeof(response_buffer));
-    size_t response_len = 0;
-    uint32_t remaining_ms = duration_ms - elapsed_ms;
-    uint32_t read_timeout = (remaining_ms < 50) ? remaining_ms : 50;
-
-    ret = module_bus_read(stack_id, port_type, response_buffer,
-                          sizeof(response_buffer) - 1, read_timeout,
-                          &response_len);
-
-    if (ret == ESP_OK && response_len > 0) {
-      response_buffer[response_len] = '\0';
-      ESP_LOGD(TAG, "Raw streaming response #%lu (%zu bytes)", 
-               response_count, response_len);
-      ESP_LOG_BUFFER_HEXDUMP(TAG, response_buffer, response_len, ESP_LOG_VERBOSE);
-      
-      // Invoke callback with response
-      callback(response_buffer, response_len, user_data);
-      response_count++;
-    } else if (ret != ESP_ERR_TIMEOUT) {
-      ESP_LOGW(TAG, "Error reading raw streaming response: %s", 
-               esp_err_to_name(ret));
-    }
-
-    // Small delay between reads
-    vTaskDelay(pdMS_TO_TICKS(10));
-  }
-
-  ESP_LOGI(TAG, "Raw streaming completed: %lu responses received", response_count);
   return ESP_OK;
 }
