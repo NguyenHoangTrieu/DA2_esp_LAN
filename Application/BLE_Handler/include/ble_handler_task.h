@@ -68,6 +68,14 @@ typedef struct {
 esp_err_t ble_handler_task_start(uint8_t stack_id);
 
 /**
+ * @brief Check if BLE handler is running for specific stack
+ * 
+ * @param stack_id Stack ID (0 or 1)
+ * @return true if running, false otherwise
+ */
+bool ble_handler_is_running(uint8_t stack_id);
+
+/**
  * @brief Stop BLE handler task for specific stack
  * 
  * Gracefully shuts down the task:

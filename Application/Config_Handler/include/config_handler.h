@@ -14,8 +14,20 @@
 #include <stdint.h>
 
 // Command buffer size
-#define CONFIG_CMD_MAX_LEN 256
+// Maximum length for config command data
+// Increased to support JSON module configs (~3-4KB typical)
+#define CONFIG_CMD_MAX_LEN 4096  // Was 256, increased for JSON support
 #define CONFIG_QUEUE_SIZE 10
+
+/**
+ * @brief Command source for ACK routing
+ */
+typedef enum {
+  CONFIG_SOURCE_WAN_MCU = 0,  // From WAN MCU (forward to MQTT/HTTP server)
+  CONFIG_SOURCE_UART = 1,      // From PC App via UART (ACK to UART)
+  CONFIG_SOURCE_USB = 2,       // From PC App via USB (ACK to USB)
+  CONFIG_SOURCE_UNKNOWN = 0xFF
+} config_source_t;
 
 /**
  * @brief Command type codes for LAN MCU
@@ -45,6 +57,7 @@ typedef struct {
  */
 typedef struct {
   config_type_t type;
+  config_source_t source;  // Command source for ACK routing
   char raw_data[CONFIG_CMD_MAX_LEN];
   uint16_t data_len;
 } config_command_t;

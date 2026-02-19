@@ -19,6 +19,7 @@
 #include "config_handler_ble_commands.h"
 #include "ble_handler.h"
 #include "ble_handler_task.h"
+#include "module_monitor_task.h"
 #include "json_ble_config_parser.h"
 #include "esp_log.h"
 #include "mcu_wan_handler.h"
@@ -160,6 +161,10 @@ esp_err_t config_parse_ble_json(const uint8_t *data, uint16_t len) {
   const char *json_data = colon + 1;
   uint16_t json_len = len - (json_data - (const char *)data);
 
+
+  ESP_LOGI(TAG, "Stack ID: %u, JSON length: %u bytes", stack_id, json_len);
+
+
   // Validate
   if (stack_id > 1) {
     ESP_LOGE(TAG, "BLE JSON: invalid stack_id %u", stack_id);
@@ -170,25 +175,17 @@ esp_err_t config_parse_ble_json(const uint8_t *data, uint16_t len) {
     return ESP_FAIL;
   }
 
-  ESP_LOGI(TAG, "Loading BLE JSON config (stack=%u, %u bytes)", 
-           stack_id, json_len);
-
-  // Load configuration
-  esp_err_t ret = ble_handler_load_config(stack_id, json_data, json_len);
+  esp_err_t ret = module_monitor_send_config(stack_id, json_data, json_len);
   if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to load BLE config: %s", esp_err_to_name(ret));
+    ESP_LOGE(TAG, "Failed to send config to module_monitor: %s", esp_err_to_name(ret));
     
-    // Send error response
-    uint8_t error_resp[] = "BR:JSON:FAIL";
+    // Send error response (module_monitor_task is not running or queue full)
+    uint8_t error_resp[] = "BR:JSON:FAIL:QUEUE";
     mcu_wan_enqueue_uplink(HANDLER_BLE, error_resp, sizeof(error_resp) - 1);
     return ret;
   }
 
-  ESP_LOGI(TAG, "BLE JSON config loaded successfully");
-  
-  // Send success response
-  uint8_t ok_resp[] = "BR:JSON:OK";
-  mcu_wan_enqueue_uplink(HANDLER_BLE, ok_resp, sizeof(ok_resp) - 1);
-
+  ESP_LOGI(TAG, "BLE JSON config forwarded to module_monitor_task");
+  // ACK response will be sent by module_monitor_task after processing
   return ESP_OK;
 }

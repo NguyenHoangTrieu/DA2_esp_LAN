@@ -196,32 +196,39 @@ static void mcu_wan_config_callback(const uint8_t *data, uint16_t len,
     return;
   }
 
-  config_command_t cmd;
-  memset(&cmd, 0, sizeof(cmd));
-
-  // Parse command type from raw data
-  cmd.type = config_parse_type((const char *)data, len);
-
-  // Clamp raw data length to CONFIG_CMD_MAX_LEN
+  // CRITICAL: Reject configs that exceed maximum size
   if (len > CONFIG_CMD_MAX_LEN) {
-    ESP_LOGW(TAG, "Config callback: input length %u truncated to max %d bytes",
-             len, CONFIG_CMD_MAX_LEN);
-    cmd.data_len = CONFIG_CMD_MAX_LEN;
-  } else {
-    cmd.data_len = len;
+    ESP_LOGE(TAG, "Config too large: %u > %d bytes - REJECTED", len, CONFIG_CMD_MAX_LEN);
+    return;
   }
 
-  // Copy raw config payload
-  memcpy(cmd.raw_data, data, cmd.data_len);
+  // Allocate on heap to avoid stack overflow (4KB+ structure)
+  config_command_t *cmd = (config_command_t *)malloc(sizeof(config_command_t));
+  if (cmd == NULL) {
+    ESP_LOGE(TAG, "Config callback: failed to allocate command buffer (%u bytes)", sizeof(config_command_t));
+    return;
+  }
 
-  // Enqueue command to the main config handler queue
+  memset(cmd, 0, sizeof(config_command_t));
+
+  // Parse command type from raw data
+  cmd->type = config_parse_type((const char *)data, len);
+  cmd->source = CONFIG_SOURCE_WAN_MCU;  // All commands via WAN callback are from WAN MCU
+  cmd->data_len = len;
+
+  // Copy raw config payload
+  memcpy(cmd->raw_data, data, cmd->data_len);
+
+  // Enqueue command pointer to the main config handler queue (queue takes ownership)
   if (xQueueSend(g_config_handler_queue, &cmd, pdMS_TO_TICKS(50)) != pdTRUE) {
     ESP_LOGW(TAG, "Config callback: queue full, dropping command");
+    free(cmd); // Queue full, must free memory
   } else {
     ESP_LOGI(TAG,
              "Config callback: queued config command, type=%d, len=%u, "
              "is_fota=%d",
-             cmd.type, cmd.data_len, is_fota);
+             cmd->type, cmd->data_len, is_fota);
+    // Queue now owns the memory, task will free it after processing
   }
 }
 
@@ -229,23 +236,28 @@ static void mcu_wan_config_callback(const uint8_t *data, uint16_t len,
  * @brief Config handler task - processes commands from queue
  */
 static void config_handler_task(void *arg) {
-  config_command_t cmd;
+  config_command_t *cmd = NULL;
 
   ESP_LOGI(TAG, "Config LAN handler task started");
 
   while (config_handler_running) {
-    // Wait for command from MCU LAN handler
+    // Wait for command pointer from MCU WAN handler callback
     if (xQueueReceive(g_config_handler_queue, &cmd, pdMS_TO_TICKS(100)) ==
         pdTRUE) {
-      ESP_LOGI(TAG, "Received config command, type: %d, len: %d", cmd.type,
-               cmd.data_len);
+      if (cmd == NULL) {
+        ESP_LOGE(TAG, "Received NULL command pointer from queue!");
+        continue;
+      }
+
+      ESP_LOGI(TAG, "Received config command, type: %d, len: %d", cmd->type,
+               cmd->data_len);
 
       // Route based on command type
-      switch (cmd.type) {
+      switch (cmd->type) {
       case CONFIG_UPDATE_FIRMWARE: {
         fota_lan_command_t fota_cfg;
 
-        if (config_parse_fota(cmd.raw_data, cmd.data_len, &fota_cfg) ==
+        if (config_parse_fota(cmd->raw_data, cmd->data_len, &fota_cfg) ==
             ESP_OK) {
           ESP_LOGI(TAG, "Starting FOTA process...");
           // Start FOTA handler task
@@ -259,8 +271,8 @@ static void config_handler_task(void *arg) {
         break;
       }
       case CONFIG_UPDATE_RS485: {
-        if (config_parse_rs485_baud((const uint8_t *)cmd.raw_data,
-                                    cmd.data_len) == ESP_OK) {
+        if (config_parse_rs485_baud((const uint8_t *)cmd->raw_data,
+                                    cmd->data_len) == ESP_OK) {
           ESP_LOGI(TAG, "RS485 baud rate updated from MCU WAN");
         } else {
           ESP_LOGE(TAG, "Failed to parse RS485 baud rate command");
@@ -268,8 +280,8 @@ static void config_handler_task(void *arg) {
         break;
       }
       case CONFIG_UPDATE_BLE_JSON: {
-        if (config_parse_ble_json((const uint8_t *)cmd.raw_data,
-                                  cmd.data_len) == ESP_OK) {
+        if (config_parse_ble_json((const uint8_t *)cmd->raw_data,
+                                  cmd->data_len) == ESP_OK) {
           ESP_LOGI(TAG, "BLE JSON config loaded from WAN MCU");
         } else {
           ESP_LOGE(TAG, "Failed to parse BLE JSON config");
@@ -277,8 +289,8 @@ static void config_handler_task(void *arg) {
         break;
       }
       case CONFIG_UPDATE_BLE_CMD: {
-        if (config_parse_ble_command((const uint8_t *)cmd.raw_data,
-                                     cmd.data_len) == ESP_OK) {
+        if (config_parse_ble_command((const uint8_t *)cmd->raw_data,
+                                     cmd->data_len) == ESP_OK) {
           ESP_LOGI(TAG, "BLE command executed successfully");
         } else {
           ESP_LOGE(TAG, "Failed to execute BLE command");
@@ -286,9 +298,13 @@ static void config_handler_task(void *arg) {
         break;
       }
       default:
-        ESP_LOGW(TAG, "Unknown config type: %d", cmd.type);
+        ESP_LOGW(TAG, "Unknown config type: %d", cmd->type);
         break;
       }
+
+      // Free command buffer after processing
+      free(cmd);
+      cmd = NULL;
     }
   }
 
@@ -306,9 +322,10 @@ void config_handler_task_start(void) {
   }
 
   // Create queue if not exists
+  // Queue holds pointers to avoid large memory consumption (4KB+ per item)
   if (!g_config_handler_queue) {
     g_config_handler_queue =
-        xQueueCreate(CONFIG_QUEUE_SIZE, sizeof(config_command_t));
+        xQueueCreate(CONFIG_QUEUE_SIZE, sizeof(config_command_t*));
     if (!g_config_handler_queue) {
       ESP_LOGE(TAG, "Failed to create config queue");
       return;
@@ -320,7 +337,8 @@ void config_handler_task_start(void) {
 
   config_handler_running = true;
 
-  BaseType_t ret = xTaskCreate(config_handler_task, "config_handler", 4096,
+  // Stack size increased from 4KB to 16KB to handle large config structures (4KB+ each)
+  BaseType_t ret = xTaskCreate(config_handler_task, "config_handler", 1024 * 16,
                                NULL, 5, &config_handler_task_handle);
 
   if (ret != pdPASS) {

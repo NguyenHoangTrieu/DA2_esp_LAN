@@ -17,9 +17,8 @@
 static const char *TAG = "BLE_TASK";
 
 /* ===== Configuration ===== */
-
-#define BLE_UPLINK_TASK_STACK_SIZE  4096
-#define BLE_DOWNLINK_TASK_STACK_SIZE 4096
+#define BLE_UPLINK_TASK_STACK_SIZE  (12 * 1024)
+#define BLE_DOWNLINK_TASK_STACK_SIZE (12 * 1024)
 #define BLE_UPLINK_TASK_PRIORITY    5
 #define BLE_DOWNLINK_TASK_PRIORITY  6
 #define BLE_UPLINK_QUEUE_SIZE       20
@@ -54,6 +53,16 @@ typedef struct {
  */
 static inline bool ble_is_valid_stack(uint8_t stack_id) {
     return (stack_id < BLE_MAX_STACKS);
+}
+
+/**
+ * @brief Check if BLE handler is running for specific stack
+ */
+bool ble_handler_is_running(uint8_t stack_id) {
+    if (!ble_is_valid_stack(stack_id)) {
+        return false;
+    }
+    return g_ble_task.running[stack_id];
 }
 
 /* ===== Task Implementations ===== */

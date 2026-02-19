@@ -82,6 +82,19 @@ esp_err_t module_monitor_task_start(void);
  */
 esp_err_t module_monitor_task_stop(void);
 
+/**
+ * @brief Send JSON configuration to module monitor task
+ *
+ * Config will be parsed, handler task will be started if valid.
+ * This function allocates memory for JSON string and enqueues to monitor task.
+ *
+ * @param stack_id Stack ID (0 or 1)
+ * @param json_str JSON configuration string
+ * @param json_len Length of JSON string
+ * @return esp_err_t
+ */
+esp_err_t module_monitor_send_config(uint8_t stack_id, const char *json_str, uint16_t json_len);
+
 #ifdef __cplusplus
 }
 #endif

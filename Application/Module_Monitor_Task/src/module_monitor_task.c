@@ -8,6 +8,7 @@
 #include "config_global.h"
 #include "stack_handler.h"
 #include "ble_handler_task.h"
+#include "mcu_wan_handler.h"
 #include "cJSON.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -51,6 +52,7 @@ static esp_err_t module_parse_json_config(uint8_t stack_id,
                                           const char *json_str,
                                           uint16_t json_len);
 static esp_err_t module_detect_type_from_json(const char *json_str,
+                                              uint16_t json_len,
                                               module_type_t *module_type);
 static esp_err_t module_start_handler_task(uint8_t stack_id,
                                            module_type_t module_type);
@@ -184,6 +186,50 @@ esp_err_t module_monitor_task_stop(void) {
   return ESP_OK;
 }
 
+esp_err_t module_monitor_send_config(uint8_t stack_id, const char *json_str, uint16_t json_len) {
+  if (!json_str || json_len == 0) {
+    ESP_LOGE(TAG, "Invalid config parameters");
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  if (stack_id >= MODULE_MONITOR_MAX_STACKS) {
+    ESP_LOGE(TAG, "Invalid stack_id %u", stack_id);
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  if (!g_monitor_state.initialized || !g_monitor_state.config_queue) {
+    ESP_LOGE(TAG, "Monitor task not running");
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  // Allocate JSON string copy
+  char *json_copy = malloc(json_len + 1);
+  if (!json_copy) {
+    ESP_LOGE(TAG, "Failed to allocate memory for JSON config");
+    return ESP_ERR_NO_MEM;
+  }
+
+  memcpy(json_copy, json_str, json_len);
+  json_copy[json_len] = '\0';
+
+  // Create config message
+  module_config_msg_t msg = {
+    .stack_id = stack_id,
+    .json_str = json_copy,
+    .json_len = json_len
+  };
+
+  // Send to queue (5 second timeout)
+  if (xQueueSend(g_monitor_state.config_queue, &msg, pdMS_TO_TICKS(5000)) != pdTRUE) {
+    ESP_LOGE(TAG, "Failed to enqueue config for Stack %u", stack_id);
+    free(json_copy);
+    return ESP_FAIL;
+  }
+
+  ESP_LOGI(TAG, "Config enqueued for Stack %u (%u bytes)", stack_id, json_len);
+  return ESP_OK;
+}
+
 static esp_err_t module_monitor_start_handler(uint8_t stack_id) {
   if (stack_id > 1 || !g_monitor_state.initialized) {
     return ESP_ERR_INVALID_ARG;
@@ -224,7 +270,7 @@ static esp_err_t module_parse_json_config(uint8_t stack_id,
 
   // Detect module type
   module_type_t module_type = MODULE_TYPE_NONE;
-  esp_err_t ret = module_detect_type_from_json(json_str, &module_type);
+  esp_err_t ret = module_detect_type_from_json(json_str, json_len, &module_type);
   if (ret != ESP_OK || module_type == MODULE_TYPE_NONE) {
     ESP_LOGE(TAG, "Failed to detect module type from JSON");
     return ESP_FAIL;
@@ -253,6 +299,7 @@ static esp_err_t module_parse_json_config(uint8_t stack_id,
   info->json_config_str[json_len] = '\0';
   info->json_config_len = json_len;
   info->module_type = module_type;
+  info->is_configured = true;
 
   ESP_LOGI(TAG, "Config parsed for Stack %d: type=%d", stack_id, module_type);
 
@@ -264,14 +311,50 @@ static esp_err_t module_parse_json_config(uint8_t stack_id,
  * @brief Detect module type from JSON (parse "module_type" field)
  */
 static esp_err_t module_detect_type_from_json(const char *json_str,
+                                              uint16_t json_len,
                                               module_type_t *module_type) {
-  if (!json_str || !module_type) {
+  if (!json_str || json_len == 0 || !module_type) {
     return ESP_ERR_INVALID_ARG;
   }
 
-  cJSON *root = cJSON_Parse(json_str);
+  // CRITICAL: Create null-terminated copy for cJSON_Parse
+  // cJSON requires null-terminated string
+  char *json_copy = malloc(json_len + 1);
+  if (!json_copy) {
+    ESP_LOGE(TAG, "Failed to allocate memory for JSON copy");
+    return ESP_ERR_NO_MEM;
+  }
+  memcpy(json_copy, json_str, json_len);
+  json_copy[json_len] = '\0';
+
+  cJSON *root = cJSON_Parse(json_copy);
   if (!root) {
-    ESP_LOGE(TAG, "Failed to parse JSON");
+    // Check for NULL bytes in original data
+    size_t actual_len = strnlen(json_str, json_len);
+    if (actual_len < json_len) {
+      ESP_LOGE(TAG, "JSON contains NULL byte at position %zu (expected %u) - DATA CORRUPTION!", actual_len, json_len);
+    }
+  }
+  free(json_copy);
+  if (!root) {
+    const char *error_ptr = cJSON_GetErrorPtr();
+    if (error_ptr != NULL) {
+      // Find position in original string
+      size_t error_pos = error_ptr - json_str;
+      ESP_LOGE(TAG, "JSON parse error at position %zu", error_pos);
+      ESP_LOGE(TAG, "JSON parse error before: %s", error_ptr);
+      
+      // Log context around error (50 chars before and after)
+      if (error_pos > 50) {
+        ESP_LOGE(TAG, "Context: ...%.50s >>> ERROR >>> %.50s...", 
+                 json_str + error_pos - 50, error_ptr);
+      } else {
+        ESP_LOGE(TAG, "Context: %.50s >>> ERROR >>> %.50s...", 
+                 json_str, error_ptr);
+      }
+    } else {
+      ESP_LOGE(TAG, "JSON parse error (no error pointer)");
+    }
     return ESP_FAIL;
   }
 
@@ -370,7 +453,7 @@ static void module_monitor_task_impl(void *pvParameters) {
     // Wait for config message (timeout 5 seconds for periodic checks)
     if (xQueueReceive(g_monitor_state.config_queue, &msg,
                       pdMS_TO_TICKS(5000)) == pdTRUE) {
-      ESP_LOGI(TAG, "Received config for Stack %d", msg.stack_id);
+      ESP_LOGI(TAG, "Received config for Stack %d (%u bytes)", msg.stack_id, msg.json_len);
 
       // Parse and apply config
       esp_err_t ret =
@@ -380,7 +463,18 @@ static void module_monitor_task_impl(void *pvParameters) {
         config_save_module_json_to_nvs(msg.stack_id, msg.json_str,
                                        msg.json_len);
 
-        // Load config into handler task BEFORE starting
+        // Auto-start handler task FIRST (this initializes BLE middleware)
+        ret = module_monitor_start_handler(msg.stack_id);
+        if (ret != ESP_OK) {
+          ESP_LOGE(TAG, "Failed to start handler for Stack %d", msg.stack_id);
+          // Send failure response
+          uint8_t error_resp[] = "BR:JSON:FAIL:START";
+          mcu_wan_enqueue_uplink(HANDLER_BLE, error_resp, sizeof(error_resp) - 1);
+          free(msg.json_str);
+          continue;
+        }
+
+        // Load config into handler task AFTER starting (middleware is now initialized)
         module_info_t *info = &g_monitor_state.module_info[msg.stack_id];
         if (info->module_type == MODULE_TYPE_BLE) {
           esp_err_t cfg_ret = ble_handler_task_load_config(msg.stack_id, 
@@ -388,16 +482,26 @@ static void module_monitor_task_impl(void *pvParameters) {
                                                             info->json_config_len);
           if (cfg_ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to load config into BLE handler for Stack %d", msg.stack_id);
+            // Send failure response
+            uint8_t error_resp[] = "BR:JSON:FAIL:LOAD";
+            mcu_wan_enqueue_uplink(HANDLER_BLE, error_resp, sizeof(error_resp) - 1);
+          } else {
+            ESP_LOGI(TAG, "Handler started and config loaded for Stack %d", msg.stack_id);
+            // Send success response
+            uint8_t ok_resp[] = "BR:JSON:OK";
+            mcu_wan_enqueue_uplink(HANDLER_BLE, ok_resp, sizeof(ok_resp) - 1);
           }
-        }
-
-        // Auto-start handler task
-        ret = module_monitor_start_handler(msg.stack_id);
-        if (ret != ESP_OK) {
-          ESP_LOGE(TAG, "Failed to start handler for Stack %d", msg.stack_id);
+        } else {
+          ESP_LOGI(TAG, "Handler started successfully for Stack %d", msg.stack_id);
+          // Send success response
+          uint8_t ok_resp[] = "BR:JSON:OK";
+          mcu_wan_enqueue_uplink(HANDLER_BLE, ok_resp, sizeof(ok_resp) - 1);
         }
       } else {
         ESP_LOGE(TAG, "Failed to parse config for Stack %d", msg.stack_id);
+        // Send failure response
+        uint8_t error_resp[] = "BR:JSON:FAIL:PARSE";
+        mcu_wan_enqueue_uplink(HANDLER_BLE, error_resp, sizeof(error_resp) - 1);
       }
 
       free(msg.json_str);

@@ -15,7 +15,7 @@ static const char *TAG = "WAN_UL";
 
 // CONFIGURATION
 
-#define UPLINK_TASK_STACK_SIZE 4096
+#define UPLINK_TASK_STACK_SIZE 1024 * 16
 #define UPLINK_TASK_PRIORITY 5 // Lower than downlink
 #define UPLINK_QUEUE_SIZE 50
 #define MAX_PAYLOAD_SIZE 512

@@ -233,12 +233,44 @@ esp_err_t json_config_parse_metadata(const char *json_str,
     return ESP_ERR_INVALID_ARG;
   }
 
+  // Log JSON string details for debugging
+  size_t json_len = strlen(json_str);
+  ESP_LOGI(TAG, "Parsing JSON metadata: length=%zu", json_len);
+  
+  // Check null termination
+  if (json_str[json_len] != '\0') {
+    ESP_LOGE(TAG, "JSON string not null-terminated!");
+    return ESP_ERR_INVALID_ARG;
+  }
+  
+  // Log first 100 chars and last 100 chars
+  if (json_len > 200) {
+    ESP_LOGI(TAG, "JSON start: %.100s", json_str);
+    ESP_LOGI(TAG, "JSON end: ...%s", json_str + json_len - 100);
+  } else {
+    ESP_LOGI(TAG, "JSON full: %s", json_str);
+  }
+
   // Parse JSON string
   cJSON *root = cJSON_Parse(json_str);
   if (root == NULL) {
     const char *error_ptr = cJSON_GetErrorPtr();
     if (error_ptr != NULL) {
+      // Find position in original string
+      size_t error_pos = error_ptr - json_str;
+      ESP_LOGE(TAG, "JSON parse error at position %zu", error_pos);
       ESP_LOGE(TAG, "JSON parse error before: %s", error_ptr);
+      
+      // Log context around error (50 chars before and after)
+      if (error_pos > 50) {
+        ESP_LOGE(TAG, "Context: ...%.50s >>> ERROR >>> %.50s...", 
+                 json_str + error_pos - 50, error_ptr);
+      } else {
+        ESP_LOGE(TAG, "Context: %.50s >>> ERROR >>> %.50s...", 
+                 json_str, error_ptr);
+      }
+    } else {
+      ESP_LOGE(TAG, "JSON parse error (no error pointer)");
     }
     return ESP_ERR_INVALID_ARG;
   }

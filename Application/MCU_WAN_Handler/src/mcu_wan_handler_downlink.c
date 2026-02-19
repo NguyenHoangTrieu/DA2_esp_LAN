@@ -9,6 +9,7 @@
 #include "rs485_handler.h"
 #include "storage_handler.h"
 #include "wan_comm.h"
+#include <stdlib.h>
 #include <string.h>
 
 static const char *TAG = "WAN_DL";
@@ -17,11 +18,11 @@ static const char *TAG = "WAN_DL";
 // CONFIGURATION
 //
 
-#define DOWNLINK_TASK_STACK_SIZE 4096
+#define DOWNLINK_TASK_STACK_SIZE 1024 * 16
 #define DOWNLINK_TASK_PRIORITY 7 // HIGH - ISR response
 #define DQ_RETRY_INTERVAL_MS 50  // (was 150ms)
 #define DQ_RETRY_COUNT 10
-#define DQ_RESPONSE_SIZE 256
+#define DQ_RESPONSE_SIZE 4096  // Must be >= max config JSON size (~2KB+)
 #define GPIO_ISR_TIMEOUT_MS 5000 // Max wait for ISR
 
 //
@@ -141,7 +142,13 @@ static void downlink_poll_task(void *pvParameters) {
   ESP_LOGI(TAG, "Downlink Poll Task started (Priority %d)",
            DOWNLINK_TASK_PRIORITY);
 
-  uint8_t rx_buffer[DQ_RESPONSE_SIZE];
+  // Heap-allocate to avoid 4KB stack pressure on this high-priority task
+  uint8_t *rx_buffer = (uint8_t *)malloc(DQ_RESPONSE_SIZE);
+  if (rx_buffer == NULL) {
+    ESP_LOGE(TAG, "Failed to allocate rx_buffer (%d bytes) - task exiting!", DQ_RESPONSE_SIZE);
+    vTaskDelete(NULL);
+    return;
+  }
   uint32_t notification_value = 0;
 
   // Wait for handshake to complete (done by uplink task)
@@ -170,7 +177,7 @@ static void downlink_poll_task(void *pvParameters) {
 
         // Poll for response - retry up to 10 times with 50ms interval
         bool got_valid_response =
-            poll_wan_with_retry(rx_buffer, sizeof(rx_buffer));
+            poll_wan_with_retry(rx_buffer, DQ_RESPONSE_SIZE);
 
         TickType_t elapsed = xTaskGetTickCount() - start;
 
@@ -197,6 +204,7 @@ static void downlink_poll_task(void *pvParameters) {
   }
 
   ESP_LOGI(TAG, "Downlink Poll Task exiting");
+  free(rx_buffer);
   vTaskDelete(NULL);
 }
 
@@ -265,8 +273,21 @@ static bool poll_wan_with_retry(uint8_t *rx_buffer, size_t buffer_size) {
           bool is_fota =
               (config_len >= 4) && (memcmp(&rx_buffer[4], "CFFW", 4) == 0);
 
-          ESP_LOGI(TAG, "Config received: len=%u, FOTA=%d", config_len,
-                   is_fota);
+          ESP_LOGI(TAG, "=== CONFIG PACKET RECEIVED ===");
+          ESP_LOGI(TAG, "  Header : [0x%02X 0x%02X] = 'CF'", rx_buffer[0], rx_buffer[1]);
+          ESP_LOGI(TAG, "  config_len field (rx[2..3]): 0x%02X 0x%02X = %u bytes",
+                   rx_buffer[2], rx_buffer[3], config_len);
+          ESP_LOGI(TAG, "  is_fota : %d", is_fota);
+          ESP_LOGI(TAG, "  buffer_size available: %d bytes", DQ_RESPONSE_SIZE);
+
+          // Bounds check: ensure config_len fits in our buffer
+          if (config_len > DQ_RESPONSE_SIZE - 4) {
+            ESP_LOGE(TAG, "  CONFIG TOO LARGE: %u > %d (buffer overflow!)",
+                     config_len, DQ_RESPONSE_SIZE - 4);
+            ESP_LOGE(TAG, "  Increase DQ_RESPONSE_SIZE or split config!");
+            got_valid_response = true;  // Don't retry, it won't help
+            break;
+          }
 
           if (g_config_callback != NULL) {
             g_config_callback(&rx_buffer[4], config_len, is_fota);

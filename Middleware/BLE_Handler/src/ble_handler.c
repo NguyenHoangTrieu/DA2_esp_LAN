@@ -453,10 +453,19 @@ esp_err_t ble_handler_load_config(uint8_t stack_id, const char *json_config,
     return ESP_ERR_TIMEOUT;
   }
 
-  json_ble_module_config_t parsed = {0};
-  esp_err_t ret = json_ble_config_parse(json_config, &parsed);
+  // Heap-allocate parsed config to avoid stack overflow (~5.2KB struct)
+  // This function may be called from tasks with small stacks (e.g., module_monitor_task: 4KB)
+  json_ble_module_config_t *parsed = (json_ble_module_config_t *)calloc(1, sizeof(json_ble_module_config_t));
+  if (!parsed) {
+    ESP_LOGE(TAG, "Failed to allocate parsed config buffer");
+    xSemaphoreGive(g_ble_handler_mutex);
+    return ESP_ERR_NO_MEM;
+  }
+
+  esp_err_t ret = json_ble_config_parse(json_config, parsed);
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "Failed to parse BLE JSON config: %s", esp_err_to_name(ret));
+    free(parsed);
     xSemaphoreGive(g_ble_handler_mutex);
     return ret;
   }
@@ -465,6 +474,7 @@ esp_err_t ble_handler_load_config(uint8_t stack_id, const char *json_config,
     ret = module_config_controller_init();
     if (ret != ESP_OK) {
       ESP_LOGE(TAG, "Failed to init module config controller");
+      free(parsed);
       xSemaphoreGive(g_ble_handler_mutex);
       return ret;
     }
@@ -474,38 +484,38 @@ esp_err_t ble_handler_load_config(uint8_t stack_id, const char *json_config,
   memset(&g_ble_handler.config[stack_id], 0, sizeof(ble_module_config_t));
   g_ble_handler.config[stack_id].module_id = stack_id;
   strncpy(g_ble_handler.config[stack_id].module_type,
-          parsed.metadata.module_type,
+          parsed->metadata.module_type,
           sizeof(g_ble_handler.config[stack_id].module_type) - 1);
   strncpy(g_ble_handler.config[stack_id].module_name,
-          parsed.metadata.module_name,
+          parsed->metadata.module_name,
           sizeof(g_ble_handler.config[stack_id].module_name) - 1);
 
-  switch (parsed.metadata.communication.port_type) {
+  switch (parsed->metadata.communication.port_type) {
   case COMM_PORT_UART:
     strncpy(g_ble_handler.config[stack_id].comm_port_type, "uart",
             sizeof(g_ble_handler.config[stack_id].comm_port_type) - 1);
     g_ble_handler.config[stack_id].baudrate =
-        parsed.metadata.communication.params.uart.baudrate;
+        parsed->metadata.communication.params.uart.baudrate;
     ret = module_config_controller_init_uart(
-        stack_id, &parsed.metadata.communication.params.uart);
+        stack_id, &parsed->metadata.communication.params.uart);
     break;
   case COMM_PORT_SPI:
     strncpy(g_ble_handler.config[stack_id].comm_port_type, "spi",
             sizeof(g_ble_handler.config[stack_id].comm_port_type) - 1);
     ret = module_config_controller_init_spi(
-        stack_id, &parsed.metadata.communication.params.spi);
+        stack_id, &parsed->metadata.communication.params.spi);
     break;
   case COMM_PORT_I2C:
     strncpy(g_ble_handler.config[stack_id].comm_port_type, "i2c",
             sizeof(g_ble_handler.config[stack_id].comm_port_type) - 1);
     ret = module_config_controller_init_i2c(
-        stack_id, &parsed.metadata.communication.params.i2c);
+        stack_id, &parsed->metadata.communication.params.i2c);
     break;
   case COMM_PORT_USB:
     strncpy(g_ble_handler.config[stack_id].comm_port_type, "usb",
             sizeof(g_ble_handler.config[stack_id].comm_port_type) - 1);
     ret = module_config_controller_init_usb(
-        stack_id, &parsed.metadata.communication.params.usb);
+        stack_id, &parsed->metadata.communication.params.usb);
     break;
   default:
     ret = ESP_ERR_NOT_SUPPORTED;
@@ -515,6 +525,7 @@ esp_err_t ble_handler_load_config(uint8_t stack_id, const char *json_config,
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "Failed to init communication for stack %d: %s", stack_id,
              esp_err_to_name(ret));
+    free(parsed);
     xSemaphoreGive(g_ble_handler_mutex);
     return ret;
   }
@@ -524,7 +535,7 @@ esp_err_t ble_handler_load_config(uint8_t stack_id, const char *json_config,
   }
 
   for (int i = 0; i < BLE_MAX_FUNCTIONS; i++) {
-    json_ble_function_config_t *src = &parsed.functions[i];
+    json_ble_function_config_t *src = &parsed->functions[i];
     if (!src->available ||
         (ble_function_id_t)src->function_id >= BLE_FUNC_COUNT) {
       continue;
@@ -545,6 +556,7 @@ esp_err_t ble_handler_load_config(uint8_t stack_id, const char *json_config,
       uint8_t pin_id = 0;
       if (!ble_parse_pin_id(src->gpio_start[j].pin, &pin_id)) {
         ESP_LOGE(TAG, "Invalid GPIO start pin: %s", src->gpio_start[j].pin);
+        free(parsed);
         xSemaphoreGive(g_ble_handler_mutex);
         return ESP_ERR_INVALID_ARG;
       }
@@ -558,6 +570,7 @@ esp_err_t ble_handler_load_config(uint8_t stack_id, const char *json_config,
       uint8_t pin_id = 0;
       if (!ble_parse_pin_id(src->gpio_end[j].pin, &pin_id)) {
         ESP_LOGE(TAG, "Invalid GPIO end pin: %s", src->gpio_end[j].pin);
+        free(parsed);
         xSemaphoreGive(g_ble_handler_mutex);
         return ESP_ERR_INVALID_ARG;
       }
@@ -567,6 +580,7 @@ esp_err_t ble_handler_load_config(uint8_t stack_id, const char *json_config,
     }
   }
 
+  free(parsed);
   xSemaphoreGive(g_ble_handler_mutex);
 
   ESP_LOGI(TAG, "BLE config loaded for stack %d", stack_id);
