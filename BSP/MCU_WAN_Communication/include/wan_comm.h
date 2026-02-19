@@ -15,7 +15,7 @@ extern "C" {
 #define WAN_COMM_SPI_CLOCK_HZ         40000000  // 40 MHz default
 #define WAN_COMM_DEFAULT_TX_BUFFER    16384     // 16KB per design (legacy)
 #define WAN_COMM_DEFAULT_RX_BUFFER    16384     // 16KB per design
-#define WAN_COMM_DMA_BUFFER_SIZE      4096      // 4KB DMA limit
+#define WAN_COMM_DMA_BUFFER_SIZE      8192      // 4KB DMA limit
 #define WAN_COMM_TRANS_QUEUE_SIZE     7
 #define WAN_COMM_ACK_TIMEOUT_MS       200
 #define WAN_COMM_DQ_RETRY_MS          50

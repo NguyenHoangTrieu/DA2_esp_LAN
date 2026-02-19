@@ -31,12 +31,12 @@ static const char *BLE_FUNCTION_NAMES[JSON_BLE_FUNC_MAX] = {
     "MODULE_GET_CONNECTION_STATUS",
     "MODULE_ENTER_SLEEP",
     "MODULE_WAKEUP",
-    // Promoted Optional Functions (15-19) - PC App scan/send workflow
+    // Promoted Optional Functions (15-19) - PC App scan/send/discover workflow
     "MODULE_START_DISCOVERY",
     "MODULE_SEND_DATA",
     "MODULE_GET_DIAGNOSTICS",
-    "MODULE_SET_SECURITY_CONFIG",
-    "MODULE_ENTER_BOOTLOADER"
+    "MODULE_DISCOVER_SERVICES",
+    "MODULE_DISCOVER_CHARACTERISTICS"
 };
 
 /* ============================================================================

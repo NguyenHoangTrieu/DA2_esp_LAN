@@ -21,8 +21,8 @@ extern "C" {
 
 /* ===== Stack Port Definitions ===== */
 typedef enum {
-  STACK_PORT_1 = TCA_PORT_0,
-  STACK_PORT_2 = TCA_PORT_1
+  STACK_PORT_1 = 0,
+  STACK_PORT_2 = 1
 } stack_port_t;
 
 /* ===== GPIO Pin Numbers ===== */

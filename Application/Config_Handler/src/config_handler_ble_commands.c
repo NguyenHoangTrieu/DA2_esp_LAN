@@ -170,7 +170,7 @@ esp_err_t config_parse_ble_json(const uint8_t *data, uint16_t len) {
     ESP_LOGE(TAG, "BLE JSON: invalid stack_id %u", stack_id);
     return ESP_FAIL;
   }
-  if (json_len < 2 || json_len > 4096) {
+  if (json_len < 2 || json_len > 8912) {
     ESP_LOGE(TAG, "BLE JSON: invalid length %u", json_len);
     return ESP_FAIL;
   }

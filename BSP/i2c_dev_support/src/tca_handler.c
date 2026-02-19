@@ -71,7 +71,11 @@ esp_err_t tca_init(void) {
   io_conf.intr_type = GPIO_INTR_NEGEDGE;
   gpio_config(&io_conf);
 
-  // Add ISR handler (gpio_install_isr_service should be called in main)
+  // Install GPIO ISR service if not already installed, then add handler
+  esp_err_t isr_ret = gpio_install_isr_service(0);
+  if (isr_ret != ESP_OK && isr_ret != ESP_ERR_INVALID_STATE) {
+    ESP_LOGW(TAG, "gpio_install_isr_service: %s (non-fatal)", esp_err_to_name(isr_ret));
+  }
   gpio_isr_handler_add(TCA6424A_INT_PIN, tca_interrupt_handler, NULL);
 
   // Add TCA6424A device to bus

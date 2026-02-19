@@ -292,9 +292,23 @@ esp_err_t stack_handler_gpio_write_multi(uint8_t stack_id,
   esp_err_t ret = ESP_OK;
   for (int port = 0; port < 3; port++) {
     if (port_masks[port] != 0) {
-      // Read current state
+      // Step 1: Set affected pins as OUTPUT in CONFIG register (0=output, 1=input)
+      uint8_t cfg;
+      ret = tca_read_config_register((tca_port_t)port, &cfg);
+      if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to read CONFIG P%d", port);
+        break;
+      }
+      cfg &= ~port_masks[port]; // Clear bits = set to output
+      ret = tca_configure_port((tca_port_t)port, cfg);
+      if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set OUTPUT direction P%d", port);
+        break;
+      }
+
+      // Step 2: Read-modify-write OUTPUT register
       uint8_t current;
-      ret = tca_read_output_register(port, &current);
+      ret = tca_read_output_register((tca_port_t)port, &current);
       if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to read P%d output register", port);
         break;
@@ -305,11 +319,14 @@ esp_err_t stack_handler_gpio_write_multi(uint8_t stack_id,
                 (port_states[port] & port_masks[port]);
 
       // Write back
-      ret = tca_write_output_register(port, current);
+      ret = tca_write_output_register((tca_port_t)port, current);
       if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to write P%d output register", port);
         break;
       }
+
+      ESP_LOGD(TAG, "P%d: cfg=0x%02X, out=0x%02X (mask=0x%02X)",
+               port, cfg, current, port_masks[port]);
     }
   }
 

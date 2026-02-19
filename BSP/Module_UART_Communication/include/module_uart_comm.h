@@ -18,14 +18,11 @@ extern "C" {
 #endif
 
 /* ===== Hardware Pin Definitions (Hardcoded) ===== */
-
-// Stack 0 UART pins (adjust according to hardware schematic)
-#define STACK0_UART_PORT    UART_NUM_1
+#define STACK0_UART_PORT    UART_NUM_2
 #define STACK0_UART_TX_PIN  17
 #define STACK0_UART_RX_PIN  18
 
-// Stack 1 UART pins (adjust according to hardware schematic)
-#define STACK1_UART_PORT    UART_NUM_2
+#define STACK1_UART_PORT    UART_NUM_1
 #define STACK1_UART_TX_PIN  15
 #define STACK1_UART_RX_PIN  16
 

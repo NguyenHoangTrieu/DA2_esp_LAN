@@ -22,7 +22,7 @@ static const char *TAG = "WAN_DL";
 #define DOWNLINK_TASK_PRIORITY 7 // HIGH - ISR response
 #define DQ_RETRY_INTERVAL_MS 50  // (was 150ms)
 #define DQ_RETRY_COUNT 10
-#define DQ_RESPONSE_SIZE 4096  // Must be >= max config JSON size (~2KB+)
+#define DQ_RESPONSE_SIZE 8192  // Must be >= max config JSON size (~2KB+)
 #define GPIO_ISR_TIMEOUT_MS 5000 // Max wait for ISR
 
 //

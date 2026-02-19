@@ -28,7 +28,7 @@ extern "C" {
  * @brief Hardcoded BLE function IDs (15 core + 5 promoted optional = 20 total)
  * 
  * Core Functions (0-14): Required for basic BLE operation
- * Promoted Optional (15-19): PC App scan/send workflow; optional if not in JSON config
+ * Promoted Optional (15-19): PC App scan/send/discover workflow; optional if not in JSON config
  */
 typedef enum {
   JSON_BLE_FUNC_HW_RESET = 0,
@@ -46,11 +46,12 @@ typedef enum {
   JSON_BLE_FUNC_GET_CONNECTION_STATUS,
   JSON_BLE_FUNC_ENTER_SLEEP,
   JSON_BLE_FUNC_WAKEUP,
+  // Promoted Optional Functions (15-19) - PC App scan/send workflow
   JSON_BLE_FUNC_START_DISCOVERY = 15,
   JSON_BLE_FUNC_SEND_DATA,
   JSON_BLE_FUNC_GET_DIAGNOSTICS,
-  JSON_BLE_FUNC_SET_SECURITY,
-  JSON_BLE_FUNC_MANAGE_WHITELIST,
+  JSON_BLE_FUNC_DISCOVER_SERVICES,
+  JSON_BLE_FUNC_DISCOVER_CHARACTERISTICS,
   JSON_BLE_FUNC_MAX
 } json_ble_function_id_t;
 

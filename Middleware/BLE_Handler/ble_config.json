@@ -17,7 +17,7 @@
             "is_prefix": false,
             "gpio_start_control": [
                 {
-                    "pin": "RST",
+                    "pin": "01",
                     "state": "LOW"
                 }
             ],
@@ -26,7 +26,7 @@
             "timeout": 0,
             "gpio_end_control": [
                 {
-                    "pin": "RST",
+                    "pin": "01",
                     "state": "HIGH"
                 }
             ],

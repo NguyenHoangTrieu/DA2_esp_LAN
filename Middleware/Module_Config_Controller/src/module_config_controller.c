@@ -435,24 +435,25 @@ esp_err_t module_gpio_write(uint8_t stack_id, const char *pin, bool state) {
     return ESP_ERR_INVALID_ARG;
   }
 
-  // Parse pin "XY" -> port X, pin Y
+  // Parse pin "XY": X = stack port (0=STACK_PORT_1, 1=STACK_PORT_2)
+  //                  Y = GPIO pin number 1-9 (1=GPIO_PIN_1 ... 9=GPIO_PIN_9)
   uint8_t port = pin[0] - '0';
-  uint8_t pin_num = pin[1] - '0';
+  uint8_t pin_num = pin[1] - '0'; // 1-indexed
 
   if (port != stack_id) {
     ESP_LOGE(TAG, "Pin port %d does not match stack_id %d", port, stack_id);
     return ESP_ERR_INVALID_ARG;
   }
 
-  if (pin_num > 8) {
-    ESP_LOGE(TAG, "Invalid pin number: %d", pin_num);
+  if (pin_num < 1 || pin_num > 9) {
+    ESP_LOGE(TAG, "Invalid pin number: %d (must be 1-9)", pin_num);
     return ESP_ERR_INVALID_ARG;
   }
 
   ESP_LOGI(TAG, "GPIO write: stack=%d, pin=%s, state=%d", stack_id, pin, state);
 
-  // Create GPIO action
-  gpio_action_t action = {.pin = (stack_gpio_pin_num_t)pin_num, .level = state};
+  // Convert Y from 1-indexed to 0-indexed enum
+  gpio_action_t action = {.pin = (stack_gpio_pin_num_t)(pin_num - 1), .level = state};
 
   // Call stack handler
   return stack_handler_gpio_write_multi(stack_id, &action, 1);
@@ -487,8 +488,9 @@ esp_err_t module_gpio_write_multi(uint8_t stack_id,
       return ESP_ERR_INVALID_ARG;
     }
 
+    // Parse "XY": X=port (0=STACK_PORT_1), Y=pin 1-9 (1-indexed)
     uint8_t port = gpio_actions[i].pin[0] - '0';
-    uint8_t pin_num = gpio_actions[i].pin[1] - '0';
+    uint8_t pin_num = gpio_actions[i].pin[1] - '0'; // 1-indexed
 
     if (port != stack_id) {
       ESP_LOGE(TAG, "Pin port %d does not match stack_id %d at index %d", port,
@@ -496,12 +498,13 @@ esp_err_t module_gpio_write_multi(uint8_t stack_id,
       return ESP_ERR_INVALID_ARG;
     }
 
-    if (pin_num > 8) {
-      ESP_LOGE(TAG, "Invalid pin number: %d at index %d", pin_num, i);
+    if (pin_num < 1 || pin_num > 9) {
+      ESP_LOGE(TAG, "Invalid pin number: %d at index %d (must be 1-9)", pin_num, i);
       return ESP_ERR_INVALID_ARG;
     }
 
-    actions[i].pin = (stack_gpio_pin_num_t)pin_num;
+    // Convert Y from 1-indexed to 0-indexed enum (GPIO_PIN_1=0, GPIO_PIN_4=3, ...)
+    actions[i].pin = (stack_gpio_pin_num_t)(pin_num - 1);
     actions[i].level = gpio_actions[i].state;
   }
 

@@ -468,7 +468,7 @@ static void module_monitor_task_impl(void *pvParameters) {
         if (ret != ESP_OK) {
           ESP_LOGE(TAG, "Failed to start handler for Stack %d", msg.stack_id);
           // Send failure response
-          uint8_t error_resp[] = "BR:JSON:FAIL:START";
+          uint8_t error_resp[] = "CFBL:JSON:FAIL:START";
           mcu_wan_enqueue_uplink(HANDLER_BLE, error_resp, sizeof(error_resp) - 1);
           free(msg.json_str);
           continue;
@@ -483,24 +483,24 @@ static void module_monitor_task_impl(void *pvParameters) {
           if (cfg_ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to load config into BLE handler for Stack %d", msg.stack_id);
             // Send failure response
-            uint8_t error_resp[] = "BR:JSON:FAIL:LOAD";
+            uint8_t error_resp[] = "CFBL:JSON:FAIL:LOAD";
             mcu_wan_enqueue_uplink(HANDLER_BLE, error_resp, sizeof(error_resp) - 1);
           } else {
             ESP_LOGI(TAG, "Handler started and config loaded for Stack %d", msg.stack_id);
             // Send success response
-            uint8_t ok_resp[] = "BR:JSON:OK";
+            uint8_t ok_resp[] = "CFBL:JSON:OK";
             mcu_wan_enqueue_uplink(HANDLER_BLE, ok_resp, sizeof(ok_resp) - 1);
           }
         } else {
           ESP_LOGI(TAG, "Handler started successfully for Stack %d", msg.stack_id);
           // Send success response
-          uint8_t ok_resp[] = "BR:JSON:OK";
+          uint8_t ok_resp[] = "CFBL:JSON:OK";
           mcu_wan_enqueue_uplink(HANDLER_BLE, ok_resp, sizeof(ok_resp) - 1);
         }
       } else {
         ESP_LOGE(TAG, "Failed to parse config for Stack %d", msg.stack_id);
         // Send failure response
-        uint8_t error_resp[] = "BR:JSON:FAIL:PARSE";
+        uint8_t error_resp[] = "CFBL:JSON:FAIL:PARSE";
         mcu_wan_enqueue_uplink(HANDLER_BLE, error_resp, sizeof(error_resp) - 1);
       }
 
