@@ -17,7 +17,7 @@ extern "C" {
 
 /* ===== Constants ===== */
 #define STACK_HANDLER_MAX_STACKS 2
-#define STACK_GPIO_PIN_COUNT 9
+#define STACK_GPIO_PIN_COUNT 11  // 9 GPIO + WAKE# + PERST#
 
 /* ===== Stack Port Definitions ===== */
 typedef enum {
@@ -27,15 +27,17 @@ typedef enum {
 
 /* ===== GPIO Pin Numbers ===== */
 typedef enum {
-  STACK_GPIO_PIN_1 = 0,
-  STACK_GPIO_PIN_2 = 1,
-  STACK_GPIO_PIN_3 = 2,
-  STACK_GPIO_PIN_4 = 3,
-  STACK_GPIO_PIN_5 = 4,
-  STACK_GPIO_PIN_6 = 5,
-  STACK_GPIO_PIN_7 = 6,
-  STACK_GPIO_PIN_8 = 7,
-  STACK_GPIO_PIN_9 = 8
+  STACK_GPIO_PIN_1    = 0,
+  STACK_GPIO_PIN_2    = 1,
+  STACK_GPIO_PIN_3    = 2,
+  STACK_GPIO_PIN_4    = 3,
+  STACK_GPIO_PIN_5    = 4,
+  STACK_GPIO_PIN_6    = 5,
+  STACK_GPIO_PIN_7    = 6,
+  STACK_GPIO_PIN_8    = 7,
+  STACK_GPIO_PIN_9    = 8,
+  STACK_GPIO_PIN_WAKE  = 9,   // WAKE# - active-low wake signal to module
+  STACK_GPIO_PIN_PERST = 10   // PERST# - active-low PCIe/peripheral reset
 } stack_gpio_pin_num_t;
 
 /* Note: stack_comm_type_t removed - Module Base Setting uses JSON config instead */

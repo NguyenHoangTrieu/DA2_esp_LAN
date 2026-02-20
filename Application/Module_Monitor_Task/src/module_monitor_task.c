@@ -57,6 +57,7 @@ static esp_err_t module_detect_type_from_json(const char *json_str,
 static esp_err_t module_start_handler_task(uint8_t stack_id,
                                            module_type_t module_type);
 static esp_err_t module_stop_handler_task(uint8_t stack_id);
+static esp_err_t module_monitor_start_handler(uint8_t stack_id);
 
 /* ===== Implementation ===== */
 
@@ -96,18 +97,51 @@ esp_err_t module_monitor_task_start(void) {
 
   g_monitor_state.initialized = true;
 
-  // Detect module IDs and save to config_global
-  const char* stack_0_id = stack_handler_get_module_id(0);
-  const char* stack_1_id = stack_handler_get_module_id(1);
-  
-  config_set_stack_1_id(stack_0_id);  // Stack 0 -> g_stack_1_id
-  config_set_stack_2_id(stack_1_id);  // Stack 1 -> g_stack_2_id
-  
-  ESP_LOGI(TAG, "Module IDs detected: Stack_1=%s, Stack_2=%s", 
+  // 1. Read current hardware module IDs
+  const char *cur_id[MODULE_MONITOR_MAX_STACKS] = {
+    stack_handler_get_module_id(0),
+    stack_handler_get_module_id(1),
+  };
+
+  // 2. Load previously saved IDs from NVS into config globals.
+  //    If no NVS entry exists (first boot) the globals keep their default
+  //    "000" value, so every stack will be treated as newly inserted.
+  config_load_global_vars_from_nvs();
+
+  const char *old_id[MODULE_MONITOR_MAX_STACKS] = {
+    config_get_stack_1_id(),  // Stack 0 is stored as stack_1_id
+    config_get_stack_2_id(),  // Stack 1 is stored as stack_2_id
+  };
+
+  // 3. Compare IDs: invalidate NVS JSON config for any stack whose module
+  //    has been swapped since the last boot.
+  bool id_changed[MODULE_MONITOR_MAX_STACKS] = {false, false};
+  for (int i = 0; i < MODULE_MONITOR_MAX_STACKS; i++) {
+    if (strcmp(cur_id[i], old_id[i]) != 0) {
+      ESP_LOGW(TAG, "Stack %d module changed: '%s' -> '%s', clearing NVS config",
+               i, old_id[i], cur_id[i]);
+      config_delete_module_json_from_nvs(i);
+      id_changed[i] = true;
+    } else {
+      ESP_LOGI(TAG, "Stack %d module unchanged: '%s'", i, cur_id[i]);
+    }
+  }
+
+  // 4. Persist the current (new) IDs to NVS for comparison on the next boot.
+  config_set_stack_1_id(cur_id[0]);
+  config_set_stack_2_id(cur_id[1]);
+  config_save_global_vars_to_nvs();
+
+  ESP_LOGI(TAG, "Module IDs: Stack_1=%s, Stack_2=%s",
            config_get_stack_1_id(), config_get_stack_2_id());
 
-  // Try to load saved JSON configs from NVS
+  // 5. Load saved JSON only for stacks whose module ID has not changed.
   for (int i = 0; i < MODULE_MONITOR_MAX_STACKS; i++) {
+    if (id_changed[i]) {
+      ESP_LOGI(TAG, "Stack %d: module was replaced, waiting for new config", i);
+      continue;
+    }
+
     char *json_str = NULL;
     uint16_t json_len = 0;
 
@@ -115,6 +149,30 @@ esp_err_t module_monitor_task_start(void) {
       ESP_LOGI(TAG, "Loaded saved config for Stack %d from NVS", i);
       if (module_parse_json_config(i, json_str, json_len) == ESP_OK) {
         g_monitor_state.module_info[i].is_configured = true;
+        free(json_str); // module_parse_json_config makes its own copy
+
+        // Auto-start handler task for restored config (no queue message on boot)
+        esp_err_t start_ret = module_monitor_start_handler(i);
+        if (start_ret == ESP_OK) {
+          ESP_LOGI(TAG, "Handler auto-started for Stack %d (NVS restore)", i);
+
+          // Load config into handler → triggers HW reset + enter CMD mode
+          // (same sequence as when receiving JSON from WAN MCU)
+          module_info_t *info = &g_monitor_state.module_info[i];
+          if (info->module_type == MODULE_TYPE_BLE) {
+            esp_err_t cfg_ret = ble_handler_task_load_config(i,
+                                                             info->json_config_str,
+                                                             info->json_config_len);
+            if (cfg_ret != ESP_OK) {
+              ESP_LOGE(TAG, "Failed to load config into BLE handler for Stack %d", i);
+            } else {
+              ESP_LOGI(TAG, "BLE handler config loaded after NVS restore (Stack %d)", i);
+            }
+          }
+        } else {
+          ESP_LOGW(TAG, "Handler start failed for Stack %d: %s", i,
+                   esp_err_to_name(start_ret));
+        }
       } else {
         ESP_LOGW(TAG, "Failed to parse saved config for Stack %d", i);
         free(json_str);
@@ -300,6 +358,13 @@ static esp_err_t module_parse_json_config(uint8_t stack_id,
   info->json_config_len = json_len;
   info->module_type = module_type;
   info->is_configured = true;
+
+  // Also update config_global so mcu_wan_handler can report correct json_len
+  if (stack_id == 0) {
+    config_set_stack_1_json(json_str, json_len);
+  } else if (stack_id == 1) {
+    config_set_stack_2_json(json_str, json_len);
+  }
 
   ESP_LOGI(TAG, "Config parsed for Stack %d: type=%d", stack_id, module_type);
 

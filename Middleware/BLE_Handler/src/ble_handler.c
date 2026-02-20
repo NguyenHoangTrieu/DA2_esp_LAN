@@ -24,6 +24,12 @@ static const char *TAG = "BLE_HANDLER";
 #define BLE_HEX_DATA_MAX_LEN 512     // Max hex data buffer size
 #define BLE_MAX_STACKS 2             // Number of stacks (0 and 1)
 
+/* ===== GPIO Pin ID Sentinels (stored in gpio_start[]/gpio_end[] uint8_t arrays) ===== */
+// Regular GPIO pins use the 1-indexed value (1-9) matching the "XY" pin string digit.
+// Special pins use sentinel values that do NOT conflict with 1-9:
+#define BLE_GPIO_PIN_ID_WAKE  10  // Sentinel for WAKE# pin  ("XW" in JSON)
+#define BLE_GPIO_PIN_ID_PERST 11  // Sentinel for PERST# pin ("XP" in JSON)
+
 /* ===== Static Data ===== */
 
 static struct {
@@ -68,10 +74,23 @@ static comm_port_type_t ble_get_comm_port(uint8_t stack_id) {
 }
 
 static bool ble_parse_pin_id(const char *pin_str, uint8_t *pin_out) {
-  if (!pin_str || !pin_out) {
+  if (!pin_str || strlen(pin_str) < 2 || !pin_out) {
     return false;
   }
 
+  // Check second character first for WAKE ('W'/'w') and PERST ('P'/'p')
+  // Format: "XW" or "XP" where X is stack ID digit (0 or 1)
+  char second = pin_str[1];
+  if (second == 'W' || second == 'w') {
+    *pin_out = BLE_GPIO_PIN_ID_WAKE;   // = 10
+    return true;
+  }
+  if (second == 'P' || second == 'p') {
+    *pin_out = BLE_GPIO_PIN_ID_PERST;  // = 11
+    return true;
+  }
+
+  // Numeric GPIO pin: supports "01"-"09" (full 2-char) or "GPIO1"-"GPIO9" formats
   const char *digits = pin_str;
   if (strncmp(pin_str, "GPIO", 4) == 0) {
     digits = pin_str + 4;
@@ -83,12 +102,37 @@ static bool ble_parse_pin_id(const char *pin_str, uint8_t *pin_out) {
 
   char *end_ptr = NULL;
   long pin_val = strtol(digits, &end_ptr, 10);
-  if (end_ptr == digits || pin_val < 0 || pin_val > 8) {
+  if (end_ptr == digits || pin_val < 1 || pin_val > 9) {
     return false;
   }
 
   *pin_out = (uint8_t)pin_val;
   return true;
+}
+
+/**
+ * @brief Format pin string for module_gpio_write from stored pin sentinel ID
+ *
+ * Converts the sentinel stored in gpio_start[]/gpio_end[] back to the
+ * "XY" pin string format accepted by module_gpio_write():
+ *  - pin_id  1-9  -> "X1" ... "X9"  (GPIO1-GPIO9)
+ *  - pin_id  10   -> "XW"            (WAKE#  = BLE_GPIO_PIN_ID_WAKE)
+ *  - pin_id  11   -> "XP"            (PERST# = BLE_GPIO_PIN_ID_PERST)
+ *
+ * @param stack_id Stack ID (0 or 1)
+ * @param pin_id   Stored sentinel (1-9, 10=WAKE, 11=PERST)
+ * @param pin_str  Output buffer (minimum 4 bytes)
+ * @param sz       Output buffer size
+ */
+static void ble_format_pin_str(uint8_t stack_id, uint8_t pin_id,
+                                char *pin_str, size_t sz) {
+  if (pin_id == BLE_GPIO_PIN_ID_WAKE) {
+    snprintf(pin_str, sz, "%dW", stack_id);
+  } else if (pin_id == BLE_GPIO_PIN_ID_PERST) {
+    snprintf(pin_str, sz, "%dP", stack_id);
+  } else {
+    snprintf(pin_str, sz, "%d%d", stack_id, pin_id);
+  }
 }
 
 /**
@@ -201,10 +245,8 @@ static esp_err_t ble_execute_function_internal(uint8_t stack_id,
 
   // Step 1: Execute GPIO start sequences via Module_Config_Controller wrapper
   for (uint8_t i = 0; i < func_cfg->gpio_start_count; i++) {
-    char pin_str[8]; // Format: "0X" where 0 is stack, X is pin (increased to
-                     // prevent truncation)
-    snprintf(pin_str, sizeof(pin_str), "%d%d", stack_id,
-             func_cfg->gpio_start[i]);
+    char pin_str[8]; // "X1"-"X9" / "XW" / "XP" (4 bytes sufficient)
+    ble_format_pin_str(stack_id, func_cfg->gpio_start[i], pin_str, sizeof(pin_str));
     bool state = func_cfg->gpio_start_state[i];
 
     ret = module_gpio_write(stack_id, pin_str, state);
@@ -267,7 +309,7 @@ static esp_err_t ble_execute_function_internal(uint8_t stack_id,
     // Execute GPIO end sequences
     for (uint8_t i = 0; i < func_cfg->gpio_end_count; i++) {
       char pin_str[8];
-      snprintf(pin_str, sizeof(pin_str), "%d%d", stack_id, func_cfg->gpio_end[i]);
+      ble_format_pin_str(stack_id, func_cfg->gpio_end[i], pin_str, sizeof(pin_str));
       bool state = func_cfg->gpio_end_state[i];
 
       ret = module_gpio_write(stack_id, pin_str, state);
@@ -372,7 +414,7 @@ static esp_err_t ble_execute_function_internal(uint8_t stack_id,
   // Step 6: Execute GPIO end sequences via Module_Config_Controller wrapper
   for (uint8_t i = 0; i < func_cfg->gpio_end_count; i++) {
     char pin_str[8];
-    snprintf(pin_str, sizeof(pin_str), "%d%d", stack_id, func_cfg->gpio_end[i]);
+    ble_format_pin_str(stack_id, func_cfg->gpio_end[i], pin_str, sizeof(pin_str));
     bool state = func_cfg->gpio_end_state[i];
 
     ret = module_gpio_write(stack_id, pin_str, state);
@@ -840,7 +882,7 @@ esp_err_t ble_handler_execute_command_with_config(uint8_t stack_id,
   // Step 1: Execute GPIO start sequences (from JSON config)
   for (uint8_t i = 0; i < func_config->gpio_start_count; i++) {
     char pin_str[8];
-    snprintf(pin_str, sizeof(pin_str), "%d%d", stack_id, func_config->gpio_start[i]);
+    ble_format_pin_str(stack_id, func_config->gpio_start[i], pin_str, sizeof(pin_str));
     bool state = func_config->gpio_start_state[i];
 
     ret = module_gpio_write(stack_id, pin_str, state);
@@ -943,7 +985,7 @@ esp_err_t ble_handler_execute_command_with_config(uint8_t stack_id,
   // Step 5: Execute GPIO end sequences (from JSON config)
   for (uint8_t i = 0; i < func_config->gpio_end_count; i++) {
     char pin_str[8];
-    snprintf(pin_str, sizeof(pin_str), "%d%d", stack_id, func_config->gpio_end[i]);
+    ble_format_pin_str(stack_id, func_config->gpio_end[i], pin_str, sizeof(pin_str));
     bool state = func_config->gpio_end_state[i];
 
     ret = module_gpio_write(stack_id, pin_str, state);

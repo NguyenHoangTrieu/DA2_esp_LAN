@@ -106,6 +106,17 @@ esp_err_t config_save_module_json_to_nvs(uint8_t stack_id, const char *json_str,
 esp_err_t config_load_module_json_from_nvs(uint8_t stack_id, char **json_str, uint16_t *json_len);
 
 /**
+ * @brief Delete module JSON config from NVS for a specific stack
+ *
+ * Call this when a module swap is detected on boot to prevent a stale
+ * config from being applied to the newly installed module.
+ *
+ * @param stack_id Stack ID (0 or 1)
+ * @return esp_err_t ESP_OK on success or if the key was already absent
+ */
+esp_err_t config_delete_module_json_from_nvs(uint8_t stack_id);
+
+/**
  * @brief Save global config variables to NVS (stack IDs, etc.)
  * @return esp_err_t ESP_OK on success
  */

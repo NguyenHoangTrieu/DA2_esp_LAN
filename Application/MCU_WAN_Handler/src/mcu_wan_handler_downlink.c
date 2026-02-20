@@ -352,8 +352,18 @@ static void send_ack_to_wan(ack_type_t ack_type) {
  * - stack2_json: JSON config for stack 2 (if configured)
  */
 static void send_lan_config_response(void) {
-  // Build config response packet: [C][Q][length(2)][config_data]
-  uint8_t config_packet[4096];  // Increased buffer for JSON configs
+  // Get JSON lengths (used as config-present indicator for WAN MCU)
+  // NOTE: Only send the LENGTH, not the JSON body.
+  // The SPI protocol uses a fixed 1024-byte frame. Sending a large JSON
+  // body would break framing — WAN MCU only needs len>0 to know JSON
+  // is already configured (and skip re-sending it).
+  uint16_t stack1_json_len = 0;
+  uint16_t stack2_json_len = 0;
+  config_get_stack_1_json(&stack1_json_len);
+  config_get_stack_2_json(&stack2_json_len);
+
+  // Fixed small buffer — payload is always < 200 bytes without JSON body
+  uint8_t config_packet[256];
   uint16_t offset = 0;
 
   // Prefix: CQ (Config Query Response)
@@ -365,51 +375,18 @@ static void send_lan_config_response(void) {
   offset += 2;
 
   // Format: key=value|key=value|...
+  offset += snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
+                     "stack1_id=%s|", config_get_stack_1_id());
+  offset += snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
+                     "stack2_id=%s|", config_get_stack_2_id());
+  offset += snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
+                     "rs485_baudrate=%lu|", (unsigned long)config_get_rs485_baudrate());
 
-  // STACK MODULE IDs (from config_global)
-  offset +=
-      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
-               "stack1_id=%s|", config_get_stack_1_id());
-  offset +=
-      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
-               "stack2_id=%s|", config_get_stack_2_id());
-
-  // RS485 CONFIG (if any stack is RS485)
-  offset +=
-      snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
-               "rs485_baudrate=%lu|", (unsigned long)config_get_rs485_baudrate());
-
-  // STACK 1 JSON CONFIG (if configured)
-  uint16_t stack1_json_len = 0;
-  const char* stack1_json = config_get_stack_1_json(&stack1_json_len);
-  if (stack1_json_len > 0 && stack1_json_len < (sizeof(config_packet) - offset - 20)) {
-    offset += snprintf((char *)&config_packet[offset], 
-                      sizeof(config_packet) - offset,
-                      "stack1_json_len=%u|", stack1_json_len);
-    memcpy(&config_packet[offset], stack1_json, stack1_json_len);
-    offset += stack1_json_len;
-    config_packet[offset++] = '|';
-  } else {
-    offset += snprintf((char *)&config_packet[offset], 
-                      sizeof(config_packet) - offset,
-                      "stack1_json_len=0|");
-  }
-
-  // STACK 2 JSON CONFIG (if configured)
-  uint16_t stack2_json_len = 0;
-  const char* stack2_json = config_get_stack_2_json(&stack2_json_len);
-  if (stack2_json_len > 0 && stack2_json_len < (sizeof(config_packet) - offset - 20)) {
-    offset += snprintf((char *)&config_packet[offset], 
-                      sizeof(config_packet) - offset,
-                      "stack2_json_len=%u|", stack2_json_len);
-    memcpy(&config_packet[offset], stack2_json, stack2_json_len);
-    offset += stack2_json_len;
-    config_packet[offset++] = '|';
-  } else {
-    offset += snprintf((char *)&config_packet[offset], 
-                      sizeof(config_packet) - offset,
-                      "stack2_json_len=0|");
-  }
+  // Send JSON length only (not JSON body) — WAN uses len>0 to skip re-sending
+  offset += snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
+                     "stack1_json_len=%u|", stack1_json_len);
+  offset += snprintf((char *)&config_packet[offset], sizeof(config_packet) - offset,
+                     "stack2_json_len=%u|", stack2_json_len);
 
   // Fill in the length (excluding prefix and length field itself)
   uint16_t data_length = offset - 4;
@@ -421,12 +398,10 @@ static void send_lan_config_response(void) {
       wan_comm_send_command(g_wan_handle, config_packet, offset);
 
   if (status == WAN_COMM_OK) {
-    ESP_LOGI(TAG, "LAN config response sent to WAN MCU: %u bytes", offset);
-    ESP_LOGI(TAG, "  Stack 1 ID: %s", config_get_stack_1_id());
-    ESP_LOGI(TAG, "  Stack 2 ID: %s", config_get_stack_2_id());
+    ESP_LOGI(TAG, "LAN config response sent: %u bytes", offset);
+    ESP_LOGI(TAG, "  Stack 1 ID: %s, JSON: %u bytes", config_get_stack_1_id(), stack1_json_len);
+    ESP_LOGI(TAG, "  Stack 2 ID: %s, JSON: %u bytes", config_get_stack_2_id(), stack2_json_len);
     ESP_LOGI(TAG, "  RS485 baudrate: %lu", config_get_rs485_baudrate());
-    ESP_LOGI(TAG, "  Stack 1 JSON: %u bytes", stack1_json_len);
-    ESP_LOGI(TAG, "  Stack 2 JSON: %u bytes", stack2_json_len);
   } else {
     ESP_LOGE(TAG, "Failed to send LAN config response");
   }

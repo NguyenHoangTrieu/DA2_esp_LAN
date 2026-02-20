@@ -45,21 +45,10 @@ extern uint32_t g_rs485_baudrate;
 /**
  * @brief JSON config for Stack 1 (if configured via BL:JSON command)
  */
-extern char g_stack_1_json_config[MAX_JSON_CONFIG_SIZE];
-
-/**
- * @brief JSON config length for Stack 1
- */
+extern char *g_stack_1_json_config;
 extern uint16_t g_stack_1_json_len;
 
-/**
- * @brief JSON config for Stack 2 (if configured via BL:JSON command)
- */
-extern char g_stack_2_json_config[MAX_JSON_CONFIG_SIZE];
-
-/**
- * @brief JSON config length for Stack 2
- */
+extern char *g_stack_2_json_config;
 extern uint16_t g_stack_2_json_len;
 
 /* ===== Getter Functions ===== */

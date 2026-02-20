@@ -149,6 +149,52 @@ esp_err_t config_load_module_json_from_nvs(uint8_t stack_id, char **json_str, ui
   return ESP_OK;
 }
 
+/**
+ * @brief Delete module JSON config from NVS for a specific stack
+ *
+ * Used when a module swap is detected on boot so that a stale config
+ * belonging to the previous module is not applied to the new one.
+ *
+ * @param stack_id Stack ID (0 or 1)
+ * @return esp_err_t ESP_OK on success or if key was already absent
+ */
+esp_err_t config_delete_module_json_from_nvs(uint8_t stack_id) {
+  if (stack_id >= 2) {
+    ESP_LOGE(TAG, "Invalid stack_id %d for JSON delete", stack_id);
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  nvs_handle_t handle;
+  esp_err_t ret = nvs_open(NVS_NAMESPACE_MODULE_CONFIG, NVS_READWRITE, &handle);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to open NVS namespace for JSON delete: %s", esp_err_to_name(ret));
+    return ret;
+  }
+
+  const char *key = (stack_id == 0) ? NVS_KEY_STACK0_JSON : NVS_KEY_STACK1_JSON;
+  ret = nvs_erase_key(handle, key);
+
+  if (ret == ESP_ERR_NVS_NOT_FOUND) {
+    /* Key was already absent — not an error */
+    ret = ESP_OK;
+  } else if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to erase NVS key for Stack %d: %s", stack_id, esp_err_to_name(ret));
+    nvs_close(handle);
+    return ret;
+  } else {
+    ret = nvs_commit(handle);
+    if (ret != ESP_OK) {
+      ESP_LOGE(TAG, "Failed to commit NVS after JSON erase for Stack %d: %s",
+               stack_id, esp_err_to_name(ret));
+    } else {
+      ESP_LOGI(TAG, "Module JSON erased from NVS for Stack %d", stack_id);
+    }
+  }
+
+  nvs_close(handle);
+  return ret;
+}
+
 /* ===== Global Config Variables NVS Functions ===== */
 
 /**

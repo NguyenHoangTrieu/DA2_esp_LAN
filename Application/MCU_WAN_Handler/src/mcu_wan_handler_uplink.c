@@ -245,7 +245,6 @@ static void uplink_handler_task(void *pvParameters) {
 
   TickType_t last_rtc_request = xTaskGetTickCount();
   TickType_t last_flush = xTaskGetTickCount();
-  TickType_t last_mismatch_check = xTaskGetTickCount();
   TickType_t last_sd_retry_attempt = 0;  // Track last SD retry to avoid spam
   uint8_t consecutive_sd_failures = 0;   // Track consecutive failures for same file
   uplink_item_t uplink_item;

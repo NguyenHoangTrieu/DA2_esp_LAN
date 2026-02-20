@@ -19,15 +19,17 @@ static const struct {
   tca_port_t port;
   uint8_t pin;
 } stack1_gpio_map[STACK_GPIO_PIN_COUNT] = {
-    {TCA_PORT_2, 1}, // GPIO 1 -> P21
-    {TCA_PORT_2, 2}, // GPIO 2 -> P22
-    {TCA_PORT_2, 3}, // GPIO 3 -> P23
-    {TCA_PORT_2, 4}, // GPIO 4 -> P24
-    {TCA_PORT_2, 5}, // GPIO 5 -> P25
-    {TCA_PORT_1, 3}, // GPIO 6 -> P13
-    {TCA_PORT_1, 4}, // GPIO 7 -> P14
-    {TCA_PORT_1, 5}, // GPIO 8 -> P15
-    {TCA_PORT_1, 6}  // GPIO 9 -> P16
+    {TCA_PORT_2, 1}, // GPIO 1  -> P21
+    {TCA_PORT_2, 2}, // GPIO 2  -> P22
+    {TCA_PORT_2, 3}, // GPIO 3  -> P23
+    {TCA_PORT_2, 4}, // GPIO 4  -> P24
+    {TCA_PORT_2, 5}, // GPIO 5  -> P25
+    {TCA_PORT_1, 3}, // GPIO 6  -> P13
+    {TCA_PORT_1, 4}, // GPIO 7  -> P14
+    {TCA_PORT_1, 5}, // GPIO 8  -> P15
+    {TCA_PORT_1, 6}, // GPIO 9  -> P16
+    {TCA_PORT_1, 7}, // WAKE#   -> P17
+    {TCA_PORT_2, 0}  // PERST#  -> P20
 };
 
 // Stack 2 GPIO mapping (LAN2): GPIO number -> {TCA_PORT, TCA_PIN}
@@ -35,15 +37,17 @@ static const struct {
   tca_port_t port;
   uint8_t pin;
 } stack2_gpio_map[STACK_GPIO_PIN_COUNT] = {
-    {TCA_PORT_0, 6}, // GPIO 1 -> P06
-    {TCA_PORT_0, 7}, // GPIO 2 -> P07
-    {TCA_PORT_1, 0}, // GPIO 3 -> P10
-    {TCA_PORT_1, 1}, // GPIO 4 -> P11
-    {TCA_PORT_1, 2}, // GPIO 5 -> P12
-    {TCA_PORT_0, 0}, // GPIO 6 -> P00
-    {TCA_PORT_0, 1}, // GPIO 7 -> P01
-    {TCA_PORT_0, 2}, // GPIO 8 -> P02
-    {TCA_PORT_0, 3}  // GPIO 9 -> P03
+    {TCA_PORT_0, 6}, // GPIO 1  -> P06
+    {TCA_PORT_0, 7}, // GPIO 2  -> P07
+    {TCA_PORT_1, 0}, // GPIO 3  -> P10
+    {TCA_PORT_1, 1}, // GPIO 4  -> P11
+    {TCA_PORT_1, 2}, // GPIO 5  -> P12
+    {TCA_PORT_0, 0}, // GPIO 6  -> P00
+    {TCA_PORT_0, 1}, // GPIO 7  -> P01
+    {TCA_PORT_0, 2}, // GPIO 8  -> P02
+    {TCA_PORT_0, 3}, // GPIO 9  -> P03
+    {TCA_PORT_0, 4}, // WAKE#   -> P04
+    {TCA_PORT_0, 5}  // PERST#  -> P05
 };
 
 /* ===== Internal State ===== */
@@ -124,8 +128,8 @@ esp_err_t stack_handler_init(void) {
   g_initialized = true;
 
   ESP_LOGI(TAG, "Stack handler initialized");
-  ESP_LOGI(TAG, "  Stack 1 GPIO mapping: P02-P07, P10-P12");
-  ESP_LOGI(TAG, "  Stack 2 GPIO mapping: P15-P17, P20-P25");
+  ESP_LOGI(TAG, "  Stack 1 (LAN1): GPIO1-9=P21-P25,P13-P16 | WAKE#=P17 | PERST#=P20");
+  ESP_LOGI(TAG, "  Stack 2 (LAN2): GPIO1-9=P06,P07,P10-P12,P00-P03 | WAKE#=P04 | PERST#=P05");
 
   return ESP_OK;
 }

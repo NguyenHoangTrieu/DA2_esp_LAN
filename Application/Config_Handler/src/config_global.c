@@ -5,6 +5,7 @@
 
 #include "config_global.h"
 #include "esp_log.h"
+#include <stdlib.h>
 #include <string.h>
 
 static const char *TAG = "config_global";
@@ -14,10 +15,10 @@ char g_stack_1_id[4] = MODULE_ID_NONE;
 char g_stack_2_id[4] = MODULE_ID_NONE;
 uint32_t g_rs485_baudrate = 115200; // Default baudrate
 
-char g_stack_1_json_config[MAX_JSON_CONFIG_SIZE] = {0};
+char *g_stack_1_json_config = NULL;
 uint16_t g_stack_1_json_len = 0;
 
-char g_stack_2_json_config[MAX_JSON_CONFIG_SIZE] = {0};
+char *g_stack_2_json_config = NULL;
 uint16_t g_stack_2_json_len = 0;
 
 /* ===== Getter Functions ===== */
@@ -72,42 +73,55 @@ void config_set_rs485_baudrate(uint32_t baudrate) {
 }
 
 void config_set_stack_1_json(const char *json_str, uint16_t len) {
-    if (!json_str || len == 0 || len >= MAX_JSON_CONFIG_SIZE) {
+    if (!json_str || len == 0) {
         ESP_LOGE(TAG, "Invalid Stack 1 JSON config (len=%u)", len);
         return;
     }
-    
+
+    free(g_stack_1_json_config);
+    g_stack_1_json_config = malloc(len + 1);
+    if (!g_stack_1_json_config) {
+        ESP_LOGE(TAG, "Failed to alloc Stack 1 JSON (%u bytes)", len);
+        g_stack_1_json_len = 0;
+        return;
+    }
     memcpy(g_stack_1_json_config, json_str, len);
     g_stack_1_json_config[len] = '\0';
     g_stack_1_json_len = len;
-    
     ESP_LOGI(TAG, "Stack 1 JSON config saved (%u bytes)", len);
 }
 
 void config_set_stack_2_json(const char *json_str, uint16_t len) {
-    if (!json_str || len == 0 || len >= MAX_JSON_CONFIG_SIZE) {
+    if (!json_str || len == 0) {
         ESP_LOGE(TAG, "Invalid Stack 2 JSON config (len=%u)", len);
         return;
     }
-    
+
+    free(g_stack_2_json_config);
+    g_stack_2_json_config = malloc(len + 1);
+    if (!g_stack_2_json_config) {
+        ESP_LOGE(TAG, "Failed to alloc Stack 2 JSON (%u bytes)", len);
+        g_stack_2_json_len = 0;
+        return;
+    }
     memcpy(g_stack_2_json_config, json_str, len);
     g_stack_2_json_config[len] = '\0';
     g_stack_2_json_len = len;
-    
     ESP_LOGI(TAG, "Stack 2 JSON config saved (%u bytes)", len);
 }
 
 void config_global_init(void) {
-    // Initialize with default values
     strncpy(g_stack_1_id, MODULE_ID_NONE, sizeof(g_stack_1_id));
     strncpy(g_stack_2_id, MODULE_ID_NONE, sizeof(g_stack_2_id));
     g_rs485_baudrate = 115200;
-    
-    memset(g_stack_1_json_config, 0, sizeof(g_stack_1_json_config));
+
+    free(g_stack_1_json_config);
+    g_stack_1_json_config = NULL;
     g_stack_1_json_len = 0;
-    
-    memset(g_stack_2_json_config, 0, sizeof(g_stack_2_json_config));
+
+    free(g_stack_2_json_config);
+    g_stack_2_json_config = NULL;
     g_stack_2_json_len = 0;
-    
+
     ESP_LOGI(TAG, "Config globals initialized");
 }
