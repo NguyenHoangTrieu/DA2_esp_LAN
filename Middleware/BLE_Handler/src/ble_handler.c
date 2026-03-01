@@ -20,7 +20,85 @@ static const char *TAG = "BLE_HANDLER";
 
 #define BLE_BINARY_CMD_MARKER 0xC0   // Binary protocol marker
 #define BLE_CMD_MAX_LEN 128          // Max command string length
-#define BLE_RESPONSE_MAX_LEN 256     // Max response buffer size
+#define BLE_RESPONSE_MAX_LEN 1024    // Max response accumulation buffer
+#define BLE_RESPONSE_CHUNK 128       // UART read chunk size per iteration
+
+/**
+ * @brief Read from UART, accumulating chunks until expect_response is found or timeout.
+ *
+ * Unlike a single uart_read_bytes() call (which returns as soon as the internal
+ * buffer fills, e.g. after the first 256 bytes of scan results), this function
+ * keeps reading 128-byte chunks with a short inter-read timeout and appends them
+ * to out_buf until the terminator string (typically "OK" or "ERROR") is found or
+ * the overall timeout_ms elapses.  This is required for streaming commands like
+ * AT+SCAN=5000 which produce many +SCAN: lines BEFORE the final OK.
+ *
+ * @param stack_id         Stack identifier
+ * @param port_type        Communication port
+ * @param expect_response  Terminator string to wait for (NULL/"" to skip check)
+ * @param timeout_ms       Maximum total wait time in milliseconds
+ * @param out_buf          Caller-allocated buffer (must be '\0'-initialised)
+ * @param out_max          sizeof(out_buf) including null terminator
+ * @param out_len          Bytes written to out_buf (not counting '\0')
+ * @return ESP_OK if terminator found; ESP_ERR_TIMEOUT otherwise
+ */
+static esp_err_t ble_read_until_terminator(uint8_t stack_id,
+                                            comm_port_type_t port_type,
+                                            const char *expect_response,
+                                            uint32_t timeout_ms,
+                                            char *out_buf,
+                                            size_t out_max,
+                                            size_t *out_len)
+{
+    size_t expect_len = (expect_response != NULL) ? strlen(expect_response) : 0;
+    TickType_t start_tick  = xTaskGetTickCount();
+    TickType_t timeout_tick = pdMS_TO_TICKS(timeout_ms);
+    uint8_t chunk[BLE_RESPONSE_CHUNK];
+    size_t  acc = 0;
+    bool    found = false;
+
+    out_buf[0] = '\0';
+    *out_len   = 0;
+
+    while ((xTaskGetTickCount() - start_tick) < timeout_tick) {
+        /* Use a short per-chunk timeout so we do not block indefinitely
+         * between bursts of characters (e.g. scan result lines). */
+        TickType_t elapsed  = xTaskGetTickCount() - start_tick;
+        TickType_t left     = timeout_tick - elapsed;
+        uint32_t   chunk_ms = (uint32_t)(left * portTICK_PERIOD_MS);
+        if (chunk_ms > 200U) chunk_ms = 200U;
+
+        size_t    chunk_len = 0;
+        esp_err_t r = module_bus_read(stack_id, port_type,
+                                      chunk, sizeof(chunk) - 1,
+                                      chunk_ms, &chunk_len);
+        if (r != ESP_OK && r != ESP_ERR_TIMEOUT) {
+            break;  /* Hard bus error */
+        }
+
+        if (chunk_len > 0) {
+            size_t space = out_max - 1 - acc;
+            if (chunk_len > space) chunk_len = space;
+            if (chunk_len > 0) {
+                memcpy(out_buf + acc, chunk, chunk_len);
+                acc += chunk_len;
+                out_buf[acc] = '\0';
+            }
+            /* Check for terminator in accumulated buffer */
+            if (expect_len > 0 && strstr(out_buf, expect_response) != NULL) {
+                found = true;
+                break;
+            }
+            if (expect_len == 0) {
+                found = true;
+                break;
+            }
+        }
+    }
+
+    *out_len = acc;
+    return found ? ESP_OK : ESP_ERR_TIMEOUT;
+}
 #define BLE_HEX_DATA_MAX_LEN 512     // Max hex data buffer size
 #define BLE_MAX_STACKS 2             // Number of stacks (0 and 1)
 
@@ -366,34 +444,25 @@ static esp_err_t ble_execute_function_internal(uint8_t stack_id,
   }
 
   // Skip module_bus_read if no response expected and timeout is 0
-  uint8_t response_buffer[BLE_RESPONSE_MAX_LEN] = {0};
+  char response_buffer[BLE_RESPONSE_MAX_LEN] = {0};
   size_t response_len = 0;
   bool skip_read = (expect_len == 0 && func_cfg->timeout_ms == 0);
 
   if (!skip_read) {
-    // Step 4: Wait for response with timeout
-    ret = module_bus_read(stack_id, port_type, response_buffer,
-                          sizeof(response_buffer) - 1, func_cfg->timeout_ms,
-                          &response_len);
-    if (ret != ESP_OK && ret != ESP_ERR_TIMEOUT) {
-      ESP_LOGE(TAG, "Failed to receive response: %s", esp_err_to_name(ret));
-      if (result)
-        result->status = ret;
-      return ret;
-    }
+    // Step 4: Read until expect_response found or timeout
+    // Use ble_read_until_terminator instead of a single uart_read_bytes so that
+    // streaming commands (AT+SCAN, AT+DISC, AT+CHARS …) which produce many lines
+    // of data before the final OK are fully captured within the timeout window.
+    ret = ble_read_until_terminator(stack_id, port_type,
+                                    expect_len > 0 ? func_cfg->expect_response : NULL,
+                                    func_cfg->timeout_ms,
+                                    response_buffer, sizeof(response_buffer),
+                                    &response_len);
 
     // Step 5: Verify response matches expect_response
-    bool response_valid = false;
+    bool response_valid = (ret == ESP_OK);
     if (response_len > 0) {
-      response_buffer[response_len] = '\0';
-      ESP_LOGD(TAG, "Received response: %s", (char *)response_buffer);
-
-      // Check if response contains expected string
-      if (expect_len == 0 ||
-          strstr((const char *)response_buffer, func_cfg->expect_response) !=
-              NULL) {
-        response_valid = true;
-      }
+      ESP_LOGD(TAG, "Received response (%u bytes)", (unsigned)response_len);
     }
 
     if (!response_valid && expect_len > 0) {
@@ -402,8 +471,8 @@ static esp_err_t ble_execute_function_internal(uint8_t stack_id,
       if (result) {
         result->status = ESP_ERR_INVALID_RESPONSE;
         snprintf(result->response, sizeof(result->response), "%s",
-                 response_len > 0 ? (const char *)response_buffer : "TIMEOUT");
-        result->response_len = response_len;
+                 response_len > 0 ? response_buffer : "TIMEOUT");
+        result->response_len = (uint16_t)response_len;
       }
       return ESP_ERR_INVALID_RESPONSE;
     }
@@ -435,8 +504,8 @@ static esp_err_t ble_execute_function_internal(uint8_t stack_id,
   if (result) {
     result->status = ESP_OK;
     snprintf(result->response, sizeof(result->response), "%s",
-             response_len > 0 ? (const char *)response_buffer : "OK");
-    result->response_len = response_len;
+             response_len > 0 ? response_buffer : "OK");
+    result->response_len = (uint16_t)response_len;
     result->execution_time_ms = exec_time;
   }
 
@@ -1002,30 +1071,25 @@ esp_err_t ble_handler_execute_command_with_config(uint8_t stack_id,
     }
 
     // Step 4: Wait for response (from JSON config timeout)
-    uint8_t response_buffer[BLE_RESPONSE_MAX_LEN] = {0};
+    char response_buffer[BLE_RESPONSE_MAX_LEN] = {0};
     size_t response_len = 0;
     bool skip_read = (expect_len == 0 && func_config->timeout_ms == 0);
 
     if (!skip_read) {
-      ret = module_bus_read(stack_id, port_type, response_buffer,
-                            sizeof(response_buffer) - 1, func_config->timeout_ms,
-                            &response_len);
-      if (ret != ESP_OK && ret != ESP_ERR_TIMEOUT) {
-        ESP_LOGE(TAG, "Failed to receive response: %s", esp_err_to_name(ret));
-        if (result) result->status = ret;
-        return ret;
-      }
+      // Step 4: Read until expect_response found or timeout.
+      // Using ble_read_until_terminator instead of a single uart_read_bytes so that
+      // streaming commands (AT+SCAN, AT+DISC, AT+CHARS ...) which emit many data
+      // lines before the final OK are fully captured within the timeout window.
+      ret = ble_read_until_terminator(stack_id, port_type,
+                                      expect_len > 0 ? func_config->expect_response : NULL,
+                                      func_config->timeout_ms,
+                                      response_buffer, sizeof(response_buffer),
+                                      &response_len);
 
       // Verify response matches expect_response (from JSON)
-      bool response_valid = false;
+      bool response_valid = (ret == ESP_OK);
       if (response_len > 0) {
-        response_buffer[response_len] = '\0';
-        ESP_LOGD(TAG, "Received response: %s", (char *)response_buffer);
-
-        if (expect_len == 0 ||
-            strstr((const char *)response_buffer, func_config->expect_response) != NULL) {
-          response_valid = true;
-        }
+        ESP_LOGD(TAG, "Received response (%u bytes)", (unsigned)response_len);
       }
 
       if (!response_valid && expect_len > 0) {
@@ -1034,8 +1098,8 @@ esp_err_t ble_handler_execute_command_with_config(uint8_t stack_id,
         if (result) {
           result->status = ESP_ERR_INVALID_RESPONSE;
           snprintf(result->response, sizeof(result->response), "%s",
-                   response_len > 0 ? (const char *)response_buffer : "TIMEOUT");
-          result->response_len = response_len;
+                   response_len > 0 ? response_buffer : "TIMEOUT");
+          result->response_len = (uint16_t)response_len;
         }
         return ESP_ERR_INVALID_RESPONSE;
       }
@@ -1043,8 +1107,8 @@ esp_err_t ble_handler_execute_command_with_config(uint8_t stack_id,
       // Copy response to result
       if (result && response_len > 0) {
         snprintf(result->response, sizeof(result->response), "%s",
-                 (const char *)response_buffer);
-        result->response_len = response_len;
+                 response_buffer);
+        result->response_len = (uint16_t)response_len;
       }
     } else {
       ESP_LOGD(TAG, "Skipping response read (no response expected, timeout=0)");

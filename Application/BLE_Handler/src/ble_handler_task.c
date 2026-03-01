@@ -159,14 +159,14 @@ static void ble_downlink_task(void *pvParameters) {
             // so the entire CFBL packet is a single line — prevents splitlines()
             // in the PC App from breaking multi-line AT responses.
             {
-                char resp_packet[512];
+                char resp_packet[1536];  // 10-byte prefix + 1024 payload + margin
                 int resp_len;
                 uint16_t actual_resp_len = (result.response_len > 0)
                     ? result.response_len
                     : (uint16_t)strlen(result.response);
 
                 // Clean response: replace \r\n sequences with \x1E, collapse multiples
-                char clean_resp[256];
+                char clean_resp[1024];
                 int ci = 0;
                 for (int i = 0; i < actual_resp_len && ci < (int)sizeof(clean_resp) - 1; i++) {
                     char c = result.response[i];
