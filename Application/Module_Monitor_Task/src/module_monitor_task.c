@@ -528,37 +528,41 @@ static void module_monitor_task_impl(void *pvParameters) {
         config_save_module_json_to_nvs(msg.stack_id, msg.json_str,
                                        msg.json_len);
 
-        // Auto-start handler task FIRST (this initializes BLE middleware)
-        ret = module_monitor_start_handler(msg.stack_id);
-        if (ret != ESP_OK) {
-          ESP_LOGE(TAG, "Failed to start handler for Stack %d", msg.stack_id);
-          // Send failure response
-          uint8_t error_resp[] = "CFBL:JSON:FAIL:START";
-          mcu_wan_enqueue_uplink(HANDLER_BLE, error_resp, sizeof(error_resp) - 1);
-          free(msg.json_str);
-          continue;
+        // Start handler task if not already running
+        module_info_t *info = &g_monitor_state.module_info[msg.stack_id];
+        bool handler_already_running = info->is_running;
+
+        if (!handler_already_running) {
+          ret = module_monitor_start_handler(msg.stack_id);
+          if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to start handler for Stack %d", msg.stack_id);
+            uint8_t error_resp[] = "CFBL:JSON:FAIL:START";
+            mcu_wan_enqueue_uplink(HANDLER_BLE, error_resp, sizeof(error_resp) - 1);
+            free(msg.json_str);
+            continue;
+          }
+        } else {
+          ESP_LOGI(TAG, "Handler already running for Stack %d, reloading config", msg.stack_id);
         }
 
-        // Load config into handler task AFTER starting (middleware is now initialized)
-        module_info_t *info = &g_monitor_state.module_info[msg.stack_id];
+        // Load config into handler task (works for both fresh start and reload)
         if (info->module_type == MODULE_TYPE_BLE) {
           esp_err_t cfg_ret = ble_handler_task_load_config(msg.stack_id, 
                                                             info->json_config_str, 
                                                             info->json_config_len);
           if (cfg_ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to load config into BLE handler for Stack %d", msg.stack_id);
-            // Send failure response
             uint8_t error_resp[] = "CFBL:JSON:FAIL:LOAD";
             mcu_wan_enqueue_uplink(HANDLER_BLE, error_resp, sizeof(error_resp) - 1);
           } else {
-            ESP_LOGI(TAG, "Handler started and config loaded for Stack %d", msg.stack_id);
-            // Send success response
+            ESP_LOGI(TAG, "%s config loaded for Stack %d",
+                     handler_already_running ? "Reloaded" : "Handler started and", msg.stack_id);
             uint8_t ok_resp[] = "CFBL:JSON:OK";
             mcu_wan_enqueue_uplink(HANDLER_BLE, ok_resp, sizeof(ok_resp) - 1);
           }
         } else {
-          ESP_LOGI(TAG, "Handler started successfully for Stack %d", msg.stack_id);
-          // Send success response
+          ESP_LOGI(TAG, "Handler %s for Stack %d",
+                   handler_already_running ? "config reloaded" : "started successfully", msg.stack_id);
           uint8_t ok_resp[] = "CFBL:JSON:OK";
           mcu_wan_enqueue_uplink(HANDLER_BLE, ok_resp, sizeof(ok_resp) - 1);
         }

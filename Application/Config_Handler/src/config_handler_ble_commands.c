@@ -93,6 +93,13 @@ esp_err_t config_parse_ble_command(const uint8_t *data, uint16_t len) {
     esp_err_t ret = ble_handler_get_function_by_command(stack_id, command, &func_config);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "BLE CMD: No matching function for '%.*s'", cmd_len, command);
+        // Notify App: command not recognized by JSON config
+        char err_resp[64];
+        int err_len = snprintf(err_resp, sizeof(err_resp),
+                               "CFBL:%d:FAIL:NO_MATCH", stack_id);
+        if (err_len > 0) {
+            mcu_wan_enqueue_uplink(HANDLER_BLE, (uint8_t *)err_resp, (uint16_t)err_len);
+        }
         return ESP_FAIL;
     }
     
@@ -116,6 +123,13 @@ esp_err_t config_parse_ble_command(const uint8_t *data, uint16_t len) {
     ret = ble_handler_task_execute_command(&cmd_req);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "BLE CMD: Failed to enqueue command: %s", esp_err_to_name(ret));
+        // Notify App: command queue full or handler not running
+        char err_resp[64];
+        int err_len = snprintf(err_resp, sizeof(err_resp),
+                               "CFBL:%d:FAIL:QUEUE_FULL", stack_id);
+        if (err_len > 0) {
+            mcu_wan_enqueue_uplink(HANDLER_BLE, (uint8_t *)err_resp, (uint16_t)err_len);
+        }
         return ret;
     }
     

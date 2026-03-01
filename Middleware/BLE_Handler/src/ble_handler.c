@@ -797,6 +797,33 @@ esp_err_t ble_handler_wakeup(uint8_t stack_id) {
 
 /* ===== Optional Functions & Command Matching ===== */
 
+/**
+ * Function name table for GPIO-only trigger resolution.
+ * Indices match BLE_FUNCTION_NAMES in json_ble_config_parser.c.
+ */
+static const char *s_ble_func_names[BLE_FUNC_COUNT] = {
+    "MODULE_HW_RESET",               // 0
+    "MODULE_SW_RESET",               // 1
+    "MODULE_FACTORY_RESET",          // 2
+    "MODULE_GET_INFO",               // 3
+    "MODULE_SET_NAME",               // 4
+    "MODULE_SET_COMM_CONFIG",        // 5
+    "MODULE_SET_RF_PARAMS",          // 6
+    "MODULE_ENTER_CMD_MODE",         // 7
+    "MODULE_ENTER_DATA_MODE",        // 8
+    "MODULE_START_BROADCAST",        // 9
+    "MODULE_CONNECT",                // 10
+    "MODULE_DISCONNECT",             // 11
+    "MODULE_GET_CONNECTION_STATUS",  // 12
+    "MODULE_ENTER_SLEEP",            // 13
+    "MODULE_WAKEUP",                 // 14
+    "MODULE_START_DISCOVERY",        // 15
+    "MODULE_SEND_DATA",              // 16
+    "MODULE_GET_DIAGNOSTICS",        // 17
+    "MODULE_DISCOVER_SERVICES",      // 18
+    "MODULE_DISCOVER_CHARACTERISTICS",// 19
+};
+
 esp_err_t ble_handler_get_function_by_command(uint8_t stack_id,
                                                const char *command,
                                                ble_function_config_t *func_config) {
@@ -809,36 +836,63 @@ esp_err_t ble_handler_get_function_by_command(uint8_t stack_id,
   }
 
   size_t cmd_len = strlen(command);
-  
-  // Search all functions for prefix or exact match
+
+  // Pass 1: prefix / exact match on cfg->command (AT strings)
   for (int func_id = 0; func_id < BLE_FUNC_COUNT; func_id++) {
     ble_function_config_t *cfg = &g_ble_handler.config[stack_id].functions[func_id];
-    
+
     if (!cfg->available) {
       continue;
     }
-    
+
     size_t cfg_cmd_len = strlen(cfg->command);
-    
+    // Strip trailing \r\n for comparison so app doesn't need to include them
+    while (cfg_cmd_len > 0 &&
+           (cfg->command[cfg_cmd_len - 1] == '\n' ||
+            cfg->command[cfg_cmd_len - 1] == '\r')) {
+      cfg_cmd_len--;
+    }
+
+    if (cfg_cmd_len == 0) {
+      continue; // GPIO-only function — handled by pass 2 below
+    }
+
     // For commands starting with "AT+" - try prefix match
     if (strncmp(cfg->command, "AT+", 3) == 0) {
-      // Prefix match: command must start with cfg->command
-      if (cmd_len >= cfg_cmd_len && 
+      // Prefix match: incoming command must start with cfg->command (stripped)
+      if (cmd_len >= cfg_cmd_len &&
           strncmp(command, cfg->command, cfg_cmd_len) == 0) {
         memcpy(func_config, cfg, sizeof(ble_function_config_t));
-        ESP_LOGI(TAG, "Matched prefix: %s (func_id=%d)", cfg->command, func_id);
+        ESP_LOGI(TAG, "Matched prefix: %.*s (func_id=%d)",
+                 (int)cfg_cmd_len, cfg->command, func_id);
         return ESP_OK;
       }
     } else {
-      // Exact match for non-AT commands (HW_RESET, etc.)
-      if (cmd_len == cfg_cmd_len && strcmp(command, cfg->command) == 0) {
+      // Exact match for non-AT commands
+      if (cmd_len == cfg_cmd_len &&
+          strncmp(command, cfg->command, cfg_cmd_len) == 0) {
         memcpy(func_config, cfg, sizeof(ble_function_config_t));
-        ESP_LOGI(TAG, "Matched exact: %s (func_id=%d)", cfg->command, func_id);
+        ESP_LOGI(TAG, "Matched exact: %.*s (func_id=%d)",
+                 (int)cfg_cmd_len, cfg->command, func_id);
         return ESP_OK;
       }
     }
   }
-  
+
+  // Pass 2: function_name fallback (for GPIO-only triggers: MODULE_HW_RESET etc.)
+  for (int func_id = 0; func_id < BLE_FUNC_COUNT; func_id++) {
+    ble_function_config_t *cfg = &g_ble_handler.config[stack_id].functions[func_id];
+    if (!cfg->available) {
+      continue;
+    }
+    if (strcmp(command, s_ble_func_names[func_id]) == 0) {
+      memcpy(func_config, cfg, sizeof(ble_function_config_t));
+      ESP_LOGI(TAG, "Matched function_name: %s (func_id=%d)",
+               s_ble_func_names[func_id], func_id);
+      return ESP_OK;
+    }
+  }
+
   ESP_LOGW(TAG, "No function match for command: %s", command);
   return ESP_ERR_NOT_FOUND;
 }
@@ -903,7 +957,9 @@ esp_err_t ble_handler_execute_command_with_config(uint8_t stack_id,
   // Step 3: Validate and send command
   size_t cmd_len = strlen(command);
   size_t expect_len = strlen(func_config->expect_response);
-  bool is_gpio_only = (cmd_len == 0 && expect_len == 0);
+  // GPIO-only detection: use the JSON command field (empty = no UART write needed),
+  // NOT the incoming command length (which is non-zero for function_name triggers).
+  bool is_gpio_only = (strlen(func_config->command) == 0 && expect_len == 0);
 
   if (is_gpio_only) {
     // GPIO-only function: skip command sending
@@ -916,7 +972,9 @@ esp_err_t ble_handler_execute_command_with_config(uint8_t stack_id,
       return ESP_ERR_INVALID_ARG;
     }
 
-    // Send command via Module_Config_Controller
+    // Send command via Module_Config_Controller.
+    // If the incoming AT command lacks trailing \r\n, append it before sending
+    // so the BLE module's UART parser can delimit the command correctly.
     ESP_LOGD(TAG, "Sending command: %s", command);
     comm_port_type_t port_type = ble_get_comm_port(stack_id);
     if (port_type == COMM_PORT_MAX) {
@@ -924,8 +982,19 @@ esp_err_t ble_handler_execute_command_with_config(uint8_t stack_id,
       if (result) result->status = ESP_ERR_INVALID_STATE;
       return ESP_ERR_INVALID_STATE;
     }
-
-    ret = module_bus_write(stack_id, port_type, (const uint8_t *)command, cmd_len);
+    char at_cmd_buf[BLE_CMD_MAX_LEN] = {0};
+    const uint8_t *write_ptr = (const uint8_t *)command;
+    size_t write_len = cmd_len;
+    if (strncmp(command, "AT", 2) == 0 &&
+        (cmd_len < 2 || command[cmd_len - 2] != '\r' || command[cmd_len - 1] != '\n')) {
+      strncpy(at_cmd_buf, command, sizeof(at_cmd_buf) - 3);
+      at_cmd_buf[sizeof(at_cmd_buf) - 3] = '\0'; // ensure null-terminated before concat
+      strcat(at_cmd_buf, "\r\n");
+      write_ptr = (const uint8_t *)at_cmd_buf;
+      write_len = strlen(at_cmd_buf);
+      ESP_LOGD(TAG, "Appended CRLF to AT command for BLE UART");
+    }
+    ret = module_bus_write(stack_id, port_type, write_ptr, write_len);
     if (ret != ESP_OK) {
       ESP_LOGE(TAG, "Failed to send command: %s", esp_err_to_name(ret));
       if (result) result->status = ret;

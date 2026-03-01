@@ -152,6 +152,56 @@ static void ble_downlink_task(void *pvParameters) {
                 ESP_LOGE(TAG, "[Stack %d] Command execution failed: %s (status=%s)", 
                         stack_id, result.response, esp_err_to_name(ret));
             }
+
+            // Forward response to WAN MCU → PC App
+            // Format: "CFBL:<stack_id>:<status>:<response>"
+            // Response newlines (\r\n) are replaced with Record Separator (0x1E)
+            // so the entire CFBL packet is a single line — prevents splitlines()
+            // in the PC App from breaking multi-line AT responses.
+            {
+                char resp_packet[512];
+                int resp_len;
+                uint16_t actual_resp_len = (result.response_len > 0)
+                    ? result.response_len
+                    : (uint16_t)strlen(result.response);
+
+                // Clean response: replace \r\n sequences with \x1E, collapse multiples
+                char clean_resp[256];
+                int ci = 0;
+                for (int i = 0; i < actual_resp_len && ci < (int)sizeof(clean_resp) - 1; i++) {
+                    char c = result.response[i];
+                    if (c == '\r') continue;                    // skip \r
+                    if (c == '\n') {
+                        // Add separator only if not duplicate
+                        if (ci > 0 && clean_resp[ci - 1] != '\x1E') {
+                            clean_resp[ci++] = '\x1E';
+                        }
+                        continue;
+                    }
+                    clean_resp[ci++] = c;
+                }
+                // Strip trailing separator
+                while (ci > 0 && clean_resp[ci - 1] == '\x1E') ci--;
+                clean_resp[ci] = '\0';
+
+                if (ret == ESP_OK) {
+                    resp_len = snprintf(resp_packet, sizeof(resp_packet),
+                                        "CFBL:%d:OK:%s",
+                                        stack_id, clean_resp);
+                } else {
+                    resp_len = snprintf(resp_packet, sizeof(resp_packet),
+                                        "CFBL:%d:FAIL:%s",
+                                        stack_id, clean_resp);
+                }
+
+                if (resp_len > 0 && resp_len < (int)sizeof(resp_packet)) {
+                    if (!mcu_wan_enqueue_uplink(HANDLER_BLE,
+                                                (uint8_t *)resp_packet,
+                                                (uint16_t)resp_len)) {
+                        ESP_LOGW(TAG, "[Stack %d] Failed to enqueue response to WAN", stack_id);
+                    }
+                }
+            }
             
             continue;
         }
