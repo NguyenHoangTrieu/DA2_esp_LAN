@@ -95,7 +95,7 @@ typedef struct {
  */
 typedef struct {
     esp_err_t status;                   ///< Execution status
-    char response[1024];                ///< Command response (large for streaming commands like AT+SCAN)
+    char response[2048];                ///< Command response (large for streaming commands like AT+SCAN)
     uint16_t response_len;              ///< Response length
     uint32_t execution_time_ms;         ///< Total execution time
 } ble_exec_result_t;

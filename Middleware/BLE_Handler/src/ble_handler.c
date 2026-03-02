@@ -20,7 +20,7 @@ static const char *TAG = "BLE_HANDLER";
 
 #define BLE_BINARY_CMD_MARKER 0xC0   // Binary protocol marker
 #define BLE_CMD_MAX_LEN 128          // Max command string length
-#define BLE_RESPONSE_MAX_LEN 1024    // Max response accumulation buffer
+#define BLE_RESPONSE_MAX_LEN 2048    // Max response accumulation buffer
 #define BLE_RESPONSE_CHUNK 128       // UART read chunk size per iteration
 
 /**
@@ -77,6 +77,7 @@ static esp_err_t ble_read_until_terminator(uint8_t stack_id,
         }
 
         if (chunk_len > 0) {
+            size_t raw_len = chunk_len;  /* original bytes received before clipping */
             size_t space = out_max - 1 - acc;
             if (chunk_len > space) chunk_len = space;
             if (chunk_len > 0) {
@@ -84,10 +85,14 @@ static esp_err_t ble_read_until_terminator(uint8_t stack_id,
                 acc += chunk_len;
                 out_buf[acc] = '\0';
             }
-            /* Check for terminator in accumulated buffer */
-            if (expect_len > 0 && strstr(out_buf, expect_response) != NULL) {
-                found = true;
-                break;
+            // Check for terminator in the accumulated buffer (only if expect_response is non-empty)
+            if (expect_len > 0) {
+                chunk[raw_len] = '\0';  /* safe: module_bus_read uses sizeof(chunk)-1 */
+                if (strstr(out_buf, expect_response) != NULL ||
+                    (space == 0 && strstr((char *)chunk, expect_response) != NULL)) {
+                    found = true;
+                    break;
+                }
             }
             if (expect_len == 0) {
                 found = true;
@@ -444,7 +449,10 @@ static esp_err_t ble_execute_function_internal(uint8_t stack_id,
   }
 
   // Skip module_bus_read if no response expected and timeout is 0
-  char response_buffer[BLE_RESPONSE_MAX_LEN] = {0};
+  // Static to avoid large stack frames when called from init tasks (ble_handler_hw_reset etc.).
+  // Safe because all execution paths are serialised by g_ble_handler_mutex.
+  static char response_buffer[BLE_RESPONSE_MAX_LEN];
+  memset(response_buffer, 0, BLE_RESPONSE_MAX_LEN);
   size_t response_len = 0;
   bool skip_read = (expect_len == 0 && func_cfg->timeout_ms == 0);
 
@@ -1071,7 +1079,9 @@ esp_err_t ble_handler_execute_command_with_config(uint8_t stack_id,
     }
 
     // Step 4: Wait for response (from JSON config timeout)
-    char response_buffer[BLE_RESPONSE_MAX_LEN] = {0};
+    // Static to avoid large stack frames; serialised by g_ble_handler_mutex.
+    static char response_buffer[BLE_RESPONSE_MAX_LEN];
+    memset(response_buffer, 0, BLE_RESPONSE_MAX_LEN);
     size_t response_len = 0;
     bool skip_read = (expect_len == 0 && func_config->timeout_ms == 0);
 

@@ -18,7 +18,7 @@ static const char *TAG = "WAN_UL";
 #define UPLINK_TASK_STACK_SIZE 1024 * 16
 #define UPLINK_TASK_PRIORITY 5 // Lower than downlink
 #define UPLINK_QUEUE_SIZE 50
-#define MAX_PAYLOAD_SIZE 1024
+#define MAX_PAYLOAD_SIZE 2048
 #define ACK_TIMEOUT_MS 200
 #define RTC_REQUEST_INTERVAL_MS 1000
 #define MAX_RETRY_COUNT 3

@@ -13,12 +13,13 @@
 #include "freertos/semphr.h"
 #include "esp_log.h"
 #include <string.h>
+#include <stdlib.h>
 
 static const char *TAG = "BLE_TASK";
 
 /* ===== Configuration ===== */
-#define BLE_UPLINK_TASK_STACK_SIZE  (12 * 1024)
-#define BLE_DOWNLINK_TASK_STACK_SIZE (12 * 1024)
+#define BLE_UPLINK_TASK_STACK_SIZE  (16 * 1024)
+#define BLE_DOWNLINK_TASK_STACK_SIZE (16 * 1024)
 #define BLE_UPLINK_TASK_PRIORITY    5
 #define BLE_DOWNLINK_TASK_PRIORITY  6
 #define BLE_UPLINK_QUEUE_SIZE       20
@@ -159,47 +160,57 @@ static void ble_downlink_task(void *pvParameters) {
             // so the entire CFBL packet is a single line — prevents splitlines()
             // in the PC App from breaking multi-line AT responses.
             {
-                char resp_packet[1536];  // 10-byte prefix + 1024 payload + margin
-                int resp_len;
-                uint16_t actual_resp_len = (result.response_len > 0)
-                    ? result.response_len
-                    : (uint16_t)strlen(result.response);
-
-                // Clean response: replace \r\n sequences with \x1E, collapse multiples
-                char clean_resp[1024];
-                int ci = 0;
-                for (int i = 0; i < actual_resp_len && ci < (int)sizeof(clean_resp) - 1; i++) {
-                    char c = result.response[i];
-                    if (c == '\r') continue;                    // skip \r
-                    if (c == '\n') {
-                        // Add separator only if not duplicate
-                        if (ci > 0 && clean_resp[ci - 1] != '\x1E') {
-                            clean_resp[ci++] = '\x1E';
-                        }
-                        continue;
-                    }
-                    clean_resp[ci++] = c;
-                }
-                // Strip trailing separator
-                while (ci > 0 && clean_resp[ci - 1] == '\x1E') ci--;
-                clean_resp[ci] = '\0';
-
-                if (ret == ESP_OK) {
-                    resp_len = snprintf(resp_packet, sizeof(resp_packet),
-                                        "CFBL:%d:OK:%s",
-                                        stack_id, clean_resp);
+                // Heap-allocated to avoid overflowing the downlink task stack
+                // when both stacks run concurrently (static is not safe here).
+                char *resp_packet = (char *)malloc(3072);
+                char *clean_resp  = (char *)malloc(2048);
+                if (!resp_packet || !clean_resp) {
+                    ESP_LOGE(TAG, "[Stack %d] Failed to allocate response buffers", stack_id);
+                    free(resp_packet);
+                    free(clean_resp);
                 } else {
-                    resp_len = snprintf(resp_packet, sizeof(resp_packet),
-                                        "CFBL:%d:FAIL:%s",
-                                        stack_id, clean_resp);
-                }
+                    int resp_len;
+                    uint16_t actual_resp_len = (result.response_len > 0)
+                        ? result.response_len
+                        : (uint16_t)strlen(result.response);
 
-                if (resp_len > 0 && resp_len < (int)sizeof(resp_packet)) {
-                    if (!mcu_wan_enqueue_uplink(HANDLER_BLE,
-                                                (uint8_t *)resp_packet,
-                                                (uint16_t)resp_len)) {
-                        ESP_LOGW(TAG, "[Stack %d] Failed to enqueue response to WAN", stack_id);
+                    // Clean response: replace \r\n sequences with \x1E, collapse multiples
+                    int ci = 0;
+                    for (int i = 0; i < actual_resp_len && ci < 2047; i++) {
+                        char c = result.response[i];
+                        if (c == '\r') continue;                    // skip \r
+                        if (c == '\n') {
+                            // Add separator only if not duplicate
+                            if (ci > 0 && clean_resp[ci - 1] != '\x1E') {
+                                clean_resp[ci++] = '\x1E';
+                            }
+                            continue;
+                        }
+                        clean_resp[ci++] = c;
                     }
+                    // Strip trailing separator
+                    while (ci > 0 && clean_resp[ci - 1] == '\x1E') ci--;
+                    clean_resp[ci] = '\0';
+
+                    if (ret == ESP_OK) {
+                        resp_len = snprintf(resp_packet, 3072,
+                                            "CFBL:%d:OK:%s",
+                                            stack_id, clean_resp);
+                    } else {
+                        resp_len = snprintf(resp_packet, 3072,
+                                            "CFBL:%d:FAIL:%s",
+                                            stack_id, clean_resp);
+                    }
+
+                    if (resp_len > 0 && resp_len < 3072) {
+                        if (!mcu_wan_enqueue_uplink(HANDLER_BLE,
+                                                    (uint8_t *)resp_packet,
+                                                    (uint16_t)resp_len)) {
+                            ESP_LOGW(TAG, "[Stack %d] Failed to enqueue response to WAN", stack_id);
+                        }
+                    }
+                    free(resp_packet);
+                    free(clean_resp);
                 }
             }
             
