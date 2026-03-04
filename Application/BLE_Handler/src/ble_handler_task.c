@@ -18,23 +18,27 @@
 static const char *TAG = "BLE_TASK";
 
 /* ===== Configuration ===== */
-#define BLE_UPLINK_TASK_STACK_SIZE  (16 * 1024)
+#define BLE_UPLINK_TASK_STACK_SIZE   (16 * 1024)
 #define BLE_DOWNLINK_TASK_STACK_SIZE (16 * 1024)
-#define BLE_UPLINK_TASK_PRIORITY    5
-#define BLE_DOWNLINK_TASK_PRIORITY  6
-#define BLE_UPLINK_QUEUE_SIZE       20
-#define BLE_DOWNLINK_QUEUE_SIZE     20
-#define BLE_COMMAND_QUEUE_SIZE      10
-#define BLE_MAX_STACKS              2       // Stack 0 and Stack 1
-#define BLE_UPLINK_BATCH_MAX        8
-#define BLE_UPLINK_BATCH_FLUSH_MS   50
+#define BLE_LISTENER_TASK_STACK_SIZE (8  * 1024)
+#define BLE_UPLINK_TASK_PRIORITY     5
+#define BLE_DOWNLINK_TASK_PRIORITY   6
+#define BLE_LISTENER_TASK_PRIORITY   4      // Lower than command tasks
+#define BLE_UPLINK_QUEUE_SIZE        20
+#define BLE_DOWNLINK_QUEUE_SIZE      20
+#define BLE_COMMAND_QUEUE_SIZE       10
+#define BLE_MAX_STACKS               2      // Stack 0 and Stack 1
+#define BLE_UPLINK_BATCH_MAX         8
+#define BLE_UPLINK_BATCH_FLUSH_MS    50
+#define BLE_LISTEN_BUFFER_SIZE       512    // Unsolicited event receive buffer
 
 /* ===== Static Data ===== */
 
 static struct {
-    bool running[BLE_MAX_STACKS];                   // Running state per stack
+    bool running[BLE_MAX_STACKS];                    // Running state per stack
     TaskHandle_t uplink_task_handle[BLE_MAX_STACKS];
     TaskHandle_t downlink_task_handle[BLE_MAX_STACKS];
+    TaskHandle_t listener_task_handle[BLE_MAX_STACKS]; // Background bus listener
     QueueHandle_t uplink_queue[BLE_MAX_STACKS];
     QueueHandle_t downlink_queue[BLE_MAX_STACKS];
     QueueHandle_t command_queue[BLE_MAX_STACKS];
@@ -156,12 +160,7 @@ static void ble_downlink_task(void *pvParameters) {
 
             // Forward response to WAN MCU → PC App
             // Format: "CFBL:<stack_id>:<status>:<response>"
-            // Response newlines (\r\n) are replaced with Record Separator (0x1E)
-            // so the entire CFBL packet is a single line — prevents splitlines()
-            // in the PC App from breaking multi-line AT responses.
             {
-                // Heap-allocated to avoid overflowing the downlink task stack
-                // when both stacks run concurrently (static is not safe here).
                 char *resp_packet = (char *)malloc(3072);
                 char *clean_resp  = (char *)malloc(2048);
                 if (!resp_packet || !clean_resp) {
@@ -241,6 +240,85 @@ static void ble_downlink_task(void *pvParameters) {
 
     ESP_LOGI(TAG, "[Stack %d] BLE downlink task exiting", stack_id);
     free(ctx);
+    vTaskDelete(NULL);
+}
+
+/**
+ * @brief Background listener task – receives unsolicited events from the BLE
+ *        module and forwards them to the server via the WAN MCU uplink.
+ */
+static void ble_listener_task(void *pvParameters) {
+    ble_task_context_t *ctx = (ble_task_context_t *)pvParameters;
+    uint8_t stack_id = ctx->stack_id;
+    free(ctx);
+
+    ESP_LOGI(TAG, "[Stack %d] BLE listener task started", stack_id);
+
+    char *listen_buf = (char *)malloc(BLE_LISTEN_BUFFER_SIZE);
+    char *clean_buf  = (char *)malloc(BLE_LISTEN_BUFFER_SIZE);
+    char *evt_packet = (char *)malloc(BLE_LISTEN_BUFFER_SIZE + 32);
+
+    if (!listen_buf || !clean_buf || !evt_packet) {
+        ESP_LOGE(TAG, "[Stack %d] Failed to allocate listener buffers", stack_id);
+        free(listen_buf);
+        free(clean_buf);
+        free(evt_packet);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    while (g_ble_task.running[stack_id]) {
+        memset(listen_buf, 0, BLE_LISTEN_BUFFER_SIZE);
+        size_t recv_len = 0;
+
+        esp_err_t ret = ble_handler_listen(stack_id, listen_buf,
+                                           BLE_LISTEN_BUFFER_SIZE - 1, &recv_len);
+
+        if (ret == ESP_OK && recv_len > 0) {
+            // Replace \r\n with \x1E (same convention used for command responses)
+            // so the entire EVT packet is a single flat line for the PC App.
+            int ci = 0;
+            for (size_t i = 0; i < recv_len && ci < (int)(BLE_LISTEN_BUFFER_SIZE - 1); i++) {
+                char c = listen_buf[i];
+                if (c == '\r') continue;
+                if (c == '\n') {
+                    if (ci > 0 && clean_buf[ci - 1] != '\x1E') {
+                        clean_buf[ci++] = '\x1E';
+                    }
+                    continue;
+                }
+                clean_buf[ci++] = c;
+            }
+            // Strip trailing separator
+            while (ci > 0 && clean_buf[ci - 1] == '\x1E') ci--;
+            clean_buf[ci] = '\0';
+
+            if (ci > 0) {
+                int pkt_len = snprintf(evt_packet, BLE_LISTEN_BUFFER_SIZE + 32,
+                                       "CFBL:%d:EVT:%s", stack_id, clean_buf);
+                if (pkt_len > 0) {
+                    if (!mcu_wan_enqueue_uplink(HANDLER_BLE,
+                                               (uint8_t *)evt_packet,
+                                               (uint16_t)pkt_len)) {
+                        ESP_LOGW(TAG, "[Stack %d] Failed to enqueue EVT to WAN", stack_id);
+                    } else {
+                        ESP_LOGD(TAG, "[Stack %d] EVT forwarded: %s", stack_id, evt_packet);
+                    }
+                }
+            }
+        } else if (ret == ESP_ERR_TIMEOUT) {
+            // Bus busy (command in progress) or no data – yield briefly
+            vTaskDelay(pdMS_TO_TICKS(20));
+        } else {
+            // Unexpected error – back off
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+    }
+
+    ESP_LOGI(TAG, "[Stack %d] BLE listener task exiting", stack_id);
+    free(listen_buf);
+    free(clean_buf);
+    free(evt_packet);
     vTaskDelete(NULL);
 }
 
@@ -348,6 +426,27 @@ esp_err_t ble_handler_task_start(uint8_t stack_id) {
         return ESP_FAIL;
     }
 
+    // Start background listener task
+    ble_task_context_t *listener_ctx = (ble_task_context_t *)malloc(sizeof(ble_task_context_t));
+    if (!listener_ctx) {
+        ESP_LOGE(TAG, "[Stack %d] Failed to allocate listener task context", stack_id);
+        // Non-fatal: uplink/downlink still work, just no background listen
+    } else {
+        listener_ctx->stack_id = stack_id;
+        snprintf(task_name, sizeof(task_name), "ble_ls_s%d", stack_id);
+        ret = xTaskCreate(ble_listener_task,
+                          task_name,
+                          BLE_LISTENER_TASK_STACK_SIZE,
+                          listener_ctx,
+                          BLE_LISTENER_TASK_PRIORITY,
+                          &g_ble_task.listener_task_handle[stack_id]);
+        if (ret != pdPASS) {
+            ESP_LOGW(TAG, "[Stack %d] Failed to create BLE listener task (non-fatal)", stack_id);
+            g_ble_task.listener_task_handle[stack_id] = NULL;
+            free(listener_ctx);
+        }
+    }
+
     ESP_LOGI(TAG, "[Stack %d] BLE handler tasks started", stack_id);
     return ESP_OK;
 }
@@ -373,6 +472,11 @@ esp_err_t ble_handler_task_stop(uint8_t stack_id) {
     if (g_ble_task.downlink_task_handle[stack_id]) {
         vTaskDelete(g_ble_task.downlink_task_handle[stack_id]);
         g_ble_task.downlink_task_handle[stack_id] = NULL;
+    }
+
+    if (g_ble_task.listener_task_handle[stack_id]) {
+        vTaskDelete(g_ble_task.listener_task_handle[stack_id]);
+        g_ble_task.listener_task_handle[stack_id] = NULL;
     }
 
     // Cleanup queues

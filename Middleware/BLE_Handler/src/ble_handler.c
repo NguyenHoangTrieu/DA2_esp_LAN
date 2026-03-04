@@ -122,9 +122,13 @@ static struct {
 
 static bool g_module_ctrl_initialized = false;
 
-// Mutex to protect g_ble_handler from multi-stack race conditions (Fix Issue
-// #2)
+// Mutex to protect g_ble_handler from multi-stack race conditions (Fix Issue #2)
 static SemaphoreHandle_t g_ble_handler_mutex = NULL;
+
+// Per-stack bus mutex: serialises UART/SPI/I2C/USB access between the command
+// execution task and the background listener task so the listener cannot read
+// bytes that belong to a command response.
+static SemaphoreHandle_t g_ble_bus_mutex[BLE_MAX_STACKS] = {NULL, NULL};
 
 /* ===== Helper Functions ===== */
 
@@ -439,10 +443,20 @@ static esp_err_t ble_execute_function_internal(uint8_t stack_id,
     return ESP_ERR_INVALID_STATE;
   }
 
+  // Acquire per-stack bus mutex before write+read cycle;
+  // prevents background listener task from reading command response bytes.
+  if (xSemaphoreTake(g_ble_bus_mutex[stack_id], pdMS_TO_TICKS(5000)) != pdTRUE) {
+    ESP_LOGE(TAG, "[Stack %d] Bus mutex timeout (internal exec)", stack_id);
+    if (result)
+      result->status = ESP_ERR_TIMEOUT;
+    return ESP_ERR_TIMEOUT;
+  }
+
   ret = module_bus_write(stack_id, port_type, (const uint8_t *)final_command,
                          strlen(final_command));
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "Failed to send command: %s", esp_err_to_name(ret));
+    xSemaphoreGive(g_ble_bus_mutex[stack_id]);
     if (result)
       result->status = ret;
     return ret;
@@ -476,6 +490,7 @@ static esp_err_t ble_execute_function_internal(uint8_t stack_id,
     if (!response_valid && expect_len > 0) {
       ESP_LOGW(TAG, "Response validation failed: expected '%s'",
                func_cfg->expect_response);
+      xSemaphoreGive(g_ble_bus_mutex[stack_id]);
       if (result) {
         result->status = ESP_ERR_INVALID_RESPONSE;
         snprintf(result->response, sizeof(result->response), "%s",
@@ -487,6 +502,10 @@ static esp_err_t ble_execute_function_internal(uint8_t stack_id,
   } else {
     ESP_LOGD(TAG, "Skipping response read (no response expected, timeout=0)");
   }
+
+  // Release bus mutex after write+read cycle; GPIO end sequences below are
+  // safe for the listener to interleave with (they do not use the UART bus).
+  xSemaphoreGive(g_ble_bus_mutex[stack_id]);
 
   // Step 6: Execute GPIO end sequences via Module_Config_Controller wrapper
   for (uint8_t i = 0; i < func_cfg->gpio_end_count; i++) {
@@ -536,6 +555,17 @@ esp_err_t ble_handler_init(void) {
     if (!g_ble_handler_mutex) {
       ESP_LOGE(TAG, "Failed to create BLE handler mutex");
       return ESP_ERR_NO_MEM;
+    }
+  }
+
+  // Create per-stack bus mutexes for listener/command task serialisation
+  for (int i = 0; i < BLE_MAX_STACKS; i++) {
+    if (!g_ble_bus_mutex[i]) {
+      g_ble_bus_mutex[i] = xSemaphoreCreateMutex();
+      if (!g_ble_bus_mutex[i]) {
+        ESP_LOGE(TAG, "Failed to create bus mutex for stack %d", i);
+        return ESP_ERR_NO_MEM;
+      }
     }
   }
 
@@ -1059,6 +1089,15 @@ esp_err_t ble_handler_execute_command_with_config(uint8_t stack_id,
       if (result) result->status = ESP_ERR_INVALID_STATE;
       return ESP_ERR_INVALID_STATE;
     }
+
+    // Acquire per-stack bus mutex before write+read cycle;
+    // prevents background listener task from reading command response bytes.
+    if (xSemaphoreTake(g_ble_bus_mutex[stack_id], pdMS_TO_TICKS(5000)) != pdTRUE) {
+      ESP_LOGE(TAG, "[Stack %d] Bus mutex timeout (execute_with_config)", stack_id);
+      if (result) result->status = ESP_ERR_TIMEOUT;
+      return ESP_ERR_TIMEOUT;
+    }
+
     char at_cmd_buf[BLE_CMD_MAX_LEN] = {0};
     const uint8_t *write_ptr = (const uint8_t *)command;
     size_t write_len = cmd_len;
@@ -1074,6 +1113,7 @@ esp_err_t ble_handler_execute_command_with_config(uint8_t stack_id,
     ret = module_bus_write(stack_id, port_type, write_ptr, write_len);
     if (ret != ESP_OK) {
       ESP_LOGE(TAG, "Failed to send command: %s", esp_err_to_name(ret));
+      xSemaphoreGive(g_ble_bus_mutex[stack_id]);
       if (result) result->status = ret;
       return ret;
     }
@@ -1105,6 +1145,7 @@ esp_err_t ble_handler_execute_command_with_config(uint8_t stack_id,
       if (!response_valid && expect_len > 0) {
         ESP_LOGW(TAG, "Response validation failed: expected '%s'",
                  func_config->expect_response);
+        xSemaphoreGive(g_ble_bus_mutex[stack_id]);
         if (result) {
           result->status = ESP_ERR_INVALID_RESPONSE;
           snprintf(result->response, sizeof(result->response), "%s",
@@ -1123,6 +1164,10 @@ esp_err_t ble_handler_execute_command_with_config(uint8_t stack_id,
     } else {
       ESP_LOGD(TAG, "Skipping response read (no response expected, timeout=0)");
     }
+
+    // Release bus mutex after write+read cycle; GPIO end sequences do not
+    // require bus access so the listener may proceed after this point.
+    xSemaphoreGive(g_ble_bus_mutex[stack_id]);
   }
 
   // Step 5: Execute GPIO end sequences (from JSON config)
@@ -1176,10 +1221,17 @@ esp_err_t ble_handler_send_binary_command(uint8_t stack_id,
   ESP_LOGD(TAG, "Sending binary command (%d bytes): 0x%02X 0x%02X ...", cmd_len,
            cmd_bytes[0], cmd_len > 1 ? cmd_bytes[1] : 0);
 
+  // Acquire bus mutex before write+read cycle
+  if (xSemaphoreTake(g_ble_bus_mutex[stack_id], pdMS_TO_TICKS(5000)) != pdTRUE) {
+    ESP_LOGE(TAG, "[Stack %d] Bus mutex timeout (binary cmd)", stack_id);
+    return ESP_ERR_TIMEOUT;
+  }
+
   // Send binary command
   esp_err_t ret = module_bus_write(stack_id, port_type, cmd_bytes, cmd_len);
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "Failed to send binary command: %s", esp_err_to_name(ret));
+    xSemaphoreGive(g_ble_bus_mutex[stack_id]);
     return ret;
   }
 
@@ -1190,11 +1242,66 @@ esp_err_t ble_handler_send_binary_command(uint8_t stack_id,
                           &received_len);
     if (ret != ESP_OK && ret != ESP_ERR_TIMEOUT) {
       ESP_LOGE(TAG, "Failed to read binary response: %s", esp_err_to_name(ret));
+      xSemaphoreGive(g_ble_bus_mutex[stack_id]);
       return ret;
     }
 
     ESP_LOGD(TAG, "Binary response received: %zu bytes", received_len);
   }
 
+  xSemaphoreGive(g_ble_bus_mutex[stack_id]);
   return ESP_OK;
+}
+
+/**
+ * @brief Listen for unsolicited data from the BLE module (background listener).
+ *
+ * Tries to acquire the per-stack bus mutex with a short timeout.  If the
+ * command task currently owns the bus the function returns ESP_ERR_TIMEOUT
+ * immediately so the caller (listener task) can yield and retry without
+ * blocking the command path.
+ *
+ * @param stack_id  Stack ID (0 or 1)
+ * @param buf       Caller-allocated output buffer
+ * @param max       Buffer size in bytes (including null terminator)
+ * @param out_len   Bytes written to buf (excluding null terminator)
+ * @return ESP_OK with data, ESP_ERR_TIMEOUT if bus busy or no data
+ */
+esp_err_t ble_handler_listen(uint8_t stack_id, char *buf, size_t max, size_t *out_len) {
+  if (!ble_is_valid_stack_id(stack_id) || !buf || !out_len || max < 2) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  *out_len = 0;
+  buf[0]   = '\0';
+
+  if (!g_ble_handler.initialized) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  comm_port_type_t port_type = ble_get_comm_port(stack_id);
+  if (port_type == COMM_PORT_MAX) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  if (xSemaphoreTake(g_ble_bus_mutex[stack_id], pdMS_TO_TICKS(50)) != pdTRUE) {
+    return ESP_ERR_TIMEOUT; // bus busy – caller should yield and retry
+  }
+
+  uint8_t chunk[BLE_RESPONSE_CHUNK];
+  size_t  chunk_len = 0;
+  esp_err_t ret = module_bus_read(stack_id, port_type, chunk, sizeof(chunk) - 1,
+                                   50, &chunk_len);
+
+  if (chunk_len > 0) {
+    size_t copy_len = (chunk_len < max - 1) ? chunk_len : max - 1;
+    memcpy(buf, chunk, copy_len);
+    buf[copy_len] = '\0';
+    *out_len = copy_len;
+    ret = ESP_OK;
+  } else {
+    ret = ESP_ERR_TIMEOUT; // no data in this window
+  }
+
+  xSemaphoreGive(g_ble_bus_mutex[stack_id]);
+  return ret;
 }

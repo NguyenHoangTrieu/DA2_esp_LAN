@@ -243,6 +243,23 @@ esp_err_t ble_handler_send_binary_command(uint8_t stack_id,
                                            uint16_t resp_len,
                                            uint16_t timeout_ms);
 
+/**
+ * @brief Listen for unsolicited data from the BLE module (background listener).
+ *
+ * Attempts a short non-blocking read on the module bus.  Uses a 50 ms mutex
+ * trylock: if the command task currently owns the bus the function returns
+ * ESP_ERR_TIMEOUT immediately so callers can yield without blocking commands.
+ *
+ * Intended to be called in a tight loop by the background listener task.
+ *
+ * @param stack_id  Stack ID (0 or 1)
+ * @param buf       Caller-allocated receive buffer
+ * @param max       Buffer capacity (bytes, including null terminator)
+ * @param out_len   [out] Bytes written to buf (not counting '\0')
+ * @return ESP_OK if data received; ESP_ERR_TIMEOUT if bus busy or no data
+ */
+esp_err_t ble_handler_listen(uint8_t stack_id, char *buf, size_t max, size_t *out_len);
+
 #ifdef __cplusplus
 }
 #endif
