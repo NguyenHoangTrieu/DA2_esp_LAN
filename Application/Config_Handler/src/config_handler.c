@@ -7,6 +7,7 @@
 #include "DA2_esp_LAN.h"
 #include "ble_handler.h"
 #include "config_handler_ble_commands.h"
+#include "config_handler_lora_commands.h"
 #include "config_global.h"
 #include "fota_lan_config.h"
 #include "fota_lan_handler.h"
@@ -46,6 +47,14 @@ config_type_t config_parse_type(const char *cmd, uint16_t len) {
     } else {
       // All other BLE commands use unified parser
       return CONFIG_UPDATE_BLE_CMD;
+    }
+  } else if (cmd[2] == 'L' && cmd[3] == 'R') {
+    // LoRa commands - check subcommand
+    if (len >= 10 && strncmp(cmd + 5, "JSON:", 5) == 0) {
+      return CONFIG_UPDATE_LORA_JSON;
+    } else {
+      // All other LoRa commands use unified parser
+      return CONFIG_UPDATE_LORA_CMD;
     }
   }
   return CONFIG_TYPE_UNKNOWN;
@@ -294,6 +303,24 @@ static void config_handler_task(void *arg) {
           ESP_LOGI(TAG, "BLE command executed successfully");
         } else {
           ESP_LOGE(TAG, "Failed to execute BLE command");
+        }
+        break;
+      }
+      case CONFIG_UPDATE_LORA_JSON: {
+        if (config_parse_lora_json((const uint8_t *)cmd->raw_data,
+                                    cmd->data_len) == ESP_OK) {
+          ESP_LOGI(TAG, "LoRa JSON config loaded from WAN MCU");
+        } else {
+          ESP_LOGE(TAG, "Failed to parse LoRa JSON config");
+        }
+        break;
+      }
+      case CONFIG_UPDATE_LORA_CMD: {
+        if (config_parse_lora_command((const uint8_t *)cmd->raw_data,
+                                       cmd->data_len) == ESP_OK) {
+          ESP_LOGI(TAG, "LoRa command executed successfully");
+        } else {
+          ESP_LOGE(TAG, "Failed to execute LoRa command");
         }
         break;
       }

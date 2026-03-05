@@ -8,6 +8,7 @@
 #include "config_global.h"
 #include "stack_handler.h"
 #include "ble_handler_task.h"
+#include "lora_handler_task.h"
 #include "mcu_wan_handler.h"
 #include "cJSON.h"
 #include "esp_log.h"
@@ -167,6 +168,15 @@ esp_err_t module_monitor_task_start(void) {
               ESP_LOGE(TAG, "Failed to load config into BLE handler for Stack %d", i);
             } else {
               ESP_LOGI(TAG, "BLE handler config loaded after NVS restore (Stack %d)", i);
+            }
+          } else if (info->module_type == MODULE_TYPE_LORA) {
+            esp_err_t cfg_ret = lora_handler_task_load_config(i,
+                                                              info->json_config_str,
+                                                              info->json_config_len);
+            if (cfg_ret != ESP_OK) {
+              ESP_LOGE(TAG, "Failed to load LoRa config for Stack %d after NVS restore", i);
+            } else {
+              ESP_LOGI(TAG, "LoRa handler config loaded after NVS restore (Stack %d)", i);
             }
           }
         } else {
@@ -466,9 +476,7 @@ static esp_err_t module_start_handler_task(uint8_t stack_id,
 
   case MODULE_TYPE_LORA:
     ESP_LOGI(TAG, "Starting LoRa handler for Stack %d", stack_id);
-    // TODO: Call lora_handler_task_start(stack_id) when implemented
-    ESP_LOGW(TAG, "LoRa handler not yet implemented");
-    return ESP_ERR_NOT_SUPPORTED;
+    return lora_handler_task_start(stack_id);
 
   default:
     ESP_LOGE(TAG, "Unknown module type: %d", module_type);
@@ -494,8 +502,7 @@ static esp_err_t module_stop_handler_task(uint8_t stack_id) {
     return ESP_OK;
 
   case MODULE_TYPE_LORA:
-    // TODO: Call lora_handler_task_stop(stack_id) when implemented
-    return ESP_OK;
+    return lora_handler_task_stop(stack_id);
 
   default:
     return ESP_FAIL;
@@ -536,8 +543,13 @@ static void module_monitor_task_impl(void *pvParameters) {
           ret = module_monitor_start_handler(msg.stack_id);
           if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to start handler for Stack %d", msg.stack_id);
-            uint8_t error_resp[] = "CFBL:JSON:FAIL:START";
-            mcu_wan_enqueue_uplink(HANDLER_BLE, error_resp, sizeof(error_resp) - 1);
+            if (info->module_type == MODULE_TYPE_LORA) {
+              uint8_t error_resp[] = "CFLR:JSON:FAIL:START";
+              mcu_wan_enqueue_uplink(HANDLER_LORA, error_resp, sizeof(error_resp) - 1);
+            } else {
+              uint8_t error_resp[] = "CFBL:JSON:FAIL:START";
+              mcu_wan_enqueue_uplink(HANDLER_BLE, error_resp, sizeof(error_resp) - 1);
+            }
             free(msg.json_str);
             continue;
           }
@@ -555,16 +567,28 @@ static void module_monitor_task_impl(void *pvParameters) {
             uint8_t error_resp[] = "CFBL:JSON:FAIL:LOAD";
             mcu_wan_enqueue_uplink(HANDLER_BLE, error_resp, sizeof(error_resp) - 1);
           } else {
-            ESP_LOGI(TAG, "%s config loaded for Stack %d",
+            ESP_LOGI(TAG, "%s BLE config loaded for Stack %d",
                      handler_already_running ? "Reloaded" : "Handler started and", msg.stack_id);
             uint8_t ok_resp[] = "CFBL:JSON:OK";
             mcu_wan_enqueue_uplink(HANDLER_BLE, ok_resp, sizeof(ok_resp) - 1);
           }
+        } else if (info->module_type == MODULE_TYPE_LORA) {
+          esp_err_t cfg_ret = lora_handler_task_load_config(msg.stack_id,
+                                                             info->json_config_str,
+                                                             info->json_config_len);
+          if (cfg_ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to load config into LoRa handler for Stack %d", msg.stack_id);
+            uint8_t error_resp[] = "CFLR:JSON:FAIL:LOAD";
+            mcu_wan_enqueue_uplink(HANDLER_LORA, error_resp, sizeof(error_resp) - 1);
+          } else {
+            ESP_LOGI(TAG, "%s LoRa config loaded for Stack %d",
+                     handler_already_running ? "Reloaded" : "Handler started and", msg.stack_id);
+            uint8_t ok_resp[] = "CFLR:JSON:OK";
+            mcu_wan_enqueue_uplink(HANDLER_LORA, ok_resp, sizeof(ok_resp) - 1);
+          }
         } else {
           ESP_LOGI(TAG, "Handler %s for Stack %d",
                    handler_already_running ? "config reloaded" : "started successfully", msg.stack_id);
-          uint8_t ok_resp[] = "CFBL:JSON:OK";
-          mcu_wan_enqueue_uplink(HANDLER_BLE, ok_resp, sizeof(ok_resp) - 1);
         }
       } else {
         ESP_LOGE(TAG, "Failed to parse config for Stack %d", msg.stack_id);
