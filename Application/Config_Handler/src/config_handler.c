@@ -8,6 +8,7 @@
 #include "ble_handler.h"
 #include "config_handler_ble_commands.h"
 #include "config_handler_lora_commands.h"
+#include "config_handler_zigbee_commands.h"
 #include "config_global.h"
 #include "fota_lan_config.h"
 #include "fota_lan_handler.h"
@@ -53,8 +54,14 @@ config_type_t config_parse_type(const char *cmd, uint16_t len) {
     if (len >= 10 && strncmp(cmd + 5, "JSON:", 5) == 0) {
       return CONFIG_UPDATE_LORA_JSON;
     } else {
-      // All other LoRa commands use unified parser
       return CONFIG_UPDATE_LORA_CMD;
+    }
+  } else if (cmd[2] == 'Z' && cmd[3] == 'B') {
+    // Zigbee commands - check subcommand
+    if (len >= 10 && strncmp(cmd + 5, "JSON:", 5) == 0) {
+      return CONFIG_UPDATE_ZIGBEE_JSON;
+    } else {
+      return CONFIG_UPDATE_ZIGBEE_CMD;
     }
   }
   return CONFIG_TYPE_UNKNOWN;
@@ -321,6 +328,24 @@ static void config_handler_task(void *arg) {
           ESP_LOGI(TAG, "LoRa command executed successfully");
         } else {
           ESP_LOGE(TAG, "Failed to execute LoRa command");
+        }
+        break;
+      }
+      case CONFIG_UPDATE_ZIGBEE_JSON: {
+        if (config_parse_zigbee_json((const uint8_t *)cmd->raw_data,
+                                      cmd->data_len) == ESP_OK) {
+          ESP_LOGI(TAG, "Zigbee JSON config loaded from WAN MCU");
+        } else {
+          ESP_LOGE(TAG, "Failed to parse Zigbee JSON config");
+        }
+        break;
+      }
+      case CONFIG_UPDATE_ZIGBEE_CMD: {
+        if (config_parse_zigbee_command((const uint8_t *)cmd->raw_data,
+                                         cmd->data_len) == ESP_OK) {
+          ESP_LOGI(TAG, "Zigbee command executed successfully");
+        } else {
+          ESP_LOGE(TAG, "Failed to execute Zigbee command");
         }
         break;
       }

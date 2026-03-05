@@ -41,8 +41,10 @@ typedef enum {
   CONFIG_UPDATE_RS485 = 5,     // "CFRS" - RS485 config command
   CONFIG_UPDATE_BLE_JSON = 6,  // "CFBL:JSON" - BLE JSON config
   CONFIG_UPDATE_BLE_CMD = 7,   // "CFBL:<stack>:<cmd>" - Unified BLE command parser
-  CONFIG_UPDATE_LORA_JSON = 8, // "CFLR:JSON" - LoRa JSON config
-  CONFIG_UPDATE_LORA_CMD  = 9, // "CFLR:<stack>:<cmd>" - Unified LoRa command parser
+  CONFIG_UPDATE_LORA_JSON    = 8, // "CFLR:JSON" - LoRa JSON config
+  CONFIG_UPDATE_LORA_CMD     = 9, // "CFLR:<stack>:<cmd>" - Unified LoRa command parser
+  CONFIG_UPDATE_ZIGBEE_JSON  = 10, // "CFZB:JSON" - Zigbee JSON config
+  CONFIG_UPDATE_ZIGBEE_CMD   = 11, // "CFZB:<stack>:<func>" - Unified Zigbee command parser
   CONFIG_TYPE_UNKNOWN = 0xFF
 } config_type_t;
 

@@ -9,6 +9,7 @@
 #include "stack_handler.h"
 #include "ble_handler_task.h"
 #include "lora_handler_task.h"
+#include "zigbee_handler_task.h"
 #include "mcu_wan_handler.h"
 #include "cJSON.h"
 #include "esp_log.h"
@@ -470,9 +471,7 @@ static esp_err_t module_start_handler_task(uint8_t stack_id,
 
   case MODULE_TYPE_ZIGBEE:
     ESP_LOGI(TAG, "Starting Zigbee handler for Stack %d", stack_id);
-    // TODO: Call zigbee_handler_task_start(stack_id) when implemented
-    ESP_LOGW(TAG, "Zigbee handler not yet implemented");
-    return ESP_ERR_NOT_SUPPORTED;
+    return zigbee_handler_task_start(stack_id);
 
   case MODULE_TYPE_LORA:
     ESP_LOGI(TAG, "Starting LoRa handler for Stack %d", stack_id);
@@ -498,8 +497,7 @@ static esp_err_t module_stop_handler_task(uint8_t stack_id) {
     return ble_handler_task_stop(stack_id);
 
   case MODULE_TYPE_ZIGBEE:
-    // TODO: Call zigbee_handler_task_stop(stack_id) when implemented
-    return ESP_OK;
+    return zigbee_handler_task_stop(stack_id);
 
   case MODULE_TYPE_LORA:
     return lora_handler_task_stop(stack_id);
@@ -543,7 +541,10 @@ static void module_monitor_task_impl(void *pvParameters) {
           ret = module_monitor_start_handler(msg.stack_id);
           if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to start handler for Stack %d", msg.stack_id);
-            if (info->module_type == MODULE_TYPE_LORA) {
+            if (info->module_type == MODULE_TYPE_ZIGBEE) {
+              uint8_t error_resp[] = "CFZB:JSON:FAIL:START";
+              mcu_wan_enqueue_uplink(HANDLER_ZIGBEE, error_resp, sizeof(error_resp) - 1);
+            } else if (info->module_type == MODULE_TYPE_LORA) {
               uint8_t error_resp[] = "CFLR:JSON:FAIL:START";
               mcu_wan_enqueue_uplink(HANDLER_LORA, error_resp, sizeof(error_resp) - 1);
             } else {
@@ -586,15 +587,37 @@ static void module_monitor_task_impl(void *pvParameters) {
             uint8_t ok_resp[] = "CFLR:JSON:OK";
             mcu_wan_enqueue_uplink(HANDLER_LORA, ok_resp, sizeof(ok_resp) - 1);
           }
+        } else if (info->module_type == MODULE_TYPE_ZIGBEE) {
+          esp_err_t cfg_ret = zigbee_handler_task_load_config(msg.stack_id,
+                                                               info->json_config_str,
+                                                               info->json_config_len);
+          if (cfg_ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to load config into Zigbee handler for Stack %d", msg.stack_id);
+            uint8_t error_resp[] = "CFZB:JSON:FAIL:LOAD";
+            mcu_wan_enqueue_uplink(HANDLER_ZIGBEE, error_resp, sizeof(error_resp) - 1);
+          } else {
+            ESP_LOGI(TAG, "%s Zigbee config loaded for Stack %d",
+                     handler_already_running ? "Reloaded" : "Handler started and", msg.stack_id);
+            uint8_t ok_resp[] = "CFZB:JSON:OK";
+            mcu_wan_enqueue_uplink(HANDLER_ZIGBEE, ok_resp, sizeof(ok_resp) - 1);
+          }
         } else {
           ESP_LOGI(TAG, "Handler %s for Stack %d",
                    handler_already_running ? "config reloaded" : "started successfully", msg.stack_id);
         }
       } else {
         ESP_LOGE(TAG, "Failed to parse config for Stack %d", msg.stack_id);
-        // Send failure response
-        uint8_t error_resp[] = "CFBL:JSON:FAIL:PARSE";
-        mcu_wan_enqueue_uplink(HANDLER_BLE, error_resp, sizeof(error_resp) - 1);
+        // Send failure response – guess handler from prefix
+        if (msg.json_len >= 10 && strncmp(msg.json_str, "CFZB", 4) == 0) {
+          uint8_t error_resp[] = "CFZB:JSON:FAIL:PARSE";
+          mcu_wan_enqueue_uplink(HANDLER_ZIGBEE, error_resp, sizeof(error_resp) - 1);
+        } else if (msg.json_len >= 10 && strncmp(msg.json_str, "CFLR", 4) == 0) {
+          uint8_t error_resp[] = "CFLR:JSON:FAIL:PARSE";
+          mcu_wan_enqueue_uplink(HANDLER_LORA, error_resp, sizeof(error_resp) - 1);
+        } else {
+          uint8_t error_resp[] = "CFBL:JSON:FAIL:PARSE";
+          mcu_wan_enqueue_uplink(HANDLER_BLE, error_resp, sizeof(error_resp) - 1);
+        }
       }
 
       free(msg.json_str);
