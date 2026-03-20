@@ -6,26 +6,14 @@
 #ifndef MODULE_I2C_COMM_H
 #define MODULE_I2C_COMM_H
 
-#include "driver/i2c_master.h"
 #include "esp_err.h"
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-/* ===== Hardware Pin Definitions (Hardcoded) ===== */
-
-// Stack 0 I2C pins (adjust according to hardware schematic)
-#define STACK0_I2C_PORT I2C_NUM_0
-#define STACK0_I2C_SDA_PIN 21
-#define STACK0_I2C_SCL_PIN 22
-
-// Stack 1 I2C pins (adjust according to hardware schematic)
-#define STACK1_I2C_PORT I2C_NUM_1
-#define STACK1_I2C_SDA_PIN 26
-#define STACK1_I2C_SCL_PIN 27
 
 /* ===== Type Definitions ===== */
 
