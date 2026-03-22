@@ -159,7 +159,7 @@ static void ble_downlink_task(void *pvParameters) {
             }
 
             // Forward response to WAN MCU → PC App
-            // Format: "CFBL:<stack_id>:<status>:<response>"
+            // Format: "CFML:<stack_id>:<status>:<response>"
             {
                 char *resp_packet = (char *)malloc(3072);
                 char *clean_resp  = (char *)malloc(2048);
@@ -193,11 +193,11 @@ static void ble_downlink_task(void *pvParameters) {
 
                     if (ret == ESP_OK) {
                         resp_len = snprintf(resp_packet, 3072,
-                                            "CFBL:%d:OK:%s",
+                                            "CFML:%d:OK:%s",
                                             stack_id, clean_resp);
                     } else {
                         resp_len = snprintf(resp_packet, 3072,
-                                            "CFBL:%d:FAIL:%s",
+                                            "CFML:%d:FAIL:%s",
                                             stack_id, clean_resp);
                     }
 
@@ -295,7 +295,7 @@ static void ble_listener_task(void *pvParameters) {
 
             if (ci > 0) {
                 int pkt_len = snprintf(evt_packet, BLE_LISTEN_BUFFER_SIZE + 32,
-                                       "CFBL:%d:EVT:%s", stack_id, clean_buf);
+                                       "CFML:%d:EVT:%s", stack_id, clean_buf);
                 if (pkt_len > 0) {
                     if (!mcu_wan_enqueue_uplink(HANDLER_BLE,
                                                (uint8_t *)evt_packet,

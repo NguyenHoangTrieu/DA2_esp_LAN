@@ -38,9 +38,10 @@ typedef enum {
   CONFIG_UPDATE_CAN = 2,       // "CFCB" or "CFCM" - CAN config command
   CONFIG_UPDATE_SCAN = 3,      // "CFSC" - Config query command1
   CONFIG_UPDATE_STACK = 4,     // "CFST" - Stack config command
-  CONFIG_UPDATE_RS485 = 5,     // "CFRS" - RS485 config command
-  CONFIG_UPDATE_BLE_JSON = 6,  // "CFBL:JSON" - BLE JSON config
-  CONFIG_UPDATE_BLE_CMD = 7,   // "CFBL:<stack>:<cmd>" - Unified BLE command parser
+  CONFIG_UPDATE_RS485 = 5,     // "CFRS:BR:" - RS485 baud rate command
+  CONFIG_UPDATE_RS485_JSON = 14, // "CFRS:JSON:" - RS485 GPIO mode config
+  CONFIG_UPDATE_BLE_JSON = 6,  // "CFML:JSON" - BLE JSON config
+  CONFIG_UPDATE_BLE_CMD = 7,   // "CFML:<stack>:<cmd>" - Unified BLE command parser
   CONFIG_UPDATE_LORA_JSON    = 8, // "CFLR:JSON" - LoRa JSON config
   CONFIG_UPDATE_LORA_CMD     = 9, // "CFLR:<stack>:<cmd>" - Unified LoRa command parser
   CONFIG_UPDATE_ZIGBEE_JSON  = 10, // "CFZB:JSON" - Zigbee JSON config

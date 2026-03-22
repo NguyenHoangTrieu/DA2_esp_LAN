@@ -10,6 +10,7 @@
 #include "config_handler_lora_commands.h"
 #include "config_handler_zigbee_commands.h"
 #include "config_handler_ble_native_commands.h"
+#include "config_handler_rs485_commands.h"
 #include "config_global.h"
 #include "fota_lan_config.h"
 #include "fota_lan_handler.h"
@@ -41,13 +42,18 @@ config_type_t config_parse_type(const char *cmd, uint16_t len) {
   if (cmd[2] == 'F' && cmd[3] == 'W') {
     return CONFIG_UPDATE_FIRMWARE;
   } else if (cmd[2] == 'R' && cmd[3] == 'S') {
-    return CONFIG_UPDATE_RS485;
-  } else if (cmd[2] == 'B' && cmd[3] == 'L') {
-    // BLE commands - check subcommand
+    // RS485 commands - check subcommand
+    if (len >= 10 && strncmp(cmd + 5, "JSON:", 5) == 0) {
+      return CONFIG_UPDATE_RS485_JSON;
+    } else {
+      return CONFIG_UPDATE_RS485; // CFRS:BR:<baud>
+    }
+  } else if (cmd[2] == 'M' && cmd[3] == 'L') {
+    // BLE AT commands (CFML = CF + Module LAN) - check subcommand
     if (len >= 10 && strncmp(cmd + 5, "JSON:", 5) == 0) {
       return CONFIG_UPDATE_BLE_JSON;
     } else {
-      // All other BLE commands use unified parser
+      // All other BLE AT commands use unified parser
       return CONFIG_UPDATE_BLE_CMD;
     }
   } else if (cmd[2] == 'L' && cmd[3] == 'R') {
@@ -300,6 +306,15 @@ static void config_handler_task(void *arg) {
           ESP_LOGI(TAG, "RS485 baud rate updated from MCU WAN");
         } else {
           ESP_LOGE(TAG, "Failed to parse RS485 baud rate command");
+        }
+        break;
+      }
+      case CONFIG_UPDATE_RS485_JSON: {
+        if (config_parse_rs485_json((const uint8_t *)cmd->raw_data,
+                                    cmd->data_len) == ESP_OK) {
+          ESP_LOGI(TAG, "RS485 JSON GPIO config applied");
+        } else {
+          ESP_LOGE(TAG, "Failed to parse RS485 JSON config");
         }
         break;
       }

@@ -15,6 +15,11 @@
 
 static const char *TAG = "RS485_COMM";
 
+/* ===== JSON GPIO Mode Config ===== */
+
+/** Global JSON-loaded GPIO mode config (overrides hardcoded pins when loaded) */
+static rs485_gpio_mode_config_t g_rs485_gpio_cfg = { .loaded = false };
+
 /* ===== Internal Handle Structure ===== */
 struct rs485_comm_handle_s {
   uint8_t stack_id;
@@ -87,19 +92,54 @@ static esp_err_t rs485_set_mode_internal(rs485_comm_handle_t handle,
     return ESP_ERR_INVALID_STATE;
   }
 
-  esp_err_t ret;
+  esp_err_t ret = ESP_OK;
   uint8_t stack_id = handle->stack_id;
-  
-  // Logic: TX (1) -> Pin High. RX (0) -> Pin Low.
-  bool level = (mode == RS485_MODE_ONLY_SEND) ? true : false; 
 
-  // Set DE
-  ret = stack_handler_gpio_write(stack_id, get_rs485_de_gpio(), level);
-  if (ret != ESP_OK) return ret;
+  if (g_rs485_gpio_cfg.loaded && g_rs485_gpio_cfg.stack_id == stack_id) {
+    /* Use JSON-configured GPIO actions */
+    const rs485_gpio_action_t *actions;
+    uint8_t  count;
+    uint16_t delay_ms;
 
-  // Set RE
-  ret = stack_handler_gpio_write(stack_id, get_rs485_re_gpio(), level);
-  
+    if (mode == RS485_MODE_ONLY_SEND) {
+      actions  = g_rs485_gpio_cfg.send_actions;
+      count    = g_rs485_gpio_cfg.send_count;
+      delay_ms = g_rs485_gpio_cfg.send_delay_ms;
+    } else {
+      actions  = g_rs485_gpio_cfg.recv_actions;
+      count    = g_rs485_gpio_cfg.recv_count;
+      delay_ms = g_rs485_gpio_cfg.recv_delay_ms;
+    }
+
+    for (uint8_t i = 0; i < count; i++) {
+      /* pin_1indexed (1-9) → 0-indexed enum: STACK_GPIO_PIN_(n-1) */
+      if (actions[i].pin_1indexed < 1 || actions[i].pin_1indexed > 9) {
+        ESP_LOGW(TAG, "Invalid pin_1indexed %d, skipping", actions[i].pin_1indexed);
+        continue;
+      }
+      stack_gpio_pin_num_t gpio_pin =
+          (stack_gpio_pin_num_t)(actions[i].pin_1indexed - 1);
+      ret = stack_handler_gpio_write(stack_id, gpio_pin, actions[i].state);
+      if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "GPIO write failed pin=%d: %s",
+                 actions[i].pin_1indexed, esp_err_to_name(ret));
+        return ret;
+      }
+    }
+
+    if (delay_ms > 0) {
+      vTaskDelay(pdMS_TO_TICKS(delay_ms));
+    }
+  } else {
+    /* Fallback: hardcoded DE/RE pin logic */
+    bool level = (mode == RS485_MODE_ONLY_SEND) ? true : false;
+
+    ret = stack_handler_gpio_write(stack_id, get_rs485_de_gpio(), level);
+    if (ret != ESP_OK) return ret;
+
+    ret = stack_handler_gpio_write(stack_id, get_rs485_re_gpio(), level);
+  }
+
   if (ret == ESP_OK) {
     handle->current_mode = mode;
   }
@@ -335,3 +375,34 @@ esp_err_t rs485_comm_set_mode(rs485_comm_handle_t handle, rs485_mode_t mode) {
 
   return rs485_set_mode_internal(handle, mode);
 }
+
+/* ===== JSON GPIO Config API ===== */
+
+esp_err_t rs485_comm_load_gpio_config(const rs485_gpio_mode_config_t *config) {
+  if (!config) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  memcpy(&g_rs485_gpio_cfg, config, sizeof(rs485_gpio_mode_config_t));
+  g_rs485_gpio_cfg.loaded = true;
+
+  ESP_LOGI(TAG, "RS485 GPIO config loaded: stack=%d, SEND=%d actions, RECV=%d actions",
+           g_rs485_gpio_cfg.stack_id,
+           g_rs485_gpio_cfg.send_count,
+           g_rs485_gpio_cfg.recv_count);
+  return ESP_OK;
+}
+
+esp_err_t rs485_comm_get_gpio_config(rs485_gpio_mode_config_t *config) {
+  if (!config) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  if (!g_rs485_gpio_cfg.loaded) {
+    return ESP_ERR_NOT_FOUND;
+  }
+
+  memcpy(config, &g_rs485_gpio_cfg, sizeof(rs485_gpio_mode_config_t));
+  return ESP_OK;
+}
+
