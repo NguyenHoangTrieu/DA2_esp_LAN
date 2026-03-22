@@ -30,6 +30,7 @@
 #define HANDLER_TYPE_ZIG "ZIG" // ZigBee
 #define HANDLER_TYPE_RS4 "RS4" // RS485
 #define HANDLER_TYPE_BLE "BLE" // Bluetooth Low Energy
+#define HANDLER_TYPE_BLN "BLN" // BLE Native (ESP32 direct BLE Mesh)
 
 // ===== Frame Types (Single Byte) =====
 typedef enum {
@@ -61,6 +62,7 @@ typedef enum {
   HANDLER_ZIGBEE = 0x03,
   HANDLER_RS485 = 0x04,
   HANDLER_BLE = 0x05,
+  HANDLER_BLE_NATIVE = 0x06,  /* ESP32-S3 direct BLE Mesh provisioner */
   HANDLER_UNKNOWN = 0xFF
 } handler_id_t;
 
@@ -191,6 +193,8 @@ static inline const char *handler_id_to_string(handler_id_t id) {
     return HANDLER_TYPE_RS4;
   case HANDLER_BLE:
     return HANDLER_TYPE_BLE;
+  case HANDLER_BLE_NATIVE:
+    return HANDLER_TYPE_BLN;
   default:
     return "UNK";
   }
@@ -214,6 +218,8 @@ static inline handler_id_t handler_string_to_id(const uint8_t *str) {
     return HANDLER_RS485;
   if (str[0] == 'B' && str[1] == 'L' && str[2] == 'E')
     return HANDLER_BLE;
+  if (str[0] == 'B' && str[1] == 'L' && str[2] == 'N')
+    return HANDLER_BLE_NATIVE;
   return HANDLER_UNKNOWN;
 }
 

@@ -45,6 +45,8 @@ typedef enum {
   CONFIG_UPDATE_LORA_CMD     = 9, // "CFLR:<stack>:<cmd>" - Unified LoRa command parser
   CONFIG_UPDATE_ZIGBEE_JSON  = 10, // "CFZB:JSON" - Zigbee JSON config
   CONFIG_UPDATE_ZIGBEE_CMD   = 11, // "CFZB:<stack>:<func>" - Unified Zigbee command parser
+  CONFIG_UPDATE_BLE_NATIVE_JSON = 12, // "CFBN:JSON" - BLE Native (ESP32 direct mesh) JSON config
+  CONFIG_UPDATE_BLE_NATIVE_CMD  = 13, // "CFBN:<stack>:<verb>" - BLE Native command
   CONFIG_TYPE_UNKNOWN = 0xFF
 } config_type_t;
 

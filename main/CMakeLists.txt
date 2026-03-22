@@ -9,9 +9,14 @@ idf_component_register(SRCS "DA2_esp_LAN.c"
                             "../Application/Config_Handler/src/config_handler_ble_commands.c"
                             "../Application/Config_Handler/src/config_handler_lora_commands.c"
                             "../Application/Config_Handler/src/config_handler_zigbee_commands.c"
+                            "../Application/Config_Handler/src/config_handler_ble_native_commands.c"
                             "../Application/Config_Handler/src/config_global.c"
                             "../Application/RS485_Handler/src/rs485_handler.c"
                             "../Application/BLE_Handler/src/ble_handler_task.c"
+                            "../Application/BLE_Handler/src/ble_native_handler.c"
+                            "../Application/BLE_Handler/src/ble_native_config.c"
+                            "../Application/BLE_Handler/src/ble_native_uplink.c"
+                            "../Application/BLE_Handler/src/ble_native_downlink.c"
                             "../Application/LoRa_Handler/src/lora_handler_task.c"
                             "../Application/Zigbee_Handler/src/zigbee_handler_task.c"
                             "../Application/Module_Monitor_Task/src/module_monitor_task.c"
@@ -39,6 +44,7 @@ idf_component_register(SRCS "DA2_esp_LAN.c"
                                 nvs_flash
                                 mqtt
                                 esp_adc
+                                bt
                                 esp_driver_i2c
                                 esp_driver_uart
                                 esp_driver_gpio
