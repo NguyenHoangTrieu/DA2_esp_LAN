@@ -627,7 +627,7 @@ esp_err_t mcu_wan_handler_start(void) {
                                   .gpio_cs = 10,
                                   .gpio_io0 = 11,
                                   .gpio_io1 = 13,
-                                  .gpio_data_ready_input = 46,
+                                  .gpio_data_ready_input = 45,
                                   .clock_speed_hz = 10000000,
                                   .mode = 0,
                                   .host_id = SPI2_HOST,
