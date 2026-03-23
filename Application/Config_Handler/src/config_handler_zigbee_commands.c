@@ -206,14 +206,23 @@ esp_err_t config_parse_zigbee_json(const uint8_t *data, uint16_t len) {
     }
 
     const char *ptr   = (const char *)(data + 10);
-    const char *colon = strchr(ptr, ':');
-    if (!colon) {
-        ESP_LOGE(TAG, "ZIGBEE JSON: missing separator");
-        return ESP_FAIL;
+    uint8_t     stack_id;
+    const char *json_data;
+
+    if (ptr[0] == '{') {
+      /* Legacy / no-slot-prefix format — use stack 0 */
+      stack_id  = 0;
+      json_data = ptr;
+    } else {
+      const char *colon = strchr(ptr, ':');
+      if (!colon) {
+          ESP_LOGE(TAG, "ZIGBEE JSON: missing separator");
+          return ESP_FAIL;
+      }
+      stack_id  = (uint8_t)atoi(ptr);
+      json_data = colon + 1;
     }
 
-    uint8_t     stack_id  = (uint8_t)atoi(ptr);
-    const char *json_data = colon + 1;
     uint16_t    json_len  = len - (uint16_t)(json_data - (const char *)data);
 
     if (stack_id >= ZIGBEE_MAX_STACKS) {
@@ -227,7 +236,30 @@ esp_err_t config_parse_zigbee_json(const uint8_t *data, uint16_t len) {
 
     ESP_LOGI(TAG, "ZIGBEE JSON: stack=%u length=%u", stack_id, json_len);
 
-    esp_err_t ret = module_monitor_send_config(stack_id, json_data, json_len);
+    /* Ensure module_type is present */
+    const char *send_json = json_data;
+    uint16_t    send_len  = json_len;
+    char       *patched   = NULL;
+
+    if (json_data[0] == '{' && strstr(json_data, "module_type") == NULL) {
+        const char *inject = "\"module_type\":\"ZIGBEE\",";
+        size_t inject_len  = strlen(inject);
+        size_t new_len     = (size_t)json_len + inject_len;
+        patched = malloc(new_len + 1);
+        if (patched) {
+            patched[0] = '{';
+            memcpy(patched + 1, inject, inject_len);
+            memcpy(patched + 1 + inject_len, json_data + 1, json_len - 1);
+            patched[new_len] = '\0';
+            send_json = patched;
+            send_len  = (uint16_t)new_len;
+            ESP_LOGI(TAG, "Injected missing module_type=ZIGBEE into JSON");
+        }
+    }
+
+    esp_err_t ret = module_monitor_send_config(stack_id, send_json, send_len);
+    if (patched) free(patched);
+
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "ZIGBEE JSON: module_monitor queue failed: %s",
                  esp_err_to_name(ret));

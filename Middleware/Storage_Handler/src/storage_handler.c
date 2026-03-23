@@ -202,7 +202,7 @@ esp_err_t storage_handler_deinit(void) {
 
 esp_err_t storage_handler_save(const uint8_t *data, uint16_t length) {
   if (!g_storage_initialized) {
-    ESP_LOGE(TAG, "Storage handler not initialized");
+    ESP_LOGW(TAG, "Storage handler not initialized (no SD card)");
     return ESP_FAIL;
   }
 
@@ -274,7 +274,6 @@ esp_err_t storage_handler_save(const uint8_t *data, uint16_t length) {
 
 esp_err_t storage_handler_flush(void) {
   if (!g_storage_initialized) {
-    ESP_LOGE(TAG, "Storage handler not initialized");
     return ESP_FAIL;
   }
 
@@ -318,7 +317,6 @@ esp_err_t storage_handler_flush(void) {
 esp_err_t storage_handler_read_oldest(uint8_t *buffer, uint32_t *length,
                                       uint32_t buffer_size) {
   if (!g_storage_initialized) {
-    ESP_LOGE(TAG, "Storage handler not initialized");
     return ESP_FAIL;
   }
 
@@ -349,7 +347,6 @@ esp_err_t storage_handler_read_oldest(uint8_t *buffer, uint32_t *length,
 
 esp_err_t storage_handler_delete_oldest(void) {
   if (!g_storage_initialized) {
-    ESP_LOGE(TAG, "Storage handler not initialized");
     return ESP_FAIL;
   }
 

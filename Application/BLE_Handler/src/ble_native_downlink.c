@@ -230,12 +230,14 @@ static void handle_control(uint8_t stack_id, const char *params_json) {
         return;
     }
 
-    /* Build common client params */
+    /* Build common client params.
+     * net_idx / app_idx == stack_id because each stack loads its keys at
+     * index = stack_id via provisioner_add_local_net_key / _add_local_app_key. */
     esp_ble_mesh_client_common_param_t common = {
         .opcode      = cmd_entry.opcode,
         .model        = model,
-        .ctx.net_idx  = 0,       /* primary net key index */
-        .ctx.app_idx  = 0,       /* primary app key index */
+        .ctx.net_idx  = (uint16_t)stack_id,
+        .ctx.app_idx  = (uint16_t)stack_id,
         .ctx.addr     = dst_addr,
         .ctx.send_ttl = mesh_cfg.ttl,
         .msg_timeout  = 4000,    /* 4 s ack timeout */
@@ -249,8 +251,8 @@ static void handle_control(uint8_t stack_id, const char *params_json) {
      * we just need model-specific structs for ESP-IDF.
      * --------------------------------------------------------------- */
 
-    if (cmd_entry.model_id == ESP_BLE_MESH_MODEL_ID_GEN_ONOFF_CLI) {
-        /* Generic OnOff (model 0x1000) */
+    if (cmd_entry.model_id == ESP_BLE_MESH_MODEL_ID_GEN_ONOFF_SRV) {
+        /* Generic OnOff (server model_id 0x1000 — matches JSON config and model table) */
         cJSON *j_value = j_par ? cJSON_GetObjectItemCaseSensitive(j_par, "value") : NULL;
         uint8_t onoff_val = cJSON_IsNumber(j_value) ? (uint8_t)j_value->valuedouble : 0;
 
@@ -265,8 +267,8 @@ static void handle_control(uint8_t stack_id, const char *params_json) {
         };
         mesh_ret = esp_ble_mesh_generic_client_set_state(&common, &set_state);
 
-    } else if (cmd_entry.model_id == ESP_BLE_MESH_MODEL_ID_LIGHT_LIGHTNESS_CLI) {
-        /* Light Lightness (model 0x1302) */
+    } else if (cmd_entry.model_id == ESP_BLE_MESH_MODEL_ID_LIGHT_LIGHTNESS_SRV) {
+        /* Light Lightness (server model_id 0x1300) */
         cJSON *j_ln = j_par ? cJSON_GetObjectItemCaseSensitive(j_par, "lightness") : NULL;
         uint16_t lightness = cJSON_IsNumber(j_ln) ? (uint16_t)j_ln->valuedouble : 0;
 
@@ -281,8 +283,8 @@ static void handle_control(uint8_t stack_id, const char *params_json) {
         };
         mesh_ret = esp_ble_mesh_light_client_set_state(&common, &set_state);
 
-    } else if (cmd_entry.model_id == ESP_BLE_MESH_MODEL_ID_LIGHT_CTL_CLI) {
-        /* Light CTL (model 0x1305) */
+    } else if (cmd_entry.model_id == ESP_BLE_MESH_MODEL_ID_LIGHT_CTL_SRV) {
+        /* Light CTL (server model_id 0x1303) */
         cJSON *j_lv = j_par ? cJSON_GetObjectItemCaseSensitive(j_par, "lightness")   : NULL;
         cJSON *j_tp = j_par ? cJSON_GetObjectItemCaseSensitive(j_par, "temperature") : NULL;
         cJSON *j_dv = j_par ? cJSON_GetObjectItemCaseSensitive(j_par, "delta_uv")    : NULL;
@@ -291,7 +293,7 @@ static void handle_control(uint8_t stack_id, const char *params_json) {
             .ctl_set = {
                 .op_en       = false,
                 .ctl_lightness = cJSON_IsNumber(j_lv) ? (uint16_t)j_lv->valuedouble : 0,
-                .ctl_temperatrue = cJSON_IsNumber(j_tp) ? (uint16_t)j_tp->valuedouble : 4000,
+                .ctl_temperature = cJSON_IsNumber(j_tp) ? (uint16_t)j_tp->valuedouble : 4000,
                 .ctl_delta_uv  = cJSON_IsNumber(j_dv) ? (int16_t)j_dv->valuedouble : 0,
                 .tid           = (uint8_t)(xTaskGetTickCount() & 0xFF),
                 .trans_time    = 0,

@@ -52,12 +52,14 @@ void app_main(void)
     config_handler_task_start();
     ESP_LOGI(TAG, "Config handler started");
     
+    // Start WAN handler FIRST so its queue/mutexes are allocated before
+    // module handlers (BLE/LoRa/etc.) consume internal RAM on NVS restore.
+    mcu_wan_handler_start();
+    ESP_LOGI(TAG, "MCU WAN handler started");
+
     // Start Module Monitor Task - Module Base Setting Core
     ESP_ERROR_CHECK(module_monitor_task_start());
     ESP_LOGI(TAG, "Module Monitor Task started (Module Base Setting enabled)");
-    
-    mcu_wan_handler_start();
-    ESP_LOGI(TAG, "MCU WAN handler started");
     while (1) {
       vTaskDelay(pdMS_TO_TICKS(1000));
     }

@@ -35,6 +35,13 @@ static void mcu_wan_config_callback(const uint8_t *data, uint16_t len,
 
 config_type_t config_parse_type(const char *cmd, uint16_t len) {
   if (len < 4 || cmd[0] != 'C' || cmd[1] != 'F') {
+    ESP_LOGW(TAG, "config_parse_type: INVALID PREFIX");
+    ESP_LOGW(TAG, "  len=%u (need >=4), cmd[0-3]=%02X %02X %02X %02X ('%c%c%c%c')",
+             len, (unsigned char)cmd[0], (unsigned char)cmd[1], (unsigned char)cmd[2], (unsigned char)cmd[3],
+             (cmd[0] >= 32 && cmd[0] <= 126) ? cmd[0] : '.',
+             (cmd[1] >= 32 && cmd[1] <= 126) ? cmd[1] : '.',
+             (cmd[2] >= 32 && cmd[2] <= 126) ? cmd[2] : '.',
+             (cmd[3] >= 32 && cmd[3] <= 126) ? cmd[3] : '.');
     return CONFIG_TYPE_UNKNOWN;
   }
 
@@ -48,8 +55,8 @@ config_type_t config_parse_type(const char *cmd, uint16_t len) {
     } else {
       return CONFIG_UPDATE_RS485; // CFRS:BR:<baud>
     }
-  } else if (cmd[2] == 'M' && cmd[3] == 'L') {
-    // BLE AT commands (CFML = CF + Module LAN) - check subcommand
+  } else if (cmd[2] == 'B' && cmd[3] == 'L') {
+    // BLE AT commands (CFBL = CF + BLE) - check subcommand
     if (len >= 10 && strncmp(cmd + 5, "JSON:", 5) == 0) {
       return CONFIG_UPDATE_BLE_JSON;
     } else {
@@ -217,7 +224,7 @@ static esp_err_t config_parse_rs485_baud(const uint8_t *data, uint16_t len) {
 static void mcu_wan_config_callback(const uint8_t *data, uint16_t len,
                                     bool is_fota) {
   if (data == NULL || len == 0) {
-    ESP_LOGW(TAG, "Config callback: invalid data");
+    ESP_LOGW(TAG, "Config callback: invalid data (NULL or len=0)");
     return;
   }
 

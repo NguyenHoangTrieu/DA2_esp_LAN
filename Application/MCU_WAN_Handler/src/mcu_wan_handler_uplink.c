@@ -17,7 +17,11 @@ static const char *TAG = "WAN_UL";
 
 #define UPLINK_TASK_STACK_SIZE 1024 * 16
 #define UPLINK_TASK_PRIORITY 5 // Lower than downlink
-#define UPLINK_QUEUE_SIZE 50
+/* Queue depth: each item is ~2 KB inline, so 50 items = ~103 KB of internal
+ * RAM.  On NVS-restore boots module handlers allocate ~40+ KB before this
+ * queue is created, causing xQueueCreate to fail.  5 items (~10 KB) is more
+ * than sufficient — the SPI link can only transfer one packet per ~200 ms. */
+#define UPLINK_QUEUE_SIZE 5
 #define MAX_PAYLOAD_SIZE 2048
 #define ACK_TIMEOUT_MS 200
 #define RTC_REQUEST_INTERVAL_MS 1000

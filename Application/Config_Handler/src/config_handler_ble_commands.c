@@ -37,10 +37,10 @@ static const char *TAG = "ble_commands";
 /**
  * @brief Unified BLE command parser using JSON configuration
  * 
- * Format: "CFML:<stack_id>:<command>"
- * Example: "CFML:0:AT+SCAN=5000" (prefix match)
- * Example: "CFML:1:AT+CONNECT=001122334455" (prefix match AT+CONNECT=)
- * Example: "CFML:0:HW_RESET" (exact match)
+ * Format: "CFBL:<stack_id>:<command>"
+ * Example: "CFBL:0:AT+SCAN=5000" (prefix match)
+ * Example: "CFBL:1:AT+CONNECT=001122334455" (prefix match AT+CONNECT=)
+ * Example: "CFBL:0:HW_RESET" (exact match)
  * 
  * Matches command against JSON config (prefix or exact), extracts GPIO/delays,
  * and executes via command queue.
@@ -56,12 +56,12 @@ esp_err_t config_parse_ble_command(const uint8_t *data, uint16_t len) {
     }
 
     // Check prefix
-    if (strncmp((const char *)data, "CFML:", 5) != 0) {
+    if (strncmp((const char *)data, "CFBL:", 5) != 0) {
         ESP_LOGE(TAG, "BLE CMD: invalid prefix");
         return ESP_FAIL;
     }
 
-    // Parse: CFML:<stack_id>:<command>
+    // Parse: CFBL:<stack_id>:<command>
     const char *ptr = (const char *)(data + 5);
     
     // Extract stack_id
@@ -96,7 +96,7 @@ esp_err_t config_parse_ble_command(const uint8_t *data, uint16_t len) {
         // Notify App: command not recognized by JSON config
         char err_resp[64];
         int err_len = snprintf(err_resp, sizeof(err_resp),
-                               "CFML:%d:FAIL:NO_MATCH", stack_id);
+                               "CFBL:%d:FAIL:NO_MATCH", stack_id);
         if (err_len > 0) {
             mcu_wan_enqueue_uplink(HANDLER_BLE, (uint8_t *)err_resp, (uint16_t)err_len);
         }
@@ -126,7 +126,7 @@ esp_err_t config_parse_ble_command(const uint8_t *data, uint16_t len) {
         // Notify App: command queue full or handler not running
         char err_resp[64];
         int err_len = snprintf(err_resp, sizeof(err_resp),
-                               "CFML:%d:FAIL:QUEUE_FULL", stack_id);
+                               "CFBL:%d:FAIL:QUEUE_FULL", stack_id);
         if (err_len > 0) {
             mcu_wan_enqueue_uplink(HANDLER_BLE, (uint8_t *)err_resp, (uint16_t)err_len);
         }
@@ -158,22 +158,32 @@ esp_err_t config_parse_ble_json(const uint8_t *data, uint16_t len) {
   }
 
   // Check prefix
-  if (strncmp((const char *)data, "CFML:JSON:", 10) != 0) {
+  if (strncmp((const char *)data, "CFBL:JSON:", 10) != 0) {
     ESP_LOGE(TAG, "BLE JSON: invalid prefix");
     return ESP_FAIL;
   }
 
-  // Parse: CFML:JSON:<stack_id>:<json_data>
+  // Parse: CFBL:JSON:<stack_id>:<json_data>
   const char *ptr = (const char *)(data + 10);
-  const char *colon = strchr(ptr, ':');
-  if (!colon) {
-    ESP_LOGE(TAG, "BLE JSON: missing separator");
-    return ESP_FAIL;
+  uint8_t     stack_id;
+  const char *json_data;
+
+  if (ptr[0] == '{') {
+    /* Legacy / no-slot-prefix format: CFBL:JSON:{...json...}
+     * Web app sent JSON directly without prepending "<slot>:".  Use stack 0. */
+    stack_id  = 0;
+    json_data = ptr;
+  } else {
+    const char *colon = strchr(ptr, ':');
+    if (!colon) {
+      ESP_LOGE(TAG, "BLE JSON: missing separator");
+      return ESP_FAIL;
+    }
+    stack_id  = (uint8_t)atoi(ptr);
+    json_data = colon + 1;
   }
 
-  uint8_t stack_id = atoi(ptr);
-  const char *json_data = colon + 1;
-  uint16_t json_len = len - (json_data - (const char *)data);
+  uint16_t json_len = len - (uint16_t)(json_data - (const char *)data);
 
 
   ESP_LOGI(TAG, "Stack ID: %u, JSON length: %u bytes", stack_id, json_len);
@@ -189,11 +199,32 @@ esp_err_t config_parse_ble_json(const uint8_t *data, uint16_t len) {
     return ESP_FAIL;
   }
 
-  esp_err_t ret = module_monitor_send_config(stack_id, json_data, json_len);
+  /* Ensure module_type is present — inject "BLE" if the sender omitted it */
+  const char *send_json = json_data;
+  uint16_t    send_len  = json_len;
+  char       *patched   = NULL;
+
+  if (json_data[0] == '{' && strstr(json_data, "module_type") == NULL) {
+    const char *inject = "\"module_type\":\"BLE\",";
+    size_t inject_len  = strlen(inject);
+    size_t new_len     = (size_t)json_len + inject_len;
+    patched = malloc(new_len + 1);
+    if (patched) {
+      patched[0] = '{';
+      memcpy(patched + 1, inject, inject_len);
+      memcpy(patched + 1 + inject_len, json_data + 1, json_len - 1);
+      patched[new_len] = '\0';
+      send_json = patched;
+      send_len  = (uint16_t)new_len;
+      ESP_LOGI(TAG, "Injected missing module_type=BLE into JSON");
+    }
+  }
+
+  esp_err_t ret = module_monitor_send_config(stack_id, send_json, send_len);
+  if (patched) free(patched);
+
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "Failed to send config to module_monitor: %s", esp_err_to_name(ret));
-    
-    // Send error response (module_monitor_task is not running or queue full)
     uint8_t error_resp[] = "BR:JSON:FAIL:QUEUE";
     mcu_wan_enqueue_uplink(HANDLER_BLE, error_resp, sizeof(error_resp) - 1);
     return ret;
