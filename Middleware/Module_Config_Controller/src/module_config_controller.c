@@ -436,7 +436,9 @@ esp_err_t module_gpio_write(uint8_t stack_id, const char *pin, bool state) {
   }
 
   // Parse pin "XY": X = stack port (0=Stack1, 1=Stack2)
-  //                  Y = GPIO pin number 1-9 (digit), 'W' (WAKE#), or 'P' (PERST#)
+  //                  Y = GPIO pin number 00-17 (flat TCA6416A mapping: P00-P17)
+  // New architecture: All 16 TCA pins directly accessible via numeric pin ID
+  // No predefined meaning for pins (WAKE#/PERST#) — configured per use case
   uint8_t port = pin[0] - '0';
 
   if (port != stack_id) {
@@ -444,20 +446,25 @@ esp_err_t module_gpio_write(uint8_t stack_id, const char *pin, bool state) {
     return ESP_ERR_INVALID_ARG;
   }
 
+  // Parse numeric pin ID 00-17 (supports both single digit 0-9 and two digits 10-17)
   stack_gpio_pin_num_t gpio_pin;
-  if (pin[1] == 'W' || pin[1] == 'w') {
-    gpio_pin = STACK_GPIO_PIN_WAKE;
-  } else if (pin[1] == 'P' || pin[1] == 'p') {
-    gpio_pin = STACK_GPIO_PIN_PERST;
-  } else {
-    uint8_t pin_num = pin[1] - '0'; // 1-indexed: '1'=GPIO1 ... '9'=GPIO9
-    if (pin_num < 1 || pin_num > 9) {
-      ESP_LOGE(TAG, "Invalid pin number: %d (must be 1-9)", pin_num);
-      return ESP_ERR_INVALID_ARG;
-    }
-    // Convert 1-indexed to 0-indexed enum
-    gpio_pin = (stack_gpio_pin_num_t)(pin_num - 1);
+  int pin_num = -1;
+  
+  if (strlen(pin) == 2) {
+    // Single digit: 0-9
+    pin_num = pin[1] - '0';
+  } else if (strlen(pin) == 3 && pin[1] >= '0' && pin[1] <= '9' && pin[2] >= '0' && pin[2] <= '9') {
+    // Two digits: 00-17
+    pin_num = (pin[1] - '0') * 10 + (pin[2] - '0');
   }
+  
+  if (pin_num < 4 || pin_num > 17) {
+    ESP_LOGE(TAG, "Invalid GPIO pin: %s (must be 04-17)", pin);
+    return ESP_ERR_INVALID_ARG;
+  }
+  
+  gpio_pin = (stack_gpio_pin_num_t)pin_num;
+  ESP_LOGD(TAG, "Parsed pin %s as GPIO pin %d (enum %d)", pin, pin_num, gpio_pin);
 
   ESP_LOGI(TAG, "GPIO write: stack=%d, pin=%s, state=%d", stack_id, pin, state);
 
@@ -496,7 +503,8 @@ esp_err_t module_gpio_write_multi(uint8_t stack_id,
       return ESP_ERR_INVALID_ARG;
     }
 
-    // Parse "XY": X=port (0=Stack1, 1=Stack2), Y=pin 1-9 / 'W'=WAKE# / 'P'=PERST#
+    // Parse "XY": X=port (0=Stack1, 1=Stack2), Y=pin 00-17 (flat GPIO mapping)
+    // New architecture: All 16 TCA pins accessible, no predefined W/P shortcuts
     uint8_t port = gpio_actions[i].pin[0] - '0';
 
     if (port != stack_id) {
@@ -505,21 +513,25 @@ esp_err_t module_gpio_write_multi(uint8_t stack_id,
       return ESP_ERR_INVALID_ARG;
     }
 
-    char second = gpio_actions[i].pin[1];
-    if (second == 'W' || second == 'w') {
-      actions[i].pin = STACK_GPIO_PIN_WAKE;
-    } else if (second == 'P' || second == 'p') {
-      actions[i].pin = STACK_GPIO_PIN_PERST;
-    } else {
-      uint8_t pin_num = second - '0'; // 1-indexed
-      if (pin_num < 1 || pin_num > 9) {
-        ESP_LOGE(TAG, "Invalid pin number: %d at index %d (must be 1-9 or W/P)",
-                 pin_num, i);
-        return ESP_ERR_INVALID_ARG;
-      }
-      // Convert 1-indexed to 0-indexed enum
-      actions[i].pin = (stack_gpio_pin_num_t)(pin_num - 1);
+    // Parse numeric pin ID 00-17
+    int pin_num = -1;
+    const char *pin_str = gpio_actions[i].pin;
+    size_t pin_len = strlen(pin_str);
+    
+    if (pin_len == 2) {
+      // Single digit 0-9
+      pin_num = pin_str[1] - '0';
+    } else if (pin_len == 3 && pin_str[1] >= '0' && pin_str[1] <= '9' && pin_str[2] >= '0' && pin_str[2] <= '9') {
+      // Two digits 00-17
+      pin_num = (pin_str[1] - '0') * 10 + (pin_str[2] - '0');
     }
+    
+    if (pin_num < 4 || pin_num > 17) {
+      ESP_LOGE(TAG, "Invalid GPIO pin format at index %d: expected 04-17, got %s", i, pin_str);
+      return ESP_ERR_INVALID_ARG;
+    }
+    
+    actions[i].pin = (stack_gpio_pin_num_t)pin_num;
     actions[i].level = gpio_actions[i].state;
   }
 
