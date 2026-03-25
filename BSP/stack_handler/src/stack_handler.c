@@ -1,6 +1,10 @@
-/**
+﻿/**
  * @file stack_handler.c
- * @brief Communication Stack Manager Implementation
+ * @brief LAN Communication Stack Manager â€” two TCA6416A instances
+ *
+ * Each adapter slot has its own TCA6416A (I2C 0x20 or 0x21).
+ * Flat pin mapping: enum 0-7 â†’ PORT_0, enum 8-15 â†’ PORT_1.
+ * Module ID is read from P00-P03 at boot; slot identity verified via P17.
  */
 
 #include "stack_handler.h"
@@ -8,411 +12,211 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "tca_handler.h"
+#include <stdio.h>
 #include <string.h>
 
 static const char *TAG = "STACK_HANDLER";
 
-/* ===== GPIO Pin Mapping Tables ===== */
+/* ===== Per-slot state ===== */
 
-// Stack 1 GPIO mapping (LAN1): GPIO number -> {TCA_PORT, TCA_PIN}
-static const struct {
-  tca_port_t port;
-  uint8_t pin;
-} stack1_gpio_map[STACK_GPIO_PIN_COUNT] = {
-    {TCA_PORT_2, 1}, // GPIO 1  -> P21
-    {TCA_PORT_2, 2}, // GPIO 2  -> P22
-    {TCA_PORT_2, 3}, // GPIO 3  -> P23
-    {TCA_PORT_2, 4}, // GPIO 4  -> P24
-    {TCA_PORT_2, 5}, // GPIO 5  -> P25
-    {TCA_PORT_1, 3}, // GPIO 6  -> P13
-    {TCA_PORT_1, 4}, // GPIO 7  -> P14
-    {TCA_PORT_1, 5}, // GPIO 8  -> P15
-    {TCA_PORT_1, 6}, // GPIO 9  -> P16
-    {TCA_PORT_1, 7}, // WAKE#   -> P17
-    {TCA_PORT_2, 0}  // PERST#  -> P20
-};
-
-// Stack 2 GPIO mapping (LAN2): GPIO number -> {TCA_PORT, TCA_PIN}
-static const struct {
-  tca_port_t port;
-  uint8_t pin;
-} stack2_gpio_map[STACK_GPIO_PIN_COUNT] = {
-    {TCA_PORT_0, 6}, // GPIO 1  -> P06
-    {TCA_PORT_0, 7}, // GPIO 2  -> P07
-    {TCA_PORT_1, 0}, // GPIO 3  -> P10
-    {TCA_PORT_1, 1}, // GPIO 4  -> P11
-    {TCA_PORT_1, 2}, // GPIO 5  -> P12
-    {TCA_PORT_0, 0}, // GPIO 6  -> P00
-    {TCA_PORT_0, 1}, // GPIO 7  -> P01
-    {TCA_PORT_0, 2}, // GPIO 8  -> P02
-    {TCA_PORT_0, 3}, // GPIO 9  -> P03
-    {TCA_PORT_0, 4}, // WAKE#   -> P04
-    {TCA_PORT_0, 5}  // PERST#  -> P05
-};
-
-/* ===== Internal State ===== */
-
-static bool g_initialized = false;
+static tca6416a_inst_t   g_tca[STACK_HANDLER_MAX_STACKS];
+static char              g_module_id[STACK_HANDLER_MAX_STACKS][4]; /* "000"-"015" */
+static bool              g_slot_present[STACK_HANDLER_MAX_STACKS];
 static SemaphoreHandle_t g_stack_mutex[STACK_HANDLER_MAX_STACKS];
+static bool              g_initialized = false;
 
-/* ===== Helper Functions ===== */
+/* Fixed I2C address and INT GPIO per slot */
+static const uint8_t k_i2c_addr[STACK_HANDLER_MAX_STACKS] = {
+    TCA6416A_I2C_ADDR_0,   /* Slot 0 (LAN1): ADDR=GND â†’ 0x20 */
+    TCA6416A_I2C_ADDR_1,   /* Slot 1 (LAN2): ADDR=VCC â†’ 0x21 */
+};
+static const int k_int_gpio[STACK_HANDLER_MAX_STACKS] = {
+    TCA6416A_INT_PIN_LAN1, /* Slot 0 INT: GPIO47 */
+    TCA6416A_INT_PIN_LAN2, /* Slot 1 INT: GPIO48 */
+};
 
-static inline bool is_valid_stack_id(uint8_t stack_id) {
-  return (stack_id < STACK_HANDLER_MAX_STACKS);
+/* ===== Helpers ===== */
+
+static inline bool is_valid_stack_id(uint8_t id)        { return id < STACK_HANDLER_MAX_STACKS; }
+static inline bool is_valid_pin(stack_gpio_pin_num_t p)  { return (uint8_t)p < STACK_GPIO_PIN_COUNT; }
+
+/* Flat mapping: enum 0-7 â†’ PORT_0 bit 0-7, enum 8-15 â†’ PORT_1 bit 0-7 */
+static void get_tca_mapping(stack_gpio_pin_num_t pin, tca_port_t *port, uint8_t *pin_num) {
+    *port    = ((uint8_t)pin < 8) ? TCA_PORT_0 : TCA_PORT_1;
+    *pin_num = (uint8_t)((uint8_t)pin % 8);
 }
 
-static inline bool is_valid_pin(stack_gpio_pin_num_t pin) {
-  return (pin < STACK_GPIO_PIN_COUNT);
+/* Read 4-bit module ID from P00-P03 into g_module_id[slot] */
+static void read_module_id(uint8_t slot) {
+    uint8_t port0_val = 0;
+    esp_err_t ret = tca_read_port_inst(&g_tca[slot], TCA_PORT_0, &port0_val);
+    if (ret != ESP_OK) {
+        snprintf(g_module_id[slot], sizeof(g_module_id[slot]), "000");
+        return;
+    }
+    uint8_t id = port0_val & 0x0F; /* bits 0-3 = P00-P03 */
+    snprintf(g_module_id[slot], sizeof(g_module_id[slot]), "%03u", id);
 }
 
-static void get_tca_mapping(uint8_t stack_id, stack_gpio_pin_num_t pin,
-                            tca_port_t *port, uint8_t *pin_num) {
-  if (stack_id == 0) {
-    *port = stack1_gpio_map[pin].port;
-    *pin_num = stack1_gpio_map[pin].pin;
-  } else {
-    *port = stack2_gpio_map[pin].port;
-    *pin_num = stack2_gpio_map[pin].pin;
-  }
-}
-
-/* ===== API Implementation ===== */
+/* ===== API ===== */
 
 esp_err_t stack_handler_init(void) {
-  if (g_initialized) {
-    ESP_LOGW(TAG, "Already initialized");
-    return ESP_OK;
-  }
-
-  ESP_LOGI(TAG, "Initializing stack handler");
-
-  if (tca_test_connection() != ESP_OK) {
-    ESP_LOGE(TAG, "TCA6424A not available");
-    return ESP_ERR_INVALID_STATE;
-  }
-
-  // Configure all TCA ports as inputs by default
-  esp_err_t ret;
-
-  ret = tca_configure_port(TCA_PORT_0, 0xFF);
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to configure TCA Port 0");
-    return ret;
-  }
-
-  ret = tca_configure_port(TCA_PORT_1, 0xFF);
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to configure TCA Port 1");
-    return ret;
-  }
-
-  ret = tca_configure_port(TCA_PORT_2, 0xFF);
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to configure TCA Port 2");
-    return ret;
-  }
-
-  // Initialize mutexes for each stack
-  for (int i = 0; i < STACK_HANDLER_MAX_STACKS; i++) {
-    g_stack_mutex[i] = xSemaphoreCreateMutex();
-    if (!g_stack_mutex[i]) {
-      ESP_LOGE(TAG, "Failed to create mutex for stack %d", i);
-      // Clean up previously created mutexes
-      for (int j = 0; j < i; j++) {
-        vSemaphoreDelete(g_stack_mutex[j]);
-      }
-      return ESP_ERR_NO_MEM;
+    if (g_initialized) {
+        ESP_LOGW(TAG, "Already initialized");
+        return ESP_OK;
     }
-  }
 
-  g_initialized = true;
+    memset(g_tca,          0, sizeof(g_tca));
+    memset(g_slot_present, 0, sizeof(g_slot_present));
+    for (int i = 0; i < STACK_HANDLER_MAX_STACKS; i++)
+        snprintf(g_module_id[i], sizeof(g_module_id[i]), "000");
 
-  ESP_LOGI(TAG, "Stack handler initialized");
-  ESP_LOGI(TAG, "  Stack 1 (LAN1): GPIO1-9=P21-P25,P13-P16 | WAKE#=P17 | PERST#=P20");
-  ESP_LOGI(TAG, "  Stack 2 (LAN2): GPIO1-9=P06,P07,P10-P12,P00-P03 | WAKE#=P04 | PERST#=P05");
+    for (int slot = 0; slot < STACK_HANDLER_MAX_STACKS; slot++) {
+        g_stack_mutex[slot] = xSemaphoreCreateMutex();
+        if (!g_stack_mutex[slot]) {
+            ESP_LOGE(TAG, "Failed to create mutex for slot %d", slot);
+            for (int j = 0; j < slot; j++) vSemaphoreDelete(g_stack_mutex[j]);
+            return ESP_ERR_NO_MEM;
+        }
+    }
 
-  return ESP_OK;
+    /* Probe each adapter slot */
+    for (int slot = 0; slot < STACK_HANDLER_MAX_STACKS; slot++) {
+        esp_err_t ret = tca_init_inst(&g_tca[slot], k_i2c_addr[slot], k_int_gpio[slot]);
+        if (ret != ESP_OK) {
+            ESP_LOGI(TAG, "Slot %d: no adapter (0x%02X not found)", slot, k_i2c_addr[slot]);
+            continue;
+        }
+
+        g_slot_present[slot] = true;
+
+        /* Sanity-check P17 (IOX_SLOTDET) */
+        bool slotdet = false;
+        tca_read_pin_inst(&g_tca[slot], TCA_PORT_1, 7 /* P17 = PORT_1 bit 7 */, &slotdet);
+        int expected = (slot == 1) ? 1 : 0;
+        if ((int)slotdet != expected)
+            ESP_LOGW(TAG, "Slot%d SLOTDET=%d, expected %d (wiring check?)",
+                     slot, (int)slotdet, expected);
+
+        /* Read module ID from P00-P03 */
+        read_module_id(slot);
+
+        ESP_LOGI(TAG, "Slot %d: TCA6416A@0x%02X present, module_id=%s SLOTDET=%d",
+                 slot, k_i2c_addr[slot], g_module_id[slot], (int)slotdet);
+    }
+
+    g_initialized = true;
+    return ESP_OK;
 }
 
 esp_err_t stack_handler_gpio_write(uint8_t stack_id, stack_gpio_pin_num_t pin,
                                    bool level) {
-  if (!g_initialized) {
-    ESP_LOGE(TAG, "Not initialized");
-    return ESP_ERR_INVALID_STATE;
-  }
+    if (!g_initialized)             return ESP_ERR_INVALID_STATE;
+    if (!is_valid_stack_id(stack_id)) return ESP_ERR_INVALID_ARG;
+    if (!g_slot_present[stack_id])  return ESP_ERR_NOT_FOUND;
+    if (!is_valid_pin(pin))         return ESP_ERR_INVALID_ARG;
 
-  if (!is_valid_stack_id(stack_id)) {
-    ESP_LOGE(TAG, "Invalid stack ID: %d", stack_id);
-    return ESP_ERR_INVALID_ARG;
-  }
-
-  if (!is_valid_pin(pin)) {
-    ESP_LOGE(TAG, "Invalid pin: %d", pin);
-    return ESP_ERR_INVALID_ARG;
-  }
-
-  tca_port_t port;
-  uint8_t pin_num;
-  get_tca_mapping(stack_id, pin, &port, &pin_num);
-
-  esp_err_t ret = tca_set_pin_verified(port, pin_num, level, true);
-
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to write Stack%d GPIO%d (P%d%d)", stack_id + 1,
-             pin + 1, port, pin_num);
-  }
-
-  return ret;
+    tca_port_t port; uint8_t pin_num;
+    get_tca_mapping(pin, &port, &pin_num);
+    return tca_set_pin_verified_inst(&g_tca[stack_id], port, pin_num, level, true);
 }
 
 esp_err_t stack_handler_gpio_read(uint8_t stack_id, stack_gpio_pin_num_t pin,
                                   bool *level) {
-  if (!g_initialized) {
-    ESP_LOGE(TAG, "Not initialized");
-    return ESP_ERR_INVALID_STATE;
-  }
+    if (!g_initialized)                       return ESP_ERR_INVALID_STATE;
+    if (!is_valid_stack_id(stack_id) || !level) return ESP_ERR_INVALID_ARG;
+    if (!g_slot_present[stack_id])            return ESP_ERR_NOT_FOUND;
+    if (!is_valid_pin(pin))                   return ESP_ERR_INVALID_ARG;
 
-  if (!is_valid_stack_id(stack_id) || !level) {
-    ESP_LOGE(TAG, "Invalid arguments");
-    return ESP_ERR_INVALID_ARG;
-  }
-
-  if (!is_valid_pin(pin)) {
-    ESP_LOGE(TAG, "Invalid pin: %d", pin);
-    return ESP_ERR_INVALID_ARG;
-  }
-
-  tca_port_t port;
-  uint8_t pin_num;
-  get_tca_mapping(stack_id, pin, &port, &pin_num);
-
-  esp_err_t ret = tca_read_pin(port, pin_num, level);
-
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to read Stack%d GPIO%d (P%d%d)", stack_id + 1,
-             pin + 1, port, pin_num);
-  }
-
-  return ret;
+    tca_port_t port; uint8_t pin_num;
+    get_tca_mapping(pin, &port, &pin_num);
+    return tca_read_pin_inst(&g_tca[stack_id], port, pin_num, level);
 }
 
 esp_err_t stack_handler_gpio_set_direction(uint8_t stack_id,
                                            stack_gpio_pin_num_t pin,
                                            bool is_output) {
-  if (!g_initialized) {
-    ESP_LOGE(TAG, "Not initialized");
-    return ESP_ERR_INVALID_STATE;
-  }
+    if (!g_initialized)             return ESP_ERR_INVALID_STATE;
+    if (!is_valid_stack_id(stack_id)) return ESP_ERR_INVALID_ARG;
+    if (!g_slot_present[stack_id])  return ESP_ERR_NOT_FOUND;
+    if (!is_valid_pin(pin))         return ESP_ERR_INVALID_ARG;
 
-  if (!is_valid_stack_id(stack_id)) {
-    ESP_LOGE(TAG, "Invalid stack ID: %d", stack_id);
-    return ESP_ERR_INVALID_ARG;
-  }
+    tca_port_t port; uint8_t pin_num;
+    get_tca_mapping(pin, &port, &pin_num);
 
-  if (!is_valid_pin(pin)) {
-    ESP_LOGE(TAG, "Invalid pin: %d", pin);
-    return ESP_ERR_INVALID_ARG;
-  }
+    uint8_t cfg;
+    esp_err_t ret = tca_read_config_register_inst(&g_tca[stack_id], port, &cfg);
+    if (ret != ESP_OK) return ret;
 
-  tca_port_t port;
-  uint8_t pin_num;
-  get_tca_mapping(stack_id, pin, &port, &pin_num);
+    if (is_output)  cfg &= ~(uint8_t)(1u << pin_num);
+    else            cfg |=  (uint8_t)(1u << pin_num);
 
-  // Read current CONFIGURATION register
-  uint8_t port_cfg;
-  esp_err_t ret = tca_read_config_register(port, &port_cfg);
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to read config register P%d", port);
-    return ret;
-  }
-
-  ESP_LOGI(TAG, "Before: Stack%d GPIO%d (P%d.%d) config=0x%02X", stack_id + 1,
-           pin + 1, port, pin_num, port_cfg);
-
-  // Modify pin direction (TCA6424A: 1=input, 0=output)
-  if (is_output) {
-    port_cfg &= ~(1 << pin_num); // Clear bit = output
-  } else {
-    port_cfg |= (1 << pin_num); // Set bit = input
-  }
-
-  // Write back configuration
-  ret = tca_configure_port(port, port_cfg);
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to write config P%d", port);
-    return ret;
-  }
-
-  // Verify
-  uint8_t verify_cfg;
-  ret = tca_read_config_register(port, &verify_cfg);
-  if (ret == ESP_OK) {
-    bool actual_is_output = !(verify_cfg & (1 << pin_num));
-    ESP_LOGI(TAG, "After: Stack%d GPIO%d (P%d.%d) config=0x%02X - %s %s",
-             stack_id + 1, pin + 1, port, pin_num, verify_cfg,
-             actual_is_output ? "OUTPUT" : "INPUT",
-             (actual_is_output == is_output) ? "OK" : "FAILED");
-  }
-
-  return ret;
+    return tca_configure_port_inst(&g_tca[stack_id], port, cfg);
 }
-/* ===== New APIs for Module Controller Support ===== */
 
 esp_err_t stack_handler_gpio_write_multi(uint8_t stack_id,
                                          const gpio_action_t *actions,
                                          size_t count) {
-  if (!g_initialized) {
-    ESP_LOGE(TAG, "Not initialized");
-    return ESP_ERR_INVALID_STATE;
-  }
+    if (!g_initialized)                                    return ESP_ERR_INVALID_STATE;
+    if (!is_valid_stack_id(stack_id) || !actions || count == 0) return ESP_ERR_INVALID_ARG;
+    if (!g_slot_present[stack_id])                         return ESP_ERR_NOT_FOUND;
 
-  if (!is_valid_stack_id(stack_id) || !actions || count == 0) {
-    ESP_LOGE(TAG, "Invalid arguments");
-    return ESP_ERR_INVALID_ARG;
-  }
+    uint8_t port_masks[2]  = {0};
+    uint8_t port_states[2] = {0};
 
-  // Group actions by TCA port to minimize I2C transactions
-  uint8_t port_masks[3] = {0};  // Bitmask of which pins to modify on each port
-  uint8_t port_states[3] = {0}; // Desired state for modified pins
-
-  // Build port masks and states
-  for (size_t i = 0; i < count; i++) {
-    if (!is_valid_pin(actions[i].pin)) {
-      ESP_LOGW(TAG, "Skipping invalid pin %d", actions[i].pin);
-      continue;
+    for (size_t i = 0; i < count; i++) {
+        if (!is_valid_pin(actions[i].pin)) {
+            ESP_LOGW(TAG, "Skipping invalid pin %d", actions[i].pin);
+            continue;
+        }
+        tca_port_t port; uint8_t pin_num;
+        get_tca_mapping(actions[i].pin, &port, &pin_num);
+        port_masks[port]  |= (uint8_t)(1u << pin_num);
+        if (actions[i].level)
+            port_states[port] |= (uint8_t)(1u << pin_num);
     }
 
-    tca_port_t port;
-    uint8_t pin_num;
-    get_tca_mapping(stack_id, actions[i].pin, &port, &pin_num);
+    esp_err_t ret = ESP_OK;
+    for (int p = 0; p < 2 && ret == ESP_OK; p++) {
+        if (port_masks[p] == 0) continue;
 
-    port_masks[port] |= (1 << pin_num);
-    if (actions[i].level) {
-      port_states[port] |= (1 << pin_num);
+        /* Set affected pins as output */
+        uint8_t cfg;
+        ret = tca_read_config_register_inst(&g_tca[stack_id], (tca_port_t)p, &cfg);
+        if (ret != ESP_OK) break;
+        cfg &= ~port_masks[p];
+        ret = tca_configure_port_inst(&g_tca[stack_id], (tca_port_t)p, cfg);
+        if (ret != ESP_OK) break;
+
+        /* Read-modify-write output register */
+        uint8_t current;
+        ret = tca_read_output_register_inst(&g_tca[stack_id], (tca_port_t)p, &current);
+        if (ret != ESP_OK) break;
+        current = (current & ~port_masks[p]) | (port_states[p] & port_masks[p]);
+        ret = tca_write_output_register_inst(&g_tca[stack_id], (tca_port_t)p, current);
     }
-  }
 
-  // Write to each port once (batched operation)
-  esp_err_t ret = ESP_OK;
-  for (int port = 0; port < 3; port++) {
-    if (port_masks[port] != 0) {
-      // Step 1: Set affected pins as OUTPUT in CONFIG register (0=output, 1=input)
-      uint8_t cfg;
-      ret = tca_read_config_register((tca_port_t)port, &cfg);
-      if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to read CONFIG P%d", port);
-        break;
-      }
-      cfg &= ~port_masks[port]; // Clear bits = set to output
-      ret = tca_configure_port((tca_port_t)port, cfg);
-      if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to set OUTPUT direction P%d", port);
-        break;
-      }
-
-      // Step 2: Read-modify-write OUTPUT register
-      uint8_t current;
-      ret = tca_read_output_register((tca_port_t)port, &current);
-      if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to read P%d output register", port);
-        break;
-      }
-
-      // Modify only target bits
-      current = (current & ~port_masks[port]) |
-                (port_states[port] & port_masks[port]);
-
-      // Write back
-      ret = tca_write_output_register((tca_port_t)port, current);
-      if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to write P%d output register", port);
-        break;
-      }
-
-      ESP_LOGD(TAG, "P%d: cfg=0x%02X, out=0x%02X (mask=0x%02X)",
-               port, cfg, current, port_masks[port]);
-    }
-  }
-
-  ESP_LOGD(TAG, "Stack%d: Batch wrote %d GPIO actions", stack_id + 1, count);
-  return ret;
+    return ret;
 }
 
 esp_err_t stack_handler_gpio_get_state(uint8_t stack_id,
                                        stack_gpio_pin_num_t pin, bool *state) {
-  if (!g_initialized) {
-    ESP_LOGE(TAG, "Not initialized");
-    return ESP_ERR_INVALID_STATE;
-  }
-
-  if (!is_valid_stack_id(stack_id) || !is_valid_pin(pin) || !state) {
-    ESP_LOGE(TAG, "Invalid arguments");
-    return ESP_ERR_INVALID_ARG;
-  }
-
-  // Read current state (same as stack_handler_gpio_read)
-  return stack_handler_gpio_read(stack_id, pin, state);
+    return stack_handler_gpio_read(stack_id, pin, state);
 }
 
 esp_err_t stack_handler_lock(uint8_t stack_id) {
-  if (!g_initialized) {
-    ESP_LOGE(TAG, "Not initialized");
-    return ESP_ERR_INVALID_STATE;
-  }
-
-  if (!is_valid_stack_id(stack_id)) {
-    ESP_LOGE(TAG, "Invalid stack ID: %d", stack_id);
-    return ESP_ERR_INVALID_ARG;
-  }
-
-  if (xSemaphoreTake(g_stack_mutex[stack_id], pdMS_TO_TICKS(1000)) != pdTRUE) {
-    ESP_LOGW(TAG, "Failed to acquire mutex for stack%d", stack_id + 1);
-    return ESP_ERR_TIMEOUT;
-  }
-
-  ESP_LOGD(TAG, "Stack%d locked", stack_id + 1);
-  return ESP_OK;
+    if (!g_initialized || !is_valid_stack_id(stack_id)) return ESP_ERR_INVALID_ARG;
+    return (xSemaphoreTake(g_stack_mutex[stack_id], pdMS_TO_TICKS(1000)) == pdTRUE)
+           ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 
 esp_err_t stack_handler_unlock(uint8_t stack_id) {
-  if (!g_initialized) {
-    ESP_LOGE(TAG, "Not initialized");
-    return ESP_ERR_INVALID_STATE;
-  }
-
-  if (!is_valid_stack_id(stack_id)) {
-    ESP_LOGE(TAG, "Invalid stack ID: %d", stack_id);
-    return ESP_ERR_INVALID_ARG;
-  }
-
-  xSemaphoreGive(g_stack_mutex[stack_id]);
-  ESP_LOGD(TAG, "Stack%d unlocked", stack_id + 1);
-
-  return ESP_OK;
+    if (!g_initialized || !is_valid_stack_id(stack_id)) return ESP_ERR_INVALID_ARG;
+    xSemaphoreGive(g_stack_mutex[stack_id]);
+    return ESP_OK;
 }
 
-/**
- * @brief Get stack module ID for Module Base Setting architecture (trial version)
- * 
- * For trial phase (BLE-only):
- * - Stack 0: Returns "002" (BLE STM32WB module)
- * - Stack 1: Returns "000" (no module)
- * 
- * This is a pseudo-implementation for testing Module Base Setting concept.
- * In production, this should detect actual module hardware.
- */
 const char* stack_handler_get_module_id(uint8_t stack_id) {
-  if (!is_valid_stack_id(stack_id)) {
-    ESP_LOGW(TAG, "Invalid stack_id %d, returning '000'", stack_id);
-    return "000";
-  }
-  
-  // Trial version (BLE-only): Stack 0 has BLE STM32WB module
-  if (stack_id == 0) {
-    ESP_LOGI(TAG, "Stack %d module ID: 002 (BLE STM32WB)", stack_id);
-    return "002";
-  } else {
-    ESP_LOGI(TAG, "Stack %d module ID: 000 (No module)", stack_id);
-    return "000";
-  }
+    if (!is_valid_stack_id(stack_id)) return "000";
+    return g_module_id[stack_id];
 }

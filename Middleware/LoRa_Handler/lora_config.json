@@ -287,6 +287,17 @@
             "timeout": 2000,
             "gpio_end_control": [],
             "delay_end": 0
+        },
+        {
+            "function_name": "MODULE_SET_PORT",
+            "command": "AT+APPPORT=",
+            "is_prefix": true,
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "+APPPORT:",
+            "timeout": 1500,
+            "gpio_end_control": [],
+            "delay_end": 0
         }
     ]
 }

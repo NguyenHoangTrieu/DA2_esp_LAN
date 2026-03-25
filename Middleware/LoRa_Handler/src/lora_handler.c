@@ -752,8 +752,9 @@ static const char *s_lora_func_names[LORA_FUNC_COUNT] = {
     "MODULE_SEND_UNCONFIRMED",  // 22
     "MODULE_SEND_CONFIRMED",    // 23
     "MODULE_READ_RECV",         // 24
-    /* Slots 25-27 reserved for future extensions */
-    "", "", "",
+    "MODULE_SET_PORT",          // 25
+    /* Slots 26-27 reserved for future extensions */
+    "", "",
 };
 
 esp_err_t lora_handler_get_function_by_command(uint8_t stack_id,

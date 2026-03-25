@@ -56,8 +56,10 @@ typedef enum {
     LORA_FUNC_SEND_UNCONFIRMED,
     LORA_FUNC_SEND_CONFIRMED,
     LORA_FUNC_READ_RECV,
+    /* -- Port (25) ----------------------------------------------------------- */
+    LORA_FUNC_SET_PORT,
 
-    LORA_FUNC_COUNT    = 28,     ///< Capacity (25 defined + 3 reserved)
+    LORA_FUNC_COUNT    = 28,     ///< Capacity (26 defined + 2 reserved)
     LORA_FUNC_INVALID  = 0xFF
 } lora_function_id_t;
 

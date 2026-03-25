@@ -1,6 +1,14 @@
 /**
  * @file stack_handler.h
- * @brief Communication Stack Manager with GPIO Port Management
+ * @brief LAN Communication Stack Manager — two adapter slots (LAN1 & LAN2)
+ *
+ * Each slot has a dedicated TCA6416A. Pin mapping is flat:
+ *   P00-P07 → PORT_0 bits 0-7 (enum 0-7)
+ *   P10-P17 → PORT_1 bits 0-7 (enum 8-15)
+ *
+ * Special pins on every adapter board:
+ *   P00-P03 : 4-bit adapter module ID (input, factory-programmed)
+ *   P17     : IOX_SLOTDET — 0=LAN1 slot, 1=LAN2 slot (input)
  */
 
 #ifndef STACK_HANDLER_H
@@ -16,31 +24,29 @@ extern "C" {
 #endif
 
 /* ===== Constants ===== */
-#define STACK_HANDLER_MAX_STACKS 2
-#define STACK_GPIO_PIN_COUNT 11  // 9 GPIO + WAKE# + PERST#
+#define STACK_HANDLER_MAX_STACKS 2     /**< LAN MCU supports 2 adapter slots       */
+#define STACK_GPIO_PIN_COUNT     16    /**< Full TCA6416A 16-pin direct mapping     */
+#define STACK_GPIO_PIN_NONE      0xFF  /**< Sentinel: no pin assigned               */
 
-/* ===== Stack Port Definitions ===== */
+/* ===== GPIO Pin Identifiers ===== */
 typedef enum {
-  STACK_PORT_1 = 0,
-  STACK_PORT_2 = 1
-} stack_port_t;
-
-/* ===== GPIO Pin Numbers ===== */
-typedef enum {
-  STACK_GPIO_PIN_1    = 0,
-  STACK_GPIO_PIN_2    = 1,
-  STACK_GPIO_PIN_3    = 2,
-  STACK_GPIO_PIN_4    = 3,
-  STACK_GPIO_PIN_5    = 4,
-  STACK_GPIO_PIN_6    = 5,
-  STACK_GPIO_PIN_7    = 6,
-  STACK_GPIO_PIN_8    = 7,
-  STACK_GPIO_PIN_9    = 8,
-  STACK_GPIO_PIN_WAKE  = 9,   // WAKE# - active-low wake signal to module
-  STACK_GPIO_PIN_PERST = 10   // PERST# - active-low PCIe/peripheral reset
+    STACK_GPIO_PIN_00 = 0,   /* P00 — adapter ID bit 0 (input) */
+    STACK_GPIO_PIN_01 = 1,   /* P01 — adapter ID bit 1 (input) */
+    STACK_GPIO_PIN_02 = 2,   /* P02 — adapter ID bit 2 (input) */
+    STACK_GPIO_PIN_03 = 3,   /* P03 — adapter ID bit 3 (input) */
+    STACK_GPIO_PIN_04 = 4,   /* P04                            */
+    STACK_GPIO_PIN_05 = 5,   /* P05                            */
+    STACK_GPIO_PIN_06 = 6,   /* P06                            */
+    STACK_GPIO_PIN_07 = 7,   /* P07                            */
+    STACK_GPIO_PIN_10 = 8,   /* P10                            */
+    STACK_GPIO_PIN_11 = 9,   /* P11                            */
+    STACK_GPIO_PIN_12 = 10,  /* P12                            */
+    STACK_GPIO_PIN_13 = 11,  /* P13                            */
+    STACK_GPIO_PIN_14 = 12,  /* P14                            */
+    STACK_GPIO_PIN_15 = 13,  /* P15                            */
+    STACK_GPIO_PIN_16 = 14,  /* P16                            */
+    STACK_GPIO_PIN_17 = 15,  /* P17 — IOX_SLOTDET (input)     */
 } stack_gpio_pin_num_t;
-
-/* Note: stack_comm_type_t removed - Module Base Setting uses JSON config instead */
 
 /* ===== API Functions ===== */
 
@@ -137,14 +143,13 @@ esp_err_t stack_handler_lock(uint8_t stack_id);
 esp_err_t stack_handler_unlock(uint8_t stack_id);
 
 /**
- * @brief Get stack module ID (for Module Base Setting architecture)
+ * @brief Get adapter module ID detected during init.
  *
- * Returns module ID for configured stack:
- * - Stack 0: "002" (BLE STM32WB module - trial version)
- * - Stack 1: "000" (no module)
+ * The ID is read from P00-P03 of the adapter's TCA6416A at boot.
+ * Returns "000" if the slot is empty (no TCA6416A responded).
  *
- * @param stack_id Stack ID (0 or 1)
- * @return Pointer to module ID string ("002", "000", etc.)
+ * @param stack_id  0 = LAN1 adapter slot, 1 = LAN2 adapter slot.
+ * @return Null-terminated string, e.g. "002", "006", "000".
  */
 const char* stack_handler_get_module_id(uint8_t stack_id);
 

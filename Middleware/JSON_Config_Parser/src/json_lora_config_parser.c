@@ -53,6 +53,8 @@ static const char *LORA_FUNCTION_NAMES[JSON_LORA_FUNC_MAX] = {
     "MODULE_SEND_UNCONFIRMED",  // 22
     "MODULE_SEND_CONFIRMED",    // 23
     "MODULE_READ_RECV",         // 24
+    // Port (25)
+    "MODULE_SET_PORT",          // 25
 };
 
 /* ============================================================================

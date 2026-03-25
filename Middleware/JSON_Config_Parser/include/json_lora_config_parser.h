@@ -16,7 +16,7 @@ extern "C" {
  * Constants
  * ========================================================================== */
 
-#define LORA_MAX_FUNCTIONS  28      ///< 25 defined + 3 reserved slots
+#define LORA_MAX_FUNCTIONS  28      ///< 26 defined + 2 reserved slots
 #define LORA_COMMAND_LEN    128
 #define LORA_RESPONSE_LEN   64
 
@@ -61,6 +61,8 @@ typedef enum {
     JSON_LORA_FUNC_SEND_UNCONFIRMED,
     JSON_LORA_FUNC_SEND_CONFIRMED,
     JSON_LORA_FUNC_READ_RECV,
+    // -- Port (25) ---------------------------------------------------------------
+    JSON_LORA_FUNC_SET_PORT,
     // sentinel
     JSON_LORA_FUNC_MAX
 } json_lora_function_id_t;
