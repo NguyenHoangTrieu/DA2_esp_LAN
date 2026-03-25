@@ -29,8 +29,9 @@
 #define HANDLER_TYPE_LOR "LOR" // LoRa
 #define HANDLER_TYPE_ZIG "ZIG" // ZigBee
 #define HANDLER_TYPE_RS4 "RS4" // RS485
-#define HANDLER_TYPE_BLE "BLE" // Bluetooth Low Energy
-#define HANDLER_TYPE_BLN "BLN" // BLE Native (ESP32 direct BLE Mesh)
+#define HANDLER_TYPE_BLE "BLE" // Bluetooth Low Energy (AT module via UART)
+#define HANDLER_TYPE_BLN "BLN" // BLE Native — ESP32 BLE Mesh provisioner
+#define HANDLER_TYPE_BLG "BLG" // BLE GATT Central — ESP32 native GATT client
 
 // ===== Frame Types (Single Byte) =====
 typedef enum {
@@ -63,6 +64,7 @@ typedef enum {
   HANDLER_RS485 = 0x04,
   HANDLER_BLE = 0x05,
   HANDLER_BLE_NATIVE = 0x06,  /* ESP32-S3 direct BLE Mesh provisioner */
+  HANDLER_BLE_GATT   = 0x07,  /* ESP32-S3 native BLE GATT Central      */
   HANDLER_UNKNOWN = 0xFF
 } handler_id_t;
 
