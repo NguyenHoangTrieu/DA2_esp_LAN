@@ -207,3 +207,21 @@ esp_err_t tca_write_output_register_inst(tca6416a_inst_t *inst, tca_port_t port,
     return write_reg(inst, TCA6416A_OUTPUT_PORT0 + (uint8_t)port, value);
 }
 
+/* ===== Global initialization function (public API) ===== */
+/**
+ * @brief Lightweight TCA initialization placeholder.
+ *
+ * On the LAN MCU, stack_handler_init() handles the actual per-instance TCA6416A
+ * initialization (probing each slot, reading module IDs, etc.). This function
+ * exists for API consistency and compatibility; the real work happens in stack_handler.
+ *
+ * @return ESP_OK (always succeeds; stack_handler will report errors if hardware absent)
+ */
+esp_err_t tca_init(void) {
+    if (!i2c_dev_support_is_initialized()) {
+        ESP_LOGE(TAG, "I2C not initialized. Call i2c_dev_support_init() first");
+        return ESP_ERR_INVALID_STATE;
+    }
+    ESP_LOGI(TAG, "TCA6416A preparation complete (instances will be initialized by stack_handler)");
+    return ESP_OK;
+}

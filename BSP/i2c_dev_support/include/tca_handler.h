@@ -63,8 +63,17 @@ typedef struct {
 typedef void (*tca_interrupt_callback_t)(tca_port_t port, uint8_t pin_state);
 
 /**
- * @brief Initialise one TCA6416A instance.
+ * @brief Initialize both TCA6416A instances (requires i2c_dev_support to be initialized first).
  *
+ * This function initializes both adapter slots:
+ *   - Slot 0 (LAN1): address 0x20, INT on GPIO47
+ *   - Slot 1 (LAN2): address 0x21, INT on GPIO48
+ *
+ * @return ESP_OK on success; may return warnings if one slot is absent but the other is OK.
+ */
+esp_err_t tca_init(void);
+
+ /**
  * Configures the INT GPIO, adds the I2C device, probes it, and sets all
  * pins to input. Requires i2c_dev_support to be initialised first.
  *
