@@ -1129,7 +1129,6 @@ static void handle_vendor_cmd(uint8_t stack_id, const char *params_json) {
              dst_addr, company_id, vendor_op);
     ble_native_uplink_send_ok(stack_id, resp);
 }
-}
 
 /**
  * HEARTBEAT_SUB — configure heartbeat subscription on the provisioner.
