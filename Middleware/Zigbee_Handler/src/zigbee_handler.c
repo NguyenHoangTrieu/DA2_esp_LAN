@@ -2,13 +2,20 @@
  * @file zigbee_handler.c
  * @brief Zigbee Handler Middleware Implementation
  *
- * Differs from lora_handler.c in:
- *  - Binary HEX frame building: [0x55][LEN][CMD_TYPE][CMD_CODE][DATA][XOR]
- *  - cmd_type == -1 → AT-mode: send ASCII command[] string
- *  - cmd_type >= 0  → HEX-mode: build binary frame from (cmd_type, cmd_code, data)
- *  - Module mode tracking per stack (AT → HEX transition via MODULE_ENTER_HEX_MODE)
- *  - Response is binary; terminator check uses expect_response_bytes[] (hex pattern)
- *  - Bus-mutex timeout 5 000 ms
+ * Supports two command modes selected per function via the is_hex flag:
+ *
+ *  is_hex == false (ASCII/AT mode):
+ *    - Sends fc->command + CRLF (appends data suffix when is_prefix == true)
+ *    - Matches ASCII prefix in fc->expect_response
+ *
+ *  is_hex == true (Binary/HEX mode, E180-ZG120B HEX protocol):
+ *    - fc->command stores "55 CMD_TYPE CMD_CODE" as 3 hex-byte template
+ *    - Firmware builds full frame: [0x55][LEN][CMD_TYPE][CMD_CODE][DATA][XOR]
+ *      where LEN = 3 + payload_len, XOR = CMD_TYPE ^ CMD_CODE ^ DATA...
+ *    - fc->expect_response stores response prefix as hex-byte string, e.g. "55 00 04"
+ *    - Binary prefix is matched via memmem() in the receive buffer
+ *
+ * Bus-mutex timeout: 5 000 ms.
  */
 
 #include "zigbee_handler.h"
@@ -19,6 +26,7 @@
 #include "freertos/task.h"
 #include "json_zigbee_config_parser.h"
 #include "module_config_controller.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -28,7 +36,6 @@ static const char *TAG = "ZIGBEE_HANDLER";
 
 /* ===== Configuration Constants ===== */
 
-#define ZIGBEE_FRAME_START      0x55
 #define ZIGBEE_BUS_MUTEX_MS     5000
 #define ZIGBEE_LISTEN_MUTEX_MS  50
 #define ZIGBEE_LISTEN_WINDOW_MS 100
@@ -36,16 +43,12 @@ static const char *TAG = "ZIGBEE_HANDLER";
 
 /* ===== Static Data ===== */
 
-typedef enum {
-    ZIGBEE_MODULE_MODE_AT  = 0,
-    ZIGBEE_MODULE_MODE_HEX = 1
-} zigbee_module_mode_t;
-
-static struct {
+typedef struct {
     bool initialized;
     zigbee_module_config_t  config[ZIGBEE_MAX_STACKS];
-    zigbee_module_mode_t    mode[ZIGBEE_MAX_STACKS];
-} g_zigbee = {0};
+} g_zigbee_t;
+
+static g_zigbee_t g_zigbee = {0};
 
 static SemaphoreHandle_t g_zigbee_mutex                      = NULL;
 static SemaphoreHandle_t g_zigbee_bus_mutex[ZIGBEE_MAX_STACKS] = {NULL, NULL};
@@ -53,6 +56,27 @@ static SemaphoreHandle_t g_zigbee_bus_mutex[ZIGBEE_MAX_STACKS] = {NULL, NULL};
 /* ===== Internal Helpers ===== */
 
 static bool is_valid_stack(uint8_t sid) { return (sid == 0 || sid == 1); }
+
+/**
+ * @brief Parse a space-separated hex byte string ("55 00 04") into a byte array.
+ * @return Number of bytes written to @p buf.
+ */
+static size_t hex_str_to_bytes(const char *hex_str, uint8_t *buf, size_t out_max) {
+    if (!hex_str || !buf || out_max == 0) return 0;
+    size_t n = 0;
+    const char *p = hex_str;
+    while (*p && n < out_max) {
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p) break;
+        unsigned int bval = 0;
+        int consumed = 0;
+        /* sscanf with %2x consumes at most 2 hex digits */
+        if (sscanf(p, "%2x%n", &bval, &consumed) != 1 || consumed == 0) break;
+        buf[n++] = (uint8_t)bval;
+        p += consumed;
+    }
+    return n;
+}
 
 static comm_port_type_t get_port(uint8_t sid) {
     const char *p = g_zigbee.config[sid].comm_port_type;
@@ -64,47 +88,16 @@ static comm_port_type_t get_port(uint8_t sid) {
 }
 
 /**
- * @brief Build a binary HEX frame for the Zigbee module.
+ * @brief Read from the module bus accumulating until a byte pattern is found
+ *        in the buffer, or until timeout expires.  Works for both ASCII and
+ *        binary responses (uses memmem for matching).
  *
- * Frame: [0x55][LEN][CMD_TYPE][CMD_CODE][DATA 0-252][XOR]
- * LEN = 2 + data_len
- * XOR = CMD_TYPE ^ CMD_CODE ^ data[0..n-1]
- *
- * @return ESP_OK; ESP_ERR_INVALID_SIZE if data_len > 252 or frame_out too small
- */
-static esp_err_t build_hex_frame(uint8_t cmd_type, uint8_t cmd_code,
-                                  const uint8_t *data, uint8_t data_len,
-                                  uint8_t *frame_out, uint8_t *frame_len_out) {
-    if (data_len > 252) {
-        ESP_LOGE(TAG, "Data too long for Zigbee frame: %d bytes", data_len);
-        return ESP_ERR_INVALID_SIZE;
-    }
-    uint8_t total  = 4 + data_len + 1; // SOF + LEN + CMD_TYPE + CMD_CODE + data + XOR
-    uint8_t len    = 2 + data_len;
-    uint8_t xor_cs = cmd_type ^ cmd_code;
-    for (uint8_t i = 0; i < data_len; i++) {
-        xor_cs ^= data[i];
-    }
-    uint8_t idx = 0;
-    frame_out[idx++] = ZIGBEE_FRAME_START;
-    frame_out[idx++] = len;
-    frame_out[idx++] = cmd_type;
-    frame_out[idx++] = cmd_code;
-    for (uint8_t i = 0; i < data_len; i++) {
-        frame_out[idx++] = data[i];
-    }
-    frame_out[idx++] = xor_cs;
-    *frame_len_out = total;
-    return ESP_OK;
-}
-
-/**
- * @brief Read from UART accumulating binary data until expect_bytes found or timeout.
- *
- * When expect_len == 0 the function returns after receiving any data within timeout.
+ * @param expect_bytes  Binary pattern to search for; NULL/0 = accept any data.
+ * @param expect_len    Length of pattern in bytes.
  */
 static esp_err_t zigbee_read_until(uint8_t sid, comm_port_type_t port_type,
-                                    const uint8_t *expect_bytes, uint8_t expect_len,
+                                    const uint8_t *expect_bytes,
+                                    size_t expect_len,
                                     uint32_t timeout_ms,
                                     uint8_t *out_buf, size_t out_max,
                                     size_t *out_len) {
@@ -113,6 +106,7 @@ static esp_err_t zigbee_read_until(uint8_t sid, comm_port_type_t port_type,
     uint8_t    chunk[ZIGBEE_CHUNK_SIZE];
     size_t     acc    = 0;
     bool       found  = false;
+    size_t     pfx_len = expect_len;
 
     *out_len = 0;
 
@@ -129,22 +123,19 @@ static esp_err_t zigbee_read_until(uint8_t sid, comm_port_type_t port_type,
         if (r != ESP_OK && r != ESP_ERR_TIMEOUT) break;
 
         if (chunk_len > 0) {
-            size_t space = out_max - acc;
+            size_t space = out_max - acc - 1; /* reserve 1 byte for NUL */
             size_t copy  = (chunk_len < space) ? chunk_len : space;
             if (copy > 0) {
                 memcpy(out_buf + acc, chunk, copy);
                 acc += copy;
+                out_buf[acc] = '\0'; /* keep NUL-terminated for strstr */
             }
-            if (expect_len > 0 && acc >= expect_len) {
-                // Scan accumulated buffer for the pattern
-                for (size_t i = 0; i <= acc - expect_len; i++) {
-                    if (memcmp(out_buf + i, expect_bytes, expect_len) == 0) {
-                        found = true;
-                        break;
-                    }
-                }
-            } else if (expect_len == 0) {
+            if (pfx_len == 0) {
                 found = true;
+            } else if (acc >= pfx_len) {
+                if (memmem(out_buf, acc, expect_bytes, pfx_len) != NULL) {
+                    found = true;
+                }
             }
             if (found) break;
         }
@@ -270,10 +261,7 @@ esp_err_t zigbee_handler_load_config(uint8_t stack_id,
     }
 
     for (int i = 0; i < ZIGBEE_FUNC_COUNT; i++) {
-        dst->functions[i].cmd_type = -1;
-        dst->functions[i].cmd_code = -1;
-        strncpy(dst->functions[i].response_format, "ascii",
-                sizeof(dst->functions[i].response_format) - 1);
+        dst->functions[i].available = false;
     }
 
     for (int i = 0; i < ZIGBEE_MAX_FUNCTIONS; i++) {
@@ -283,27 +271,22 @@ esp_err_t zigbee_handler_load_config(uint8_t stack_id,
             continue;
         }
         zigbee_function_config_t *d = &dst->functions[src->function_id];
-        d->available          = true;
-        d->cmd_type           = src->cmd_type;
-        d->cmd_code           = src->cmd_code;
-        d->is_prefix          = src->is_prefix;
-        d->is_async_event     = src->is_async_event;
-        d->timeout_ms         = src->timeout_ms;
-        d->expect_response_len= src->expect_response_len;
-        d->delay_start_ms     = src->delay_start_ms;
-        d->delay_end_ms       = src->delay_end_ms;
-        strncpy(d->command, src->command, ZIGBEE_COMMAND_LEN - 1);
-        strncpy(d->response_format, src->response_format, 7);
-        memcpy(d->expect_response_bytes, src->expect_response_bytes,
-               ZIGBEE_RESPONSE_BYTES);
+        d->available      = true;
+        d->is_hex         = src->is_hex;
+        d->is_prefix      = src->is_prefix;
+        d->is_async_event = src->is_async_event;
+        d->timeout_ms     = src->timeout_ms;
+        d->delay_start_ms = src->delay_start_ms;
+        d->delay_end_ms   = src->delay_end_ms;
+        strncpy(d->command,          src->command,          ZIGBEE_COMMAND_LEN - 1);
+        strncpy(d->expect_response,  src->expect_response,  ZIGBEE_RESPONSE_LEN - 1);
         memcpy(d->gpio_start, src->gpio_start, sizeof(src->gpio_start));
         d->gpio_start_count = src->gpio_start_count;
         memcpy(d->gpio_end, src->gpio_end, sizeof(src->gpio_end));
         d->gpio_end_count = src->gpio_end_count;
     }
 
-    /* Default mode: AT for stack that just loaded */
-    g_zigbee.mode[stack_id] = ZIGBEE_MODULE_MODE_AT;
+    /* Default mode: all stacks start in AT mode */
 
     free(parsed);
     xSemaphoreGive(g_zigbee_mutex);
@@ -358,44 +341,61 @@ esp_err_t zigbee_handler_execute_command_with_config(
         return ESP_ERR_TIMEOUT;
     }
 
-    if (fc->cmd_type == -1) {
-        /* ===== AT-mode command ===== */
+    if (!fc->is_hex) {
+        /* ===== ASCII / AT command ===== */
         size_t cmd_len = strlen(fc->command);
-        char at_buf[ZIGBEE_COMMAND_LEN + 4];
+        /* Build: command [+data_suffix] \r\n */
+        char at_buf[ZIGBEE_COMMAND_LEN + 256];
+        int  written = 0;
         if (cmd_len > 0) {
-            snprintf(at_buf, sizeof(at_buf), "%s\r\n", fc->command);
+            if (fc->is_prefix && data && data_len > 0) {
+                written = snprintf(at_buf, sizeof(at_buf), "%s%.*s\r\n",
+                                   fc->command, (int)data_len, (const char *)data);
+            } else {
+                written = snprintf(at_buf, sizeof(at_buf), "%s\r\n", fc->command);
+            }
             ret = module_bus_write(stack_id, port_type,
-                                   (const uint8_t *)at_buf, strlen(at_buf));
+                                   (const uint8_t *)at_buf, (size_t)written);
             if (ret != ESP_OK) {
                 ESP_LOGE(TAG, "AT write failed: %s", esp_err_to_name(ret));
                 xSemaphoreGive(g_zigbee_bus_mutex[stack_id]);
                 if (result) result->status = ret;
                 return ret;
             }
-            /* If this is the ENTER_HEX_MODE command, track mode change */
-            if (func_id == ZIGBEE_FUNC_ENTER_HEX_MODE) {
-                vTaskDelay(pdMS_TO_TICKS(200));
-                g_zigbee.mode[stack_id] = ZIGBEE_MODULE_MODE_HEX;
-                ESP_LOGI(TAG, "Stack %d mode → HEX", stack_id);
-            }
         }
     } else {
-        /* ===== Binary HEX-mode frame ===== */
-        uint8_t frame[ZIGBEE_FRAME_MAX_LEN];
-        uint8_t frame_len = 0;
-        ret = build_hex_frame((uint8_t)fc->cmd_type, (uint8_t)fc->cmd_code,
-                              data, data_len, frame, &frame_len);
-        if (ret != ESP_OK) {
-            xSemaphoreGive(g_zigbee_bus_mutex[stack_id]);
-            if (result) result->status = ret;
-            return ret;
-        }
-        ret = module_bus_write(stack_id, port_type, frame, frame_len);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "HEX frame write failed: %s", esp_err_to_name(ret));
-            xSemaphoreGive(g_zigbee_bus_mutex[stack_id]);
-            if (result) result->status = ret;
-            return ret;
+        /* ===== Binary / HEX command =====
+         * command field = "55 CMD_TYPE CMD_CODE"  (3 hex bytes, space-separated)
+         * Frame built:  [0x55][LEN][CMD_TYPE][CMD_CODE][DATA...][XOR]
+         * LEN = 3 + payload_len  (CMD_TYPE + CMD_CODE + DATA + XOR)
+         * XOR = CMD_TYPE ^ CMD_CODE ^ DATA...
+         */
+        uint8_t cmd_bytes[4];
+        size_t  cmd_byte_len = hex_str_to_bytes(fc->command, cmd_bytes, sizeof(cmd_bytes));
+        if (cmd_byte_len >= 3 && cmd_bytes[0] == 0x55) {
+            uint8_t cmd_type    = cmd_bytes[1];
+            uint8_t cmd_code    = cmd_bytes[2];
+            size_t  payload_len = (fc->is_prefix && data && data_len > 0) ? data_len : 0;
+            uint8_t frame[ZIGBEE_COMMAND_LEN + 260];
+            frame[0] = 0x55;
+            frame[1] = (uint8_t)(3 + payload_len);
+            frame[2] = cmd_type;
+            frame[3] = cmd_code;
+            size_t frame_pos = 4;
+            if (payload_len > 0) {
+                memcpy(frame + frame_pos, data, payload_len);
+                frame_pos += payload_len;
+            }
+            uint8_t xor_chk = cmd_type ^ cmd_code;
+            for (size_t i = 0; i < payload_len; i++) xor_chk ^= data[i];
+            frame[frame_pos++] = xor_chk;
+            ret = module_bus_write(stack_id, port_type, frame, frame_pos);
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "HEX frame write failed: %s", esp_err_to_name(ret));
+                xSemaphoreGive(g_zigbee_bus_mutex[stack_id]);
+                if (result) result->status = ret;
+                return ret;
+            }
         }
     }
 
@@ -404,15 +404,29 @@ esp_err_t zigbee_handler_execute_command_with_config(
     bool skip_read  = (fc->timeout_ms == 0);
 
     if (!skip_read && result) {
+        /* Build pattern for response matching (ASCII or binary) */
+        uint8_t  resp_pattern[16];
+        size_t   resp_pattern_len = 0;
+        if (!fc->is_hex) {
+            size_t ascii_len = strlen(fc->expect_response);
+            if (ascii_len > 0) {
+                if (ascii_len > sizeof(resp_pattern)) ascii_len = sizeof(resp_pattern);
+                memcpy(resp_pattern, fc->expect_response, ascii_len);
+                resp_pattern_len = ascii_len;
+            }
+        } else {
+            resp_pattern_len = hex_str_to_bytes(fc->expect_response,
+                                                resp_pattern, sizeof(resp_pattern));
+        }
         ret = zigbee_read_until(
             stack_id, port_type,
-            fc->expect_response_len > 0 ? fc->expect_response_bytes : NULL,
-            fc->expect_response_len,
+            resp_pattern_len > 0 ? resp_pattern : NULL,
+            resp_pattern_len,
             fc->timeout_ms,
-            result->response, ZIGBEE_RESP_BUF_SIZE,
+            result->response, ZIGBEE_RESP_BUF_SIZE - 1,
             &resp_len);
 
-        if (ret != ESP_OK && fc->expect_response_len > 0) {
+        if (ret != ESP_OK && resp_pattern_len > 0) {
             ESP_LOGW(TAG, "Zigbee response validation failed for func %d", func_id);
             xSemaphoreGive(g_zigbee_bus_mutex[stack_id]);
             result->status       = ESP_ERR_INVALID_RESPONSE;
