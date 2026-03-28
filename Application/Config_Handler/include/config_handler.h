@@ -39,7 +39,6 @@ typedef enum {
   CONFIG_UPDATE_SCAN = 3,      // "CFSC" - Config query command1
   CONFIG_UPDATE_STACK = 4,     // "CFST" - Stack config command
   CONFIG_UPDATE_RS485 = 5,     // "CFRS:BR:" - RS485 baud rate command
-  CONFIG_UPDATE_RS485_JSON = 14, // "CFRS:JSON:" - RS485 GPIO mode config
   CONFIG_UPDATE_BLE_JSON = 6,  // "CFML:JSON" - BLE JSON config
   CONFIG_UPDATE_BLE_CMD = 7,   // "CFML:<stack>:<cmd>" - Unified BLE command parser
   CONFIG_UPDATE_LORA_JSON    = 8, // "CFLR:JSON" - LoRa JSON config
@@ -48,6 +47,9 @@ typedef enum {
   CONFIG_UPDATE_ZIGBEE_CMD   = 11, // "CFZB:<stack>:<func>" - Unified Zigbee command parser
   CONFIG_UPDATE_BLE_NATIVE_JSON = 12, // "CFBN:JSON" - BLE Native (ESP32 direct mesh) JSON config
   CONFIG_UPDATE_BLE_NATIVE_CMD  = 13, // "CFBN:<stack>:<verb>" - BLE Native command
+  CONFIG_UPDATE_RS485_JSON = 14,      // "CFRS:JSON:" - RS485 GPIO mode config
+  CONFIG_UPDATE_BLE_GATT_JSON  = 15, // "CFBG:JSON" - BLE GATT Central JSON config
+  CONFIG_UPDATE_BLE_GATT_CMD   = 16, // "CFBG:<stack>:<verb>" - BLE GATT Central command
   CONFIG_TYPE_UNKNOWN = 0xFF
 } config_type_t;
 

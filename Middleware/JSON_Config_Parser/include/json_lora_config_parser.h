@@ -79,6 +79,7 @@ typedef struct {
     json_lora_function_id_t function_id;
     char command[LORA_COMMAND_LEN];
     bool is_prefix;
+    bool is_hex;                        ///< true = binary/hex, false = ASCII/AT
     gpio_control_t gpio_start[MAX_GPIO_ACTIONS];
     uint8_t gpio_start_count;
     uint16_t delay_start_ms;

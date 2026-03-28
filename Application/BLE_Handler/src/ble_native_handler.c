@@ -28,6 +28,7 @@
 #include "esp_ble_mesh_generic_model_api.h"
 #include "esp_ble_mesh_lighting_model_api.h"
 #include "esp_ble_mesh_config_model_api.h"
+#include "esp_ble_mesh_time_scene_model_api.h"
 #include "nvs_flash.h"
 #include <string.h>
 #include <stdio.h>
@@ -72,12 +73,16 @@ static esp_ble_mesh_client_t lightness_client;
 /* Light CTL Client — model_id 0x1305 (client) */
 static esp_ble_mesh_client_t ctl_client;
 
+/* Scene Client — model_id 0x1205 (client) */
+static esp_ble_mesh_client_t scene_client;
+
 static esp_ble_mesh_model_t root_models[] = {
     ESP_BLE_MESH_MODEL_CFG_SRV(&config_server),
     ESP_BLE_MESH_MODEL_CFG_CLI(&config_client),
     ESP_BLE_MESH_MODEL_GEN_ONOFF_CLI(NULL, &onoff_client),
     ESP_BLE_MESH_MODEL_LIGHT_LIGHTNESS_CLI(NULL, &lightness_client),
     ESP_BLE_MESH_MODEL_LIGHT_CTL_CLI(NULL, &ctl_client),
+    ESP_BLE_MESH_MODEL_SCENE_CLI(NULL, &scene_client),
 };
 
 static esp_ble_mesh_elem_t elements[] = {
@@ -111,9 +116,11 @@ typedef struct {
  * and client model.  Generic OnOff server = 0x1000, so the client dispatches
  * using 0x1000 from the command config. */
 static const model_entry_t s_model_table[] = {
-    { ESP_BLE_MESH_MODEL_ID_GEN_ONOFF_SRV,     &root_models[2] }, /* 0x1000 OnOff CLI */
+    { ESP_BLE_MESH_MODEL_ID_CONFIG_SRV,          &root_models[1] }, /* 0x0000 Config CLI */
+    { ESP_BLE_MESH_MODEL_ID_GEN_ONOFF_SRV,       &root_models[2] }, /* 0x1000 OnOff CLI */
     { ESP_BLE_MESH_MODEL_ID_LIGHT_LIGHTNESS_SRV, &root_models[3] }, /* 0x1300 Lightness CLI */
-    { ESP_BLE_MESH_MODEL_ID_LIGHT_CTL_SRV,     &root_models[4] }, /* 0x1303 CTL CLI */
+    { ESP_BLE_MESH_MODEL_ID_LIGHT_CTL_SRV,       &root_models[4] }, /* 0x1303 CTL CLI */
+    { ESP_BLE_MESH_MODEL_ID_SCENE_SRV,           &root_models[5] }, /* 0x1203 Scene CLI */
 };
 
 esp_ble_mesh_model_t *ble_native_get_model(uint16_t model_id) {
@@ -249,6 +256,59 @@ static void lightness_client_cb(esp_ble_mesh_light_client_cb_event_t event,
     }
 }
 
+/* Config Client callback — handles responses to CONFIG_* opcodes */
+static void config_client_cb(esp_ble_mesh_cfg_client_cb_event_t event,
+                              esp_ble_mesh_cfg_client_cb_param_t *param) {
+    char resp[128];
+    uint16_t addr = param->params ? param->params->ctx.addr : 0;
+
+    switch (event) {
+    case ESP_BLE_MESH_CFG_CLIENT_SET_STATE_EVT: {
+        uint32_t opcode = param->params ? param->params->opcode : 0;
+        snprintf(resp, sizeof(resp), "CFG_ACK:0x%04X:op=0x%06X:OK",
+                 addr, (unsigned)opcode);
+        ble_native_uplink_send_ok(0, resp);
+        break;
+    }
+    case ESP_BLE_MESH_CFG_CLIENT_GET_STATE_EVT:
+        snprintf(resp, sizeof(resp), "CFG_STATUS:0x%04X:OK", addr);
+        ble_native_uplink_send_ok(0, resp);
+        break;
+    case ESP_BLE_MESH_CFG_CLIENT_TIMEOUT_EVT:
+        snprintf(resp, sizeof(resp), "CFG_TIMEOUT:0x%04X", addr);
+        ble_native_uplink_send_fail(0, resp);
+        break;
+    default:
+        break;
+    }
+}
+
+/* Scene Client callback */
+static void scene_client_cb(esp_ble_mesh_time_scene_client_cb_event_t event,
+                              esp_ble_mesh_time_scene_client_cb_param_t *param) {
+    char resp[80];
+    uint16_t addr = param->params ? param->params->ctx.addr : 0;
+
+    switch (event) {
+    case ESP_BLE_MESH_TIME_SCENE_CLIENT_SET_STATE_EVT:
+        snprintf(resp, sizeof(resp), "SCENE_ACK:0x%04X:OK", addr);
+        ble_native_uplink_send_ok(0, resp);
+        break;
+    case ESP_BLE_MESH_TIME_SCENE_CLIENT_GET_STATE_EVT:
+        snprintf(resp, sizeof(resp), "SCENE_STATUS:0x%04X:scene=%u",
+                 addr,
+                 param->status_cb.scene_status.current_scene);
+        ble_native_uplink_send_ok(0, resp);
+        break;
+    case ESP_BLE_MESH_TIME_SCENE_CLIENT_TIMEOUT_EVT:
+        snprintf(resp, sizeof(resp), "SCENE_TIMEOUT:0x%04X", addr);
+        ble_native_uplink_send_fail(0, resp);
+        break;
+    default:
+        break;
+    }
+}
+
 /* --------------------------------------------------------------------------
  * Public API — Init
  * -------------------------------------------------------------------------- */
@@ -282,6 +342,8 @@ esp_err_t ble_native_handler_init(void) {
     esp_ble_mesh_register_prov_callback(prov_callback);
     esp_ble_mesh_register_generic_client_callback(onoff_client_cb);
     esp_ble_mesh_register_light_client_callback(lightness_client_cb);
+    esp_ble_mesh_register_config_client_callback(config_client_cb);
+    esp_ble_mesh_register_time_scene_client_callback(scene_client_cb);
 
     /* Initialize the BLE Mesh stack */
     ret = esp_ble_mesh_init(&prov, &comp);

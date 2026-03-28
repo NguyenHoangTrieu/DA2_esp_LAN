@@ -2,12 +2,11 @@
  * @file json_zigbee_config_parser.h
  * @brief Zigbee-specific JSON configuration parser
  *
- * Extends the common JSON parser for Zigbee E180-ZG120B binary-frame protocol.
- * Key differences from BLE/LoRa:
- *  - cmd_type / cmd_code fields instead of ASCII command string
- *  - response_format: "ascii" | "hex"
- *  - expect_response stores ASCII string or space-separated hex (e.g. "55 80 03")
- *  - cmd_type == -1 means AT-mode command (uses `command` string field)
+ * Unified format identical to BLE/LoRa parsers:
+ *  - All commands are ASCII AT strings (stored in `command`)
+ *  - is_hex: true = binary/hex data, false = ASCII/AT (default)
+ *  - expect_response stores ASCII prefix string for response matching
+ *  - is_async_event: true = unsolicited event (no command sent, only received)
  */
 
 #ifndef JSON_ZIGBEE_CONFIG_PARSER_H
@@ -23,10 +22,9 @@ extern "C" {
  * Constants
  * ========================================================================== */
 
-#define ZIGBEE_MAX_FUNCTIONS    28      ///< 26 defined + 2 reserved slots
-#define ZIGBEE_COMMAND_LEN      64      ///< AT command (AT mode only)
-#define ZIGBEE_RESPONSE_LEN     64      ///< ASCII expect_response string
-#define ZIGBEE_RESPONSE_BYTES   16      ///< Max bytes in parsed hex response prefix
+#define ZIGBEE_MAX_FUNCTIONS    48      ///< 45 defined + 3 reserved slots
+#define ZIGBEE_COMMAND_LEN      64      ///< Command string (AT text or hex template)
+#define ZIGBEE_RESPONSE_LEN     64      ///< Expect_response (ASCII prefix or hex bytes string)
 
 /* ============================================================================
  * Enums
@@ -69,6 +67,28 @@ typedef enum {
     // -- Group 5: Data TX (24-25) -----------------------------------------------
     JSON_ZIGBEE_FUNC_SEND_UNICAST,
     JSON_ZIGBEE_FUNC_SEND_BROADCAST,
+    // -- Group 6: Lifecycle extras – P1 (26-29) ---------------------------------
+    JSON_ZIGBEE_FUNC_SET_COMM_CONFIG,       ///< L5 P1 – set baud rate
+    JSON_ZIGBEE_FUNC_ENTER_BOOTLOADER,      ///< L7 P1 – OTA boot GPIO
+    JSON_ZIGBEE_FUNC_LEAVE_NETWORK,         ///< N5 P1 – self-initiated leave
+    JSON_ZIGBEE_FUNC_SET_DEVICE_TYPE,       ///< N6 P1 – Coord/Router/EndDevice
+    // -- Group 7: Node extras – P1 (30-33) --------------------------------------
+    JSON_ZIGBEE_FUNC_QUERY_IEEE_ADDR,       ///< D4 P1 – IEEE EUI-64 lookup
+    JSON_ZIGBEE_FUNC_ZCL_BIND,             ///< B1 P1 – ZDO bind request
+    JSON_ZIGBEE_FUNC_ZCL_UNBIND,           ///< B2 P1 – ZDO unbind
+    JSON_ZIGBEE_FUNC_SEND_MULTICAST,       ///< TX3 P1 – group multicast
+    // -- Group 8: Optional P2 (34-44) -------------------------------------------
+    JSON_ZIGBEE_FUNC_ENTER_AT_MODE,        ///< L8 P2 – HEX→AT mode switch
+    JSON_ZIGBEE_FUNC_AUTO_FIND_TARGET,     ///< D5 P2 – binding partner discover
+    JSON_ZIGBEE_FUNC_ZCL_DISCOVER_ATTR,   ///< Z5 P2 – ZCL discover attributes
+    JSON_ZIGBEE_FUNC_ZCL_IDENTIFY,        ///< Z6 P2 – ZCL identify
+    JSON_ZIGBEE_FUNC_ZCL_GET_BIND_TABLE,  ///< B3 P2 – read bind table
+    JSON_ZIGBEE_FUNC_ENTER_TRANSPARENT_MODE, ///< TX4 P2 – pass-through mode
+    JSON_ZIGBEE_FUNC_SET_DEST_ADDR,       ///< A1 P2 – default target address
+    JSON_ZIGBEE_FUNC_SET_DEST_EP,         ///< A2 P2 – default target endpoint
+    JSON_ZIGBEE_FUNC_SET_LP_LEVEL,        ///< PM1 P2 – sleep level (end device)
+    JSON_ZIGBEE_FUNC_ENTER_SLEEP,         ///< PM2 P2 – force sleep
+    JSON_ZIGBEE_FUNC_WAKEUP,              ///< PM3 P2 – wake via GPIO
     // sentinel
     JSON_ZIGBEE_FUNC_MAX
 } json_zigbee_function_id_t;
@@ -79,31 +99,26 @@ typedef enum {
 
 /**
  * @brief Zigbee function configuration (parsed from JSON)
+ *
+ * Unified format: identical layout to json_ble_function_config_t and
+ * json_lora_function_config_t.  No cmd_type / cmd_code / response_format.
  */
 typedef struct {
-    bool available;                                     ///< Function present in JSON
-    json_zigbee_function_id_t function_id;              ///< Enum index
-    // AT-mode fields (used when cmd_type == -1)
-    char command[ZIGBEE_COMMAND_LEN];                   ///< AT command string
-    bool is_prefix;                                     ///< True if data appended at runtime
-    // HEX-mode fields
-    int8_t  cmd_type;                                   ///< Frame CMD_TYPE byte (-1 = AT mode)
-    int8_t  cmd_code;                                   ///< Frame CMD_CODE byte
-    // Response
-    char    response_format[8];                         ///< "ascii" or "hex"
-    char    expect_response[ZIGBEE_RESPONSE_LEN];       ///< Response string or hex spec
-    uint8_t expect_response_bytes[ZIGBEE_RESPONSE_BYTES]; ///< Parsed hex bytes (if hex format)
-    uint8_t expect_response_len;                        ///< Length of parsed hex bytes
+    bool available;                                 ///< Function present in JSON
+    json_zigbee_function_id_t function_id;          ///< Enum index
+    char command[ZIGBEE_COMMAND_LEN];               ///< AT command string
+    bool is_prefix;                                 ///< True if runtime data appended
+    bool is_hex;                                    ///< true = binary/hex, false = ASCII/AT
+    bool is_async_event;                            ///< Unsolicited event (no command sent)
     // Timing / GPIO
     gpio_control_t gpio_start[MAX_GPIO_ACTIONS];
     uint8_t  gpio_start_count;
     uint16_t delay_start_ms;
+    char     expect_response[ZIGBEE_RESPONSE_LEN];  ///< ASCII response prefix string
     uint16_t timeout_ms;
     gpio_control_t gpio_end[MAX_GPIO_ACTIONS];
     uint8_t  gpio_end_count;
     uint16_t delay_end_ms;
-    // Async-only flag (no command sent, only received from listener)
-    bool is_async_event;
 } json_zigbee_function_config_t;
 
 /**

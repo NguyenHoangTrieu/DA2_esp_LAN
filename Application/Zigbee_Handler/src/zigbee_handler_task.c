@@ -4,9 +4,9 @@
  *
  * Mirrors lora_handler_task.c with Zigbee-specific differences:
  *  - Response prefix "CFZB:" forwarded to mcu_wan_enqueue_uplink(HANDLER_ZIGBEE)
- *  - Command requests carry func_id + binary data (no ASCII command string)
- *  - Listener forwards raw binary async-event bytes as hex-dump strings
- *  - Startup sequence: HW_RESET → 500 ms → ENTER_HEX_MODE → 200 ms → GET_INFO
+ *  - All commands use ASCII AT format (unified with BLE/LoRa)
+ *  - Listener forwards ASCII async events as "CFZB:<stack>:EVT:<text>"
+ *  - Startup sequence: HW_RESET → 500 ms → GET_INFO
  */
 
 #include "zigbee_handler_task.h"
@@ -191,8 +191,8 @@ static void zigbee_downlink_task(void *pv) {
 }
 
 /**
- * @brief Background listener: receives unsolicited binary async events
- *        (CMD_TYPE 0x80 / 0x82) and forwards as "CFZB:<stack>:EVT:<hex_dump>".
+ * @brief Background listener: receives unsolicited ASCII async events
+ *        (e.g. +JOIN:, +LEFT:, +ATTRREPORT:) and forwards as "CFZB:<stack>:EVT:<text>".
  */
 static void zigbee_listener_task(void *pv) {
     zb_task_ctx_t *ctx = (zb_task_ctx_t *)pv;

@@ -10,6 +10,7 @@
 #include "config_handler_lora_commands.h"
 #include "config_handler_zigbee_commands.h"
 #include "config_handler_ble_native_commands.h"
+#include "config_handler_ble_gatt_commands.h"
 #include "config_handler_rs485_commands.h"
 #include "config_global.h"
 #include "fota_lan_config.h"
@@ -83,6 +84,13 @@ config_type_t config_parse_type(const char *cmd, uint16_t len) {
       return CONFIG_UPDATE_BLE_NATIVE_JSON;
     } else {
       return CONFIG_UPDATE_BLE_NATIVE_CMD;
+    }
+  } else if (cmd[2] == 'B' && cmd[3] == 'G') {
+    // BLE GATT Central (ESP32 native GATT Central) commands
+    if (len >= 10 && strncmp(cmd + 5, "JSON:", 5) == 0) {
+      return CONFIG_UPDATE_BLE_GATT_JSON;
+    } else {
+      return CONFIG_UPDATE_BLE_GATT_CMD;
     }
   }
   return CONFIG_TYPE_UNKNOWN;
@@ -395,6 +403,14 @@ static void config_handler_task(void *arg) {
         } else {
           ESP_LOGE(TAG, "Failed to execute BLE Native command");
         }
+        break;
+      }
+      case CONFIG_UPDATE_BLE_GATT_JSON: {
+        config_parse_ble_gatt_json(cmd->raw_data, cmd->data_len);
+        break;
+      }
+      case CONFIG_UPDATE_BLE_GATT_CMD: {
+        config_parse_ble_gatt_command(cmd->raw_data, cmd->data_len);
         break;
       }
       default:

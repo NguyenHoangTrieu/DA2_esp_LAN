@@ -18,6 +18,7 @@
 #include "rbg_handler.h"
 #include "ble_handler.h"
 #include "ble_native_handler.h"
+#include "ble_gatt_handler.h"
 #include "config_handler.h"
 #include "mcu_wan_handler.h"
 #include "fota_lan_handler.h"

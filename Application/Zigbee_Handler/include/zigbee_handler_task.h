@@ -4,9 +4,9 @@
  *
  * Mirrors lora_handler_task.h with Zigbee-specific differences:
  *  - Response prefix "CFZB:" (vs "CFLR:")
- *  - Command request carries func_id + binary data (not ASCII command string)
- *  - Listener forwards binary async-event frames as hex-dump strings
- *  - Startup: enable HEX mode via MODULE_ENTER_HEX_MODE after reset
+ *  - All commands use ASCII AT format (unified with BLE/LoRa)
+ *  - Listener forwards ASCII async events (e.g. +JOIN:, +LEFT:, +ATTRREPORT:)
+ *  - Startup: HW_RESET → 500 ms → GET_INFO
  */
 
 #ifndef ZIGBEE_HANDLER_TASK_H

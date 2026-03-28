@@ -2,16 +2,13 @@
  * @file zigbee_handler.h
  * @brief Zigbee Handler Middleware – Transportation Layer
  *
- * Provides binary HEX-frame command building, execution, and async-event
- * listening for the E180-ZG120B (and compatible) Zigbee coordinator module.
+ * Provides AT command execution and async-event listening for the
+ * E180-ZG120B (and compatible) Zigbee coordinator modules.
  *
- * Frame format  : [0x55][LEN][CMD_TYPE][CMD_CODE][DATA 0-252 bytes][XOR]
- * LEN           : 2 + data_len
- * XOR           : CMD_TYPE ^ CMD_CODE ^ data[0] ^ ... ^ data[n-1]
- * cmd_type == -1: AT-mode command – ASCII string in function_config.command
- *
- * Module modes  : AT → HEX (per stack, tracked internally)
- * Async events  : CMD_TYPE 0x80 (node events) and 0x82 (ZCL events)
+ * Unified format: all commands are ASCII AT strings (same as BLE/LoRa handlers).
+ *  is_hex == false : ASCII/AT command – send command string, match ASCII response
+ *  is_hex == true  : binary/hex command – reserved for future use
+ *  is_async_event  : no command sent; listener matches expect_response prefix
  */
 
 #ifndef ZIGBEE_HANDLER_H
@@ -30,7 +27,8 @@ extern "C" {
 /* ===== Constants ===== */
 
 #define ZIGBEE_MAX_STACKS       2
-#define ZIGBEE_FRAME_MAX_LEN    264     ///< 4 header + 252 data + 1 XOR + 7 guard
+#define ZIGBEE_COMMAND_LEN      64      ///< AT command string length
+#define ZIGBEE_RESPONSE_LEN     64      ///< ASCII expect_response prefix length
 #define ZIGBEE_RESP_BUF_SIZE    512     ///< Response buffer per command
 #define ZIGBEE_ASYNC_BUF_SIZE   256     ///< Async event buffer
 
@@ -67,25 +65,43 @@ typedef enum {
     ZIGBEE_FUNC_ZCL_SET_REPORT_RULE   = 23,
     ZIGBEE_FUNC_SEND_UNICAST          = 24,
     ZIGBEE_FUNC_SEND_BROADCAST        = 25,
+    // P1 extras (26-33)
+    ZIGBEE_FUNC_SET_COMM_CONFIG       = 26,
+    ZIGBEE_FUNC_ENTER_BOOTLOADER      = 27,
+    ZIGBEE_FUNC_LEAVE_NETWORK         = 28,
+    ZIGBEE_FUNC_SET_DEVICE_TYPE       = 29,
+    ZIGBEE_FUNC_QUERY_IEEE_ADDR       = 30,
+    ZIGBEE_FUNC_ZCL_BIND              = 31,
+    ZIGBEE_FUNC_ZCL_UNBIND            = 32,
+    ZIGBEE_FUNC_SEND_MULTICAST        = 33,
+    // P2 optional (34-44)
+    ZIGBEE_FUNC_ENTER_AT_MODE         = 34,
+    ZIGBEE_FUNC_AUTO_FIND_TARGET      = 35,
+    ZIGBEE_FUNC_ZCL_DISCOVER_ATTR     = 36,
+    ZIGBEE_FUNC_ZCL_IDENTIFY          = 37,
+    ZIGBEE_FUNC_ZCL_GET_BIND_TABLE    = 38,
+    ZIGBEE_FUNC_ENTER_TRANSPARENT_MODE = 39,
+    ZIGBEE_FUNC_SET_DEST_ADDR         = 40,
+    ZIGBEE_FUNC_SET_DEST_EP           = 41,
+    ZIGBEE_FUNC_SET_LP_LEVEL          = 42,
+    ZIGBEE_FUNC_ENTER_SLEEP           = 43,
+    ZIGBEE_FUNC_WAKEUP                = 44,
 
-    ZIGBEE_FUNC_COUNT   = 28,           ///< Capacity (26 defined + 2 reserved)
+    ZIGBEE_FUNC_COUNT   = 48,           ///< Capacity (45 defined + 3 reserved)
     ZIGBEE_FUNC_INVALID = 0xFF
 } zigbee_function_id_t;
 
 /**
  * @brief Function configuration at the handler layer.
- *        Copied from the JSON parser config on load.
+ *        Unified format: same fields as BLE/LoRa function configs.
  */
 typedef struct {
     bool     available;
-    int8_t   cmd_type;                      ///< -1 = AT mode
-    int8_t   cmd_code;
+    bool     is_hex;                            ///< false = ASCII/AT, true = binary
     bool     is_prefix;
     bool     is_async_event;
-    char     command[ZIGBEE_COMMAND_LEN];   ///< AT command string (cmd_type==-1)
-    char     response_format[8];            ///< "ascii" | "hex"
-    uint8_t  expect_response_bytes[ZIGBEE_RESPONSE_BYTES];
-    uint8_t  expect_response_len;
+    char     command[ZIGBEE_COMMAND_LEN];       ///< AT command string
+    char     expect_response[ZIGBEE_RESPONSE_LEN]; ///< ASCII response prefix
     uint16_t timeout_ms;
     /* GPIO fields */
     gpio_control_t gpio_start[MAX_GPIO_ACTIONS];
@@ -134,18 +150,12 @@ esp_err_t zigbee_handler_load_config(uint8_t stack_id,
                                       uint16_t json_len);
 
 /**
- * @brief Execute a Zigbee command with pre-matched function config.
+ * @brief Unified AT/Zigbee command handler — two modes via is_hex:
  *
- * For cmd_type == -1 (AT mode): sends ASCII command string.
- * For cmd_type >= 0           : builds binary HEX frame from cmd_type/cmd_code
- *                               + caller-supplied data bytes.
- *
- * @param stack_id   Stack ID (0 or 1)
- * @param func_id    Function enum value
- * @param data       Optional payload bytes appended to frame (may be NULL)
- * @param data_len   Length of data (0 if none)
- * @param result     [out] Execution result
- */
+ *  is_hex==false (ASCII/AT): send "command[\r\n]" + ASCII prefix match in response
+ *  is_hex==true  (Binary):   build "55 LEN CMD_TYPE CMD_CODE [DATA] XOR" and
+ *                            match binary response prefix from expect_response
+ */ 
 esp_err_t zigbee_handler_execute_command_with_config(
     uint8_t stack_id,
     zigbee_function_id_t func_id,
