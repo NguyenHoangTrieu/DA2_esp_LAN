@@ -149,7 +149,7 @@
             "gpio_start_control": [],
             "delay_start": 0,
             "expect_response": "+CONNECTED:",
-            "timeout": 5000,
+            "timeout": 12000,
             "gpio_end_control": [],
             "delay_end": 0
         },
@@ -245,7 +245,7 @@
             "gpio_start_control": [],
             "delay_start": 0,
             "expect_response": "OK",
-            "timeout": 5000,
+            "timeout": 10000,
             "gpio_end_control": [],
             "delay_end": 0
         },
@@ -258,6 +258,18 @@
             "delay_start": 0,
             "expect_response": "OK",
             "timeout": 5000,
+            "gpio_end_control": [],
+            "delay_end": 0
+        },
+        {
+            "function_name": "MODULE_NOTIFY",
+            "command": "AT+NOTIFY=",
+            "is_prefix": true,
+            "is_hex": false,
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "OK",
+            "timeout": 1000,
             "gpio_end_control": [],
             "delay_end": 0
         }

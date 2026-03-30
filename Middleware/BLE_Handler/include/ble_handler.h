@@ -18,7 +18,7 @@ extern "C" {
 /* ===== Type Definitions ===== */
 
 /**
- * @brief BLE Module Function Identifiers (20 functions total)
+ * @brief BLE Module Function Identifiers (21 functions total)
  */
 typedef enum {
     /* --- Core Functions (0-14) --- */
@@ -44,8 +44,9 @@ typedef enum {
     BLE_FUNC_GET_DIAGNOSTICS = 17,      ///< Get RSSI, link quality (optional)
     BLE_FUNC_SET_SECURITY_CONFIG = 18,  ///< Configure security/pairing (optional)
     BLE_FUNC_ENTER_BOOTLOADER = 19,     ///< Enter bootloader mode (optional)
+    BLE_FUNC_NOTIFY = 20,               ///< Enable/disable GATT notifications (CCCD write)
     
-    BLE_FUNC_COUNT = 20,                ///< Total number of functions
+    BLE_FUNC_COUNT = 21,                ///< Total number of functions
     BLE_FUNC_INVALID = 0xFF
 } ble_function_id_t;
 
@@ -87,7 +88,7 @@ typedef struct {
     char module_name[32];               ///< "JDY-23" or similar
     char comm_port_type[16];            ///< "uart", "spi", "i2c"
     uint32_t baudrate;                  ///< For UART communication
-    ble_function_config_t functions[BLE_FUNC_COUNT]; ///< All 20 functions
+    ble_function_config_t functions[BLE_FUNC_COUNT]; ///< All 21 functions
 } ble_module_config_t;
 
 /**

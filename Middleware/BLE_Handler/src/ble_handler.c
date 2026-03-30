@@ -929,6 +929,7 @@ static const char *s_ble_func_names[BLE_FUNC_COUNT] = {
     "MODULE_GET_DIAGNOSTICS",        // 17
     "MODULE_DISCOVER_SERVICES",      // 18
     "MODULE_DISCOVER_CHARACTERISTICS",// 19
+    "MODULE_NOTIFY",                 // 20
 };
 
 esp_err_t ble_handler_get_function_by_command(uint8_t stack_id,
