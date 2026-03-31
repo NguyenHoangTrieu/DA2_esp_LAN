@@ -80,7 +80,10 @@ static void handle_scan(uint8_t stack_id, const char *params) {
         }
     }
 
-    /* Enable provisioner scan — discovered devices received in provisioning cb */
+    /* Reset accumulation buffer before enabling provisioner scan */
+    ble_native_scan_reset(stack_id);
+
+    /* Enable provisioner scan — discovered devices accumulated in provisioning cb */
     esp_err_t ret = esp_ble_mesh_provisioner_prov_enable(ESP_BLE_MESH_PROV_ADV);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "stack=%u: enable prov_adv failed: %s",
@@ -93,10 +96,12 @@ static void handle_scan(uint8_t stack_id, const char *params) {
     snprintf(resp, sizeof(resp), "SCAN_STARTED:%u", (unsigned)duration_ms);
     ble_native_uplink_send_ok(stack_id, resp);
 
-    /* Schedule scan stop after duration */
+    /* Wait for scan duration */
     vTaskDelay(pdMS_TO_TICKS(duration_ms));
     esp_ble_mesh_provisioner_prov_disable(ESP_BLE_MESH_PROV_ADV);
-    ble_native_uplink_send_ok(stack_id, "SCAN_DONE");
+
+    /* Send all accumulated devices + SCAN_DONE as one batched uplink */
+    ble_native_scan_flush();
 }
 
 /**

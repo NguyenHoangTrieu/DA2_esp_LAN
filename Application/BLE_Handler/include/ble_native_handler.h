@@ -73,6 +73,18 @@ esp_err_t ble_native_handler_execute(const uint8_t *data, uint16_t len);
  */
 esp_ble_mesh_model_t *ble_native_get_model(uint16_t model_id);
 
+/**
+ * @brief Clear the scan accumulation buffer before starting a new scan.
+ *        Called from ble_native_downlink.c handle_scan().
+ */
+void ble_native_scan_reset(uint8_t stack_id);
+
+/**
+ * @brief Send all accumulated UNPROV_DEV results as a single batched uplink.
+ *        Called from ble_native_downlink.c after the scan timer expires.
+ */
+void ble_native_scan_flush(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -313,21 +313,10 @@ static void gattc_event_cb(esp_gattc_cb_event_t event,
             dev->services[svc_idx].valid = true;
             dev->num_services++;
         }
-
-        char ok[80];
-        if (param->search_res.srvc_id.uuid.len == ESP_UUID_LEN_16) {
-            snprintf(ok, sizeof(ok), "SERVICE:%d:0x%04X:0x%04X:0x%04X",
-                     idx,
-                     param->search_res.srvc_id.uuid.uuid.uuid16,
-                     param->search_res.start_handle,
-                     param->search_res.end_handle);
-        } else {
-            snprintf(ok, sizeof(ok), "SERVICE:%d:128-BIT:0x%04X:0x%04X",
-                     idx,
-                     param->search_res.start_handle,
-                     param->search_res.end_handle);
-        }
-        ble_gatt_uplink_send_ok(dev->stack_id, ok);
+        /* SERVICE lines are NOT sent individually here.
+         * They are included in the batched DISC_DONE response at SEARCH_CMPL_EVT
+         * so the WAN MCU sends a single complete packet to the server. */
+        ESP_LOGD(TAG, "Service found: idx=%d svc#%u", idx, svc_idx);
         break;
     }
 
@@ -363,7 +352,7 @@ static void gattc_event_cb(esp_gattc_cb_event_t event,
             }
         }
 
-        /* Build one batched DISC_DONE response so the RPC caller sees all chars */
+        /* Build one batched DISC_DONE response so the RPC caller sees all services and chars */
         char *batch = heap_caps_malloc(2048, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (!batch) {
             char small[48];
@@ -372,6 +361,21 @@ static void gattc_event_cb(esp_gattc_cb_event_t event,
             break;
         }
         int pos = snprintf(batch, 2048, "DISC_DONE:%d:%u_CHARS", idx, dev->num_chars);
+        /* Append all SERVICE lines first */
+        for (uint8_t si = 0; si < dev->num_services && pos + 60 < 2048; si++) {
+            ble_gatt_svc_entry_t *se = &dev->services[si];
+            if (!se->valid) continue;
+            if (se->uuid16) {
+                pos += snprintf(batch + pos, 2048 - pos,
+                                "\x1E" "SERVICE:%d:0x%04X:0x%04X:0x%04X",
+                                idx, se->uuid16, se->start_handle, se->end_handle);
+            } else {
+                pos += snprintf(batch + pos, 2048 - pos,
+                                "\x1E" "SERVICE:%d:128-BIT:0x%04X:0x%04X",
+                                idx, se->start_handle, se->end_handle);
+            }
+        }
+        /* Append all CHAR lines */
         for (uint8_t ci = 0; ci < dev->num_chars && pos + 60 < 2048; ci++) {
             ble_gatt_char_entry_t *ce = &dev->chars[ci];
             if (!ce->valid) continue;

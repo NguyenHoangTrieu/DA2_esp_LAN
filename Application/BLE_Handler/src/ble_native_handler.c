@@ -42,6 +42,57 @@ static const char *TAG = "ble_native_hdl";
 static bool s_mesh_initialized = false;
 
 /* --------------------------------------------------------------------------
+ * Scan accumulation buffer
+ * Unprov ADV packets received during a scan are accumulated here instead of
+ * being sent individually over SPI.  ble_native_scan_flush() sends them all
+ * as a single batched uplink once the scan timer expires.
+ * -------------------------------------------------------------------------- */
+#define BLE_NATIVE_MAX_SCAN_DEVICES  32
+
+typedef struct {
+    char     uuid_str[33];  /* 32-char hex + NUL */
+    char     addr_str[18];  /* xx:xx:xx:xx:xx:xx + NUL */
+    uint16_t oob_info;
+} native_scan_dev_t;
+
+static native_scan_dev_t s_scan_buf[BLE_NATIVE_MAX_SCAN_DEVICES];
+static uint8_t           s_scan_count    = 0;
+static uint8_t           s_scan_stack_id = 0;
+
+void ble_native_scan_reset(uint8_t stack_id) {
+    s_scan_count    = 0;
+    s_scan_stack_id = stack_id;
+    memset(s_scan_buf, 0, sizeof(s_scan_buf));
+    ESP_LOGD(TAG, "Scan accumulation buffer reset (stack=%u)", stack_id);
+}
+
+void ble_native_scan_flush(void) {
+    /* Build one batched message: SCAN_DONE:<n>\x1EUNPROV_DEV:...\x1E... */
+    size_t buf_size = 64 + (size_t)s_scan_count * 80;
+    char *buf = malloc(buf_size);
+    if (!buf) {
+        /* Fallback: just send the count with no device list */
+        char small[32];
+        snprintf(small, sizeof(small), "SCAN_DONE:%u", s_scan_count);
+        ble_native_uplink_send_ok(s_scan_stack_id, small);
+        s_scan_count = 0;
+        return;
+    }
+    int pos = snprintf(buf, buf_size, "SCAN_DONE:%u", s_scan_count);
+    for (uint8_t i = 0; i < s_scan_count; i++) {
+        pos += snprintf(buf + pos, buf_size - (size_t)pos,
+                        "\x1EUNPROV_DEV:%s:%s:%u",
+                        s_scan_buf[i].uuid_str,
+                        s_scan_buf[i].addr_str,
+                        s_scan_buf[i].oob_info);
+    }
+    ble_native_uplink_send_ok(s_scan_stack_id, buf);
+    free(buf);
+    s_scan_count = 0;
+    ESP_LOGI(TAG, "Scan flush: sent %u device(s) in one batch", s_scan_count);
+}
+
+/* --------------------------------------------------------------------------
  * Static BLE Mesh provisioner + client models
  *
  * ESP-IDF BLE Mesh requires model declarations at compile time.
@@ -155,26 +206,27 @@ static void prov_callback(esp_ble_mesh_prov_cb_event_t event,
         break;
 
     case ESP_BLE_MESH_PROVISIONER_RECV_UNPROV_ADV_PKT_EVT: {
-        /* Unprovisioned device discovered */
+        /* Unprovisioned device discovered — accumulate, do NOT send individually.
+         * ble_native_scan_flush() will send all results as one batch at SCAN_DONE. */
         uint8_t *dev_uuid = param->provisioner_recv_unprov_adv_pkt.dev_uuid;
         uint8_t *addr     = param->provisioner_recv_unprov_adv_pkt.addr;
         uint16_t oob_info = param->provisioner_recv_unprov_adv_pkt.oob_info;
 
-        char uuid_str[33] = {0};
-        for (int i = 0; i < 16; i++) {
-            snprintf(uuid_str + i * 2, 3, "%02X", dev_uuid[i]);
+        if (s_scan_count < BLE_NATIVE_MAX_SCAN_DEVICES) {
+            native_scan_dev_t *d = &s_scan_buf[s_scan_count];
+            for (int i = 0; i < 16; i++) {
+                snprintf(d->uuid_str + i * 2, 3, "%02X", dev_uuid[i]);
+            }
+            snprintf(d->addr_str, sizeof(d->addr_str),
+                     "%02X:%02X:%02X:%02X:%02X:%02X",
+                     addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
+            d->oob_info = oob_info;
+            s_scan_count++;
+            ESP_LOGD(TAG, "Scan[%u]: uuid=%s addr=%s",
+                     s_scan_count - 1, d->uuid_str, d->addr_str);
+        } else {
+            ESP_LOGW(TAG, "Scan buffer full, ignoring device");
         }
-        char addr_str[18] = {0};
-        snprintf(addr_str, sizeof(addr_str), "%02X:%02X:%02X:%02X:%02X:%02X",
-                 addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
-
-        ESP_LOGI(TAG, "Unprov ADV: uuid=%s addr=%s oob=%u", uuid_str, addr_str, oob_info);
-
-        /* Forward discovery result to server */
-        char report[128];
-        snprintf(report, sizeof(report), "UNPROV_DEV:%s:%s:%u",
-                 uuid_str, addr_str, oob_info);
-        ble_native_uplink_send_ok(0, report);
         break;
     }
 
