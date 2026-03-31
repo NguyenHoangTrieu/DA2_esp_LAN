@@ -142,6 +142,32 @@ esp_err_t config_load_global_vars_from_nvs(void);
  */
 esp_err_t config_save_rs485_baud(uint32_t baud_rate);
 
+/* ===== BLE Config NVS Functions ===== */
+
+/**
+ * @brief Save BLE JSON config (GATT or Native) and mode to NVS.
+ * @param mode     BLE_MODE_GATT (1) or BLE_MODE_NATIVE (2)
+ * @param json_str JSON string (without CFBG:JSON: / CFBN:JSON: prefix)
+ * @param json_len JSON length
+ */
+esp_err_t config_save_ble_json_to_nvs(uint8_t mode, const char *json_str, uint16_t json_len);
+
+/**
+ * @brief Load BLE JSON config from NVS.
+ * @param[out] mode     BLE mode that was saved
+ * @param[out] json_str malloc'd buffer — caller must free()
+ * @param[out] json_len JSON length
+ * @return ESP_OK, ESP_ERR_NOT_FOUND if nothing saved, or error
+ */
+esp_err_t config_load_ble_json_from_nvs(uint8_t *mode, char **json_str, uint16_t *json_len);
+
+/**
+ * @brief Restore BLE handler from NVS on boot.
+ *        Calls the appropriate BLE handler init + load_config.
+ *        No-op if no BLE config has been saved to NVS yet.
+ */
+void config_restore_ble_from_nvs(void);
+
 /**
  * @brief Initialize configuration system (load or save defaults)
  */

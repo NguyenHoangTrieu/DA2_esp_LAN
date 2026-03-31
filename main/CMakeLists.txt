@@ -12,6 +12,7 @@ idf_component_register(SRCS "DA2_esp_LAN.c"
                             "../Application/Config_Handler/src/config_handler_ble_native_commands.c"
                             "../Application/Config_Handler/src/config_handler_ble_gatt_commands.c"
                             "../Application/Config_Handler/src/config_handler_rs485_commands.c"
+                            "../Application/Config_Handler/src/config_ble_mode.c"
                             "../Middleware/JSON_Config_Parser/src/json_rs485_config_parser.c"
                             "../Application/Config_Handler/src/config_global.c"
                             "../Application/RS485_Handler/src/rs485_handler.c"
@@ -52,6 +53,7 @@ idf_component_register(SRCS "DA2_esp_LAN.c"
                                 mqtt
                                 esp_adc
                                 bt
+                                # esp_ble_mesh
                                 esp_driver_i2c
                                 esp_driver_uart
                                 esp_driver_gpio

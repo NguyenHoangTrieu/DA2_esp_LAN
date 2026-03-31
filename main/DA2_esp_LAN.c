@@ -61,17 +61,10 @@ void app_main(void)
     ESP_ERROR_CHECK(module_monitor_task_start());
     ESP_LOGI(TAG, "Module Monitor Task started (Module Base Setting enabled)");
 
-    /* Initialize BLE GATT Central (runs after ble_native_handler_init
-     * which has already brought up Bluetooth).  ble_gatt_handler_init()
-     * registers GAP/GATTC callbacks and starts uplink/downlink tasks.
-     * All operational parameters come from CFBG:JSON:<slot>: at runtime. */
-    esp_err_t gatt_ret = ble_gatt_handler_init();
-    if (gatt_ret != ESP_OK) {
-        ESP_LOGW(TAG, "BLE GATT Central init returned: %s (CFBG: commands unavailable)",
-                 esp_err_to_name(gatt_ret));
-    } else {
-        ESP_LOGI(TAG, "BLE GATT Central initialized (CFBG: prefix ready)");
-    }
+    /* Restore BLE config from NVS if it was configured before last reboot.
+     * This replaces the old eager ble_gatt_handler_init() call — the handler
+     * now self-initializes the BT stack so timing no longer matters. */
+    config_restore_ble_from_nvs();
 
     while (1) {
       vTaskDelay(pdMS_TO_TICKS(1000));

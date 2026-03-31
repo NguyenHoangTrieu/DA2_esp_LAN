@@ -5,6 +5,7 @@
 
 #include "config_handler.h"
 #include "config_global.h"
+#include "config_ble_mode.h"
 #include "esp_log.h"
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -26,6 +27,12 @@ static const char *TAG = "CONFIG_NVS";
 #define NVS_NAMESPACE_MODULE_CONFIG "mod_config"
 #define NVS_KEY_STACK0_JSON "stack0_json"
 #define NVS_KEY_STACK1_JSON "stack1_json"
+
+/* BLE (GATT / Native) config NVS Keys */
+#define NVS_NAMESPACE_BLE_CFG "ble_cfg"
+#define NVS_KEY_BLE_MODE      "mode"
+#define NVS_KEY_BLE_GATT_JSON "gatt_json"
+#define NVS_KEY_BLE_NATIVE_JSON "native_json"
 
 /**
  * @brief Open NVS handle
@@ -431,6 +438,83 @@ static void mark_initialized(void) {
     nvs_commit(handle);
     nvs_close(handle);
   }
+}
+
+/**
+ * @brief Save BLE JSON config (GATT or Native) to NVS.
+ *        Also saves the BLE mode so restore knows which handler to start.
+ * @param mode  BLE_MODE_GATT or BLE_MODE_NATIVE
+ * @param json_str JSON config string
+ * @param json_len JSON length
+ */
+esp_err_t config_save_ble_json_to_nvs(uint8_t mode, const char *json_str, uint16_t json_len) {
+  if (!json_str || json_len == 0) return ESP_ERR_INVALID_ARG;
+
+  nvs_handle_t handle;
+  esp_err_t ret = nvs_open(NVS_NAMESPACE_BLE_CFG, NVS_READWRITE, &handle);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "BLE cfg NVS open failed: %s", esp_err_to_name(ret));
+    return ret;
+  }
+
+  /* Save mode byte */
+  ret = nvs_set_u8(handle, NVS_KEY_BLE_MODE, mode);
+  if (ret != ESP_OK) { nvs_close(handle); return ret; }
+
+  /* Save JSON blob under the appropriate key */
+  const char *key = (mode == BLE_MODE_NATIVE) ? NVS_KEY_BLE_NATIVE_JSON : NVS_KEY_BLE_GATT_JSON;
+  ret = nvs_set_blob(handle, key, json_str, json_len);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "BLE JSON NVS write failed: %s", esp_err_to_name(ret));
+    nvs_close(handle);
+    return ret;
+  }
+
+  ret = nvs_commit(handle);
+  nvs_close(handle);
+  if (ret == ESP_OK) {
+    ESP_LOGI(TAG, "BLE JSON saved to NVS (mode=%u, %u bytes)", mode, json_len);
+  }
+  return ret;
+}
+
+/**
+ * @brief Load BLE JSON config from NVS.
+ * @param[out] mode     BLE mode stored (caller receives BLE_MODE_GATT or BLE_MODE_NATIVE)
+ * @param[out] json_str malloc'd buffer containing JSON — caller must free()
+ * @param[out] json_len JSON length
+ * @return ESP_OK, ESP_ERR_NOT_FOUND if never saved, or error code
+ */
+esp_err_t config_load_ble_json_from_nvs(uint8_t *mode, char **json_str, uint16_t *json_len) {
+  if (!mode || !json_str || !json_len) return ESP_ERR_INVALID_ARG;
+
+  nvs_handle_t handle;
+  esp_err_t ret = nvs_open(NVS_NAMESPACE_BLE_CFG, NVS_READONLY, &handle);
+  if (ret == ESP_ERR_NVS_NOT_FOUND) return ESP_ERR_NOT_FOUND;
+  if (ret != ESP_OK) return ret;
+
+  uint8_t saved_mode = 0;
+  ret = nvs_get_u8(handle, NVS_KEY_BLE_MODE, &saved_mode);
+  if (ret != ESP_OK) { nvs_close(handle); return (ret == ESP_ERR_NVS_NOT_FOUND) ? ESP_ERR_NOT_FOUND : ret; }
+
+  const char *key = (saved_mode == BLE_MODE_NATIVE) ? NVS_KEY_BLE_NATIVE_JSON : NVS_KEY_BLE_GATT_JSON;
+  uint32_t size = 0;
+  ret = nvs_get_blob(handle, key, NULL, (size_t *)&size);
+  if (ret == ESP_ERR_NVS_NOT_FOUND) { nvs_close(handle); return ESP_ERR_NOT_FOUND; }
+  if (ret != ESP_OK || size == 0 || size > CONFIG_CMD_MAX_LEN) { nvs_close(handle); return ESP_FAIL; }
+
+  char *buf = malloc(size);
+  if (!buf) { nvs_close(handle); return ESP_ERR_NO_MEM; }
+
+  ret = nvs_get_blob(handle, key, buf, (size_t *)&size);
+  nvs_close(handle);
+  if (ret != ESP_OK) { free(buf); return ret; }
+
+  *mode = saved_mode;
+  *json_str = buf;
+  *json_len = (uint16_t)size;
+  ESP_LOGI(TAG, "BLE JSON loaded from NVS (mode=%u, %u bytes)", saved_mode, (uint16_t)size);
+  return ESP_OK;
 }
 
 /**

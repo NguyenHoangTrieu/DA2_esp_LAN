@@ -28,6 +28,7 @@
 #include "esp_gap_ble_api.h"
 #include "esp_gattc_api.h"
 #include "esp_gatt_defs.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <string.h>
@@ -46,8 +47,9 @@ static const char *TAG = "ble_gatt_hdl";
  * -------------------------------------------------------------------------- */
 
 static bool          s_initialized    = false;
+static bool          s_bt_registered  = false; /* GAP/GATTC callbacks + app_register done */
 static esp_gatt_if_t s_gattc_if       = ESP_GATT_IF_NONE;
-static ble_gatt_device_t s_devices[BLE_GATT_MAX_DEVICES];
+static ble_gatt_device_t *s_devices   = NULL;  /* PSRAM-allocated device table */
 
 /* Stack id for the currently pending scan or connect (single-threaded ops) */
 static volatile uint8_t s_pending_stack_id = 0;
@@ -78,6 +80,42 @@ static int find_by_conn_id(uint16_t conn_id) {
         if (s_devices[i].valid && s_devices[i].conn_id == conn_id) return i;
     }
     return -1;
+}
+
+void ble_gatt_handler_clear_devices(void) {
+    for (int i = 0; i < BLE_GATT_MAX_DEVICES; i++) {
+        memset(&s_devices[i], 0, sizeof(s_devices[i]));
+    }
+}
+
+/* --------------------------------------------------------------------------
+ * Scan-done reporter — builds consolidated uplink for the RPC response
+ * -------------------------------------------------------------------------- */
+static void send_scan_done(void) {
+    int scan_count = 0;
+    for (int i = 0; i < BLE_GATT_MAX_DEVICES; i++) {
+        if (s_devices[i].valid) scan_count++;
+    }
+    ESP_LOGI(TAG, "Scan done: %d device(s)", scan_count);
+
+    char *buf = heap_caps_malloc(2048, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) {
+        ble_gatt_uplink_send_ok(s_pending_stack_id, "SCAN_DONE:0");
+        return;
+    }
+    int pos = snprintf(buf, 2048, "SCAN_DONE:%d", scan_count);
+    for (int i = 0; i < BLE_GATT_MAX_DEVICES && pos + 70 < 2048; i++) {
+        if (!s_devices[i].valid) continue;
+        char name[21];
+        strncpy(name, s_devices[i].name, 20);
+        name[20] = '\0';
+        pos += snprintf(buf + pos, 2048 - pos,
+                        "\x1ESCAN_RESULT:%d," MACSTR ",%d,%s",
+                        i, MAC2STR(s_devices[i].addr),
+                        (int)s_devices[i].rssi, name);
+    }
+    ble_gatt_uplink_send_ok(s_pending_stack_id, buf);
+    free(buf);
 }
 
 /** Extract device name from advertising data. Returns false if not found. */
@@ -129,13 +167,19 @@ static void gap_event_cb(esp_gap_ble_cb_event_t event,
         break;
 
     case ESP_GAP_BLE_SCAN_STOP_COMPLETE_EVT:
-        if (param->scan_stop_cmpl.status == ESP_BT_STATUS_SUCCESS) {
-            ESP_LOGI(TAG, "Scan stopped");
-        }
+        /* Fired only when esp_ble_gap_stop_scanning() is called explicitly (e.g. STOP command) */
+        send_scan_done();
         break;
 
     case ESP_GAP_BLE_SCAN_RESULT_EVT: {
         esp_ble_gap_cb_param_t *scan = param;
+
+        /* Duration-based scan expired — this is the normal completion path */
+        if (scan->scan_rst.search_evt == ESP_GAP_SEARCH_INQ_CMPL_EVT) {
+            send_scan_done();
+            break;
+        }
+
         if (scan->scan_rst.search_evt != ESP_GAP_SEARCH_INQ_RES_EVT) break;
 
         const uint8_t *bda = scan->scan_rst.bda;
@@ -169,15 +213,8 @@ static void gap_event_cb(esp_gap_ble_cb_event_t event,
             snprintf(dev->name, BLE_GATT_DEV_NAME_LEN, "Unknown");
         }
 
-        /* Report to uplink: "+SCAN:<idx>,<MAC>,<RSSI>,<name>" */
-        char report[128];
-        snprintf(report, sizeof(report),
-                 "SCAN_RESULT:%d," MACSTR ",%d,%s",
-                 slot,
-                 MAC2STR(bda),
-                 (int)dev->rssi,
-                 dev->name);
-        ble_gatt_uplink_send_ok(s_pending_stack_id, report);
+        ESP_LOGI(TAG, "Scan[%d]: " MACSTR " RSSI=%d Name='%s'",
+                 slot, MAC2STR(bda), (int)dev->rssi, dev->name);
         break;
     }
 
@@ -322,24 +359,34 @@ static void gattc_event_cb(esp_gattc_cb_event_t event,
                         memcpy(ce->uuid128, char_buf[ci].uuid.uuid.uuid128, 16);
                     }
                     ce->valid = true;
-
-                    char ok[80];
-                    if (ce->uuid16) {
-                        snprintf(ok, sizeof(ok), "CHAR:%d:0x%04X:0x%04X:0x%02X",
-                                 idx, ce->uuid16, ce->handle, ce->properties);
-                    } else {
-                        snprintf(ok, sizeof(ok), "CHAR:%d:128-BIT:0x%04X:0x%02X",
-                                 idx, ce->handle, ce->properties);
-                    }
-                    ble_gatt_uplink_send_ok(dev->stack_id, ok);
                 }
             }
         }
 
-        char disc_done[48];
-        snprintf(disc_done, sizeof(disc_done), "DISC_DONE:%d:%u_CHARS",
-                 idx, dev->num_chars);
-        ble_gatt_uplink_send_ok(dev->stack_id, disc_done);
+        /* Build one batched DISC_DONE response so the RPC caller sees all chars */
+        char *batch = heap_caps_malloc(2048, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!batch) {
+            char small[48];
+            snprintf(small, sizeof(small), "DISC_DONE:%d:%u_CHARS", idx, dev->num_chars);
+            ble_gatt_uplink_send_ok(dev->stack_id, small);
+            break;
+        }
+        int pos = snprintf(batch, 2048, "DISC_DONE:%d:%u_CHARS", idx, dev->num_chars);
+        for (uint8_t ci = 0; ci < dev->num_chars && pos + 60 < 2048; ci++) {
+            ble_gatt_char_entry_t *ce = &dev->chars[ci];
+            if (!ce->valid) continue;
+            if (ce->uuid16) {
+                pos += snprintf(batch + pos, 2048 - pos,
+                                "\x1E" "CHAR:%d:0x%04X:0x%04X:0x%02X",
+                                idx, ce->uuid16, ce->handle, ce->properties);
+            } else {
+                pos += snprintf(batch + pos, 2048 - pos,
+                                "\x1E" "CHAR:%d:128-BIT:0x%04X:0x%02X",
+                                idx, ce->handle, ce->properties);
+            }
+        }
+        ble_gatt_uplink_send_ok(dev->stack_id, batch);
+        heap_caps_free(batch);
         break;
     }
 
@@ -439,35 +486,88 @@ static void gattc_event_cb(esp_gattc_cb_event_t event,
 esp_err_t ble_gatt_handler_init(void) {
     if (s_initialized) return ESP_OK;
 
-    memset(s_devices, 0, sizeof(s_devices));
+    /* Allocate (or re-zero) device table from PSRAM */
+    if (!s_devices) {
+        s_devices = heap_caps_calloc(BLE_GATT_MAX_DEVICES, sizeof(ble_gatt_device_t),
+                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s_devices) {
+            ESP_LOGE(TAG, "Failed to alloc device table from PSRAM");
+            return ESP_ERR_NO_MEM;
+        }
+    } else {
+        memset(s_devices, 0, BLE_GATT_MAX_DEVICES * sizeof(ble_gatt_device_t));
+    }
     for (int i = 0; i < BLE_GATT_MAX_DEVICES; i++) {
         s_devices[i].conn_id  = 0xFFFF;
         s_devices[i].gattc_if = ESP_GATT_IF_NONE;
     }
 
-    /* Register GAP and GATTC callbacks
-     * Note: Bluetooth is already initialized by ble_native_handler_init() */
     esp_err_t ret;
 
-    ret = esp_ble_gap_register_callback(gap_event_cb);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "GAP register callback failed: %s", esp_err_to_name(ret));
-        return ret;
+    /* Initialize BT controller and Bluedroid stack if not already done.
+     * ble_native_handler_init() handles this automatically via esp_ble_mesh_init().
+     * For GATT-only scenarios (no BLE Mesh), we must do it manually here. */
+    if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_IDLE) {
+        esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+        ret = esp_bt_controller_init(&bt_cfg);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "BT controller init failed: %s", esp_err_to_name(ret));
+            return ret;
+        }
+    }
+    if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_INITED) {
+        ret = esp_bt_controller_enable(ESP_BT_MODE_BLE);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "BT controller enable failed: %s", esp_err_to_name(ret));
+            return ret;
+        }
+    }
+    if (esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_UNINITIALIZED) {
+        ret = esp_bluedroid_init();
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Bluedroid init failed: %s", esp_err_to_name(ret));
+            return ret;
+        }
+        ret = esp_bluedroid_enable();
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Bluedroid enable failed: %s", esp_err_to_name(ret));
+            return ret;
+        }
     }
 
-    ret = esp_ble_gattc_register_callback(gattc_event_cb);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "GATTC register callback failed: %s", esp_err_to_name(ret));
-        return ret;
+    /* Register GAP and GATTC callbacks — only once, even across retries.
+     * GAP may fail if BLE Native already claimed it; that is non-fatal.
+     * GATTC app_register creates a new interface slot each call, so we
+     * MUST NOT call it again after the first successful registration. */
+    bool gap_available = true;
+
+    if (!s_bt_registered) {
+        ret = esp_ble_gap_register_callback(gap_event_cb);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "GAP register callback failed: %s (likely BLE Native conflict)",
+                     esp_err_to_name(ret));
+            gap_available = false;
+        }
+
+        ret = esp_ble_gattc_register_callback(gattc_event_cb);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "GATTC register callback failed: %s", esp_err_to_name(ret));
+            return ret;
+        }
+
+        ret = esp_ble_gattc_app_register(GATTC_APP_ID);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "GATTC app register failed: %s", esp_err_to_name(ret));
+            return ret;
+        }
+
+        s_bt_registered = true;
+        if (!gap_available) {
+            ESP_LOGW(TAG, "GAP unavailable (BLE Native conflict) — scan/connect disabled");
+        }
     }
 
-    ret = esp_ble_gattc_app_register(GATTC_APP_ID);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "GATTC app register failed: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    /* Start uplink/downlink tasks */
+    /* Start uplink/downlink tasks (always start these, even if GAP unavailable) */
     ret = ble_gatt_uplink_task_start();
     if (ret != ESP_OK) return ret;
 
@@ -475,7 +575,7 @@ esp_err_t ble_gatt_handler_init(void) {
     if (ret != ESP_OK) return ret;
 
     s_initialized = true;
-    ESP_LOGI(TAG, "BLE GATT Central initialized (CFBG: prefix)");
+    ESP_LOGI(TAG, "BLE GATT Central initialized (CFBG: prefix ready)");
     return ESP_OK;
 }
 

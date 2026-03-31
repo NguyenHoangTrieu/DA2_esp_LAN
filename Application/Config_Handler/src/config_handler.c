@@ -6,12 +6,15 @@
 #include "config_handler.h"
 #include "DA2_esp_LAN.h"
 #include "ble_handler.h"
+#include "ble_gatt_handler.h"
+#include "ble_native_handler.h"
 #include "config_handler_ble_commands.h"
 #include "config_handler_lora_commands.h"
 #include "config_handler_zigbee_commands.h"
 #include "config_handler_ble_native_commands.h"
 #include "config_handler_ble_gatt_commands.h"
 #include "config_handler_rs485_commands.h"
+#include "config_ble_mode.h"
 #include "config_global.h"
 #include "fota_lan_config.h"
 #include "fota_lan_handler.h"
@@ -388,15 +391,37 @@ static void config_handler_task(void *arg) {
         break;
       }
       case CONFIG_UPDATE_BLE_NATIVE_JSON: {
+        if (config_ble_mode_get() != BLE_MODE_NATIVE) {
+          config_ble_mode_set(BLE_MODE_NATIVE);
+          /* Ensure BLE Native handler is initialized when switching to NATIVE mode */
+          esp_err_t init_ret = ble_native_handler_init();
+          if (init_ret != ESP_OK) {
+            ESP_LOGW(TAG, "BLE Native handler init failed: %s (may already be initialized)", 
+                     esp_err_to_name(init_ret));
+          }
+        }
         if (config_parse_ble_native_json((const uint8_t *)cmd->raw_data,
                                           cmd->data_len) == ESP_OK) {
-          ESP_LOGI(TAG, "BLE Native JSON config loaded");
+          /* Save JSON to NVS so it can be restored on next boot */
+          if (cmd->data_len > 10) {
+            config_save_ble_json_to_nvs(BLE_MODE_NATIVE,
+                                        cmd->raw_data + 10,
+                                        cmd->data_len - 10);
+          }
+          ESP_LOGI(TAG, "BLE Native JSON config loaded and saved to NVS");
         } else {
           ESP_LOGE(TAG, "Failed to parse BLE Native JSON config");
         }
         break;
       }
       case CONFIG_UPDATE_BLE_NATIVE_CMD: {
+        if (config_ble_mode_get() != BLE_MODE_NATIVE) {
+          config_ble_mode_set(BLE_MODE_NATIVE);
+          esp_err_t init_ret = ble_native_handler_init();
+          if (init_ret != ESP_OK) {
+            ESP_LOGW(TAG, "BLE Native handler init failed: %s", esp_err_to_name(init_ret));
+          }
+        }
         if (config_parse_ble_native_command((const uint8_t *)cmd->raw_data,
                                              cmd->data_len) == ESP_OK) {
           ESP_LOGI(TAG, "BLE Native command executed");
@@ -406,10 +431,29 @@ static void config_handler_task(void *arg) {
         break;
       }
       case CONFIG_UPDATE_BLE_GATT_JSON: {
+        config_ble_mode_set(BLE_MODE_GATT);
+        /* Always attempt init — safe no-op if already initialized.
+         * Also retries if a previous attempt failed (e.g. NO_MEM). */
+        esp_err_t init_ret = ble_gatt_handler_init();
+        if (init_ret != ESP_OK) {
+          ESP_LOGW(TAG, "BLE GATT handler init failed: %s", esp_err_to_name(init_ret));
+        }
         config_parse_ble_gatt_json(cmd->raw_data, cmd->data_len);
+        /* Save JSON to NVS so it can be restored on next boot */
+        if (cmd->data_len > 10) {
+          config_save_ble_json_to_nvs(BLE_MODE_GATT,
+                                      cmd->raw_data + 10,
+                                      cmd->data_len - 10);
+        }
         break;
       }
       case CONFIG_UPDATE_BLE_GATT_CMD: {
+        config_ble_mode_set(BLE_MODE_GATT);
+        /* Always attempt init — retries if previous attempt failed */
+        esp_err_t init_ret = ble_gatt_handler_init();
+        if (init_ret != ESP_OK) {
+          ESP_LOGW(TAG, "BLE GATT handler init failed: %s", esp_err_to_name(init_ret));
+        }
         config_parse_ble_gatt_command(cmd->raw_data, cmd->data_len);
         break;
       }
@@ -484,3 +528,56 @@ void config_handler_task_stop(void) {
 
   ESP_LOGI(TAG, "Config LAN handler task stopped");
 }
+
+/**
+ * @brief Restore BLE mode and JSON config from NVS on boot.
+ *
+ * Called once from app_main() after all peripheral init is done.
+ * Initializes the appropriate BLE handler (GATT or Native) and applies the
+ * previously saved JSON config so the device is immediately operational
+ * without waiting for a new JSON from the WAN MCU.
+ *
+ * If no BLE config has been saved to NVS yet this is a no-op.
+ */
+void config_restore_ble_from_nvs(void) {
+    uint8_t mode = 0;
+    char *json = NULL;
+    uint16_t json_len = 0;
+
+    esp_err_t ret = config_load_ble_json_from_nvs(&mode, &json, &json_len);
+    if (ret == ESP_ERR_NOT_FOUND) {
+        ESP_LOGI(TAG, "No BLE config in NVS — skipping BLE restore");
+        return;
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "BLE NVS load failed: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    ESP_LOGI(TAG, "Restoring BLE config from NVS (mode=%u, %u bytes)", mode, json_len);
+
+    if (mode == BLE_MODE_NATIVE) {
+        config_ble_mode_set(BLE_MODE_NATIVE);
+        ret = ble_native_handler_init();
+        if (ret == ESP_OK || ret == ESP_ERR_INVALID_STATE /* already init */) {
+            ble_native_handler_load_config(0, json, json_len);
+            ESP_LOGI(TAG, "BLE Native config restored from NVS");
+        } else {
+            ESP_LOGE(TAG, "BLE Native init failed during NVS restore: %s", esp_err_to_name(ret));
+        }
+    } else if (mode == BLE_MODE_GATT) {
+        config_ble_mode_set(BLE_MODE_GATT);
+        ret = ble_gatt_handler_init();
+        if (ret == ESP_OK) {
+            ble_gatt_handler_load_config(0, json, json_len);
+            ESP_LOGI(TAG, "BLE GATT config restored from NVS");
+        } else {
+            ESP_LOGE(TAG, "BLE GATT init failed during NVS restore: %s", esp_err_to_name(ret));
+        }
+    } else {
+        ESP_LOGW(TAG, "Unknown BLE mode %u in NVS — ignoring", mode);
+    }
+
+    free(json);
+}
+

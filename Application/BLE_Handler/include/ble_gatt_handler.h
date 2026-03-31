@@ -99,6 +99,11 @@ void ble_gatt_handler_report_scan_result(uint8_t stack_id,
                                           uint8_t dev_idx);
 
 /**
+ * @brief Clear all device table entries (call before starting a new scan).
+ */
+void ble_gatt_handler_clear_devices(void);
+
+/**
  * @brief Set the pending stack ID for the next GAP/GATTC operation.
  *
  * Used by downlink handlers to associate incoming GAP events with a specific

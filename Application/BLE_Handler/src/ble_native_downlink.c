@@ -12,6 +12,8 @@
 #include "ble_native_downlink.h"
 #include "ble_native_config.h"
 #include "ble_native_uplink.h"
+#include "ble_native_handler.h"
+#include "config_ble_mode.h"
 #include "esp_log.h"
 #include "esp_ble_mesh_defs.h"
 #include "esp_ble_mesh_common_api.h"
@@ -1214,23 +1216,46 @@ static void handle_heartbeat_sub(uint8_t stack_id, const char *params_json) {
  * (no slot — BLE Mesh is native on LAN MCU, always stack 0)
  */
 static void dispatch_item(const uint8_t *data, uint16_t len) {
-    if (!data || len < 7) return;
-    if (strncmp((const char *)data, "CFBN:", 5) != 0) return;
+    if (!data || len < 8) {
+        ESP_LOGD(TAG, "dispatch_item: invalid input (len=%d)", len);
+        return;
+    }
+    if (strncmp((const char *)data, "CFBN:", 5) != 0) {
+        ESP_LOGD(TAG, "dispatch_item: not CFBN prefix");
+        return;
+    }
 
-    /* Native BLE: always use stack 0 */
-    const uint8_t stack_id = 0;
+    ESP_LOGD(TAG, "dispatch_item: received %.16s... (len=%d)", (const char*)data, len);
 
-    /* Parse verb directly after "CFBN:" */
-    const char *verb = (const char *)(data + 5);
-    const char *c2 = strchr(verb, ':');
-    size_t verb_len = c2 ? (size_t)(c2 - verb) : strlen(verb);
-    const char *params = c2 ? c2 + 1 : "";
+    /* Format: CFBN:<stack_id>:<verb>:<params...>
+     * Skip stack field, then extract verb and params. */
+    const char *after_prefix = (const char *)(data + 5);
+    const char *stack_end = strchr(after_prefix, ':');
+    if (!stack_end) {
+        ESP_LOGW(TAG, "dispatch_item: malformed - no stack:verb separator");
+        return; /* malformed — no verb */
+    }
+
+    const uint8_t stack_id = 0; /* Native BLE always uses stack 0 */
+
+    const char *verb    = stack_end + 1;
+    const char *c2      = strchr(verb, ':');
+    size_t      verb_len = c2 ? (size_t)(c2 - verb) : strlen(verb);
+    const char *params  = c2 ? c2 + 1 : "";
 
     char verb_buf[32] = {0};
     if (verb_len >= sizeof(verb_buf)) verb_len = sizeof(verb_buf) - 1;
     memcpy(verb_buf, verb, verb_len);
 
-    ESP_LOGI(TAG, "stack=%u verb='%s'", stack_id, verb_buf);
+    ESP_LOGI(TAG, "stack=%u verb='%s' params='%.20s'", stack_id, verb_buf, params);
+
+    /* Check if NATIVE mode is active */
+    if (!config_ble_mode_is_active(BLE_MODE_NATIVE)) {
+        ESP_LOGW(TAG, "NATIVE command rejected: module not active (mode=%s)",
+                 config_ble_mode_name(config_ble_mode_get()));
+        ble_native_uplink_send_fail(stack_id, "MODULE_NOT_ACTIVE");
+        return;
+    }
 
     if (strncmp(verb_buf, "SCAN", 4) == 0) {
         handle_scan(stack_id, params);
