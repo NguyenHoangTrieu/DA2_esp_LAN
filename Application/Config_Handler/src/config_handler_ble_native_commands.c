@@ -21,11 +21,7 @@
 
 static const char *TAG = "cfbn_cmds";
 
-/**
- * Set to 1 when BLE Mesh provisioner feature is fully validated and ready
- * for production use. Keep at 0 to return NOT_SUPPORTED to all callers.
- */
-#define BLE_NATIVE_MESH_SUPPORTED  0
+/* BLE_NATIVE_MESH_SUPPORTED is defined in ble_native_handler.h */
 
 /* --------------------------------------------------------------------------
  * config_parse_ble_native_command

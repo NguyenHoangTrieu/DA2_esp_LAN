@@ -732,9 +732,9 @@ static esp_err_t dma_buffer_flush(wan_comm_handle_t handle) {
              handle->dma_tx.used, handle->dma_tx.frame_count);
     
     // Debug: Dump DMA buffer content before flush
-    ESP_LOG_BUFFER_HEXDUMP(TAG, handle->dma_tx.buffer, 
-                          handle->dma_tx.used > 64 ? 64 : handle->dma_tx.used, 
-                          ESP_LOG_INFO);
+    // ESP_LOG_BUFFER_HEXDUMP(TAG, handle->dma_tx.buffer, 
+    //                       handle->dma_tx.used > 64 ? 64 : handle->dma_tx.used, 
+    //                       ESP_LOG_INFO);
     
     // Pad to fixed transfer length and 4-byte alignment
     size_t aligned_size = DMA_ALIGN_SIZE(handle->dma_tx.used);

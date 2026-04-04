@@ -17,6 +17,13 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+/**
+ * Set to 1 when BLE Mesh provisioner feature is fully validated and ready
+ * for production use. Keep at 0 to return NOT_SUPPORTED to all callers and
+ * to skip esp_ble_mesh_init() so the mesh stack never starts BLE scanning.
+ */
+#define BLE_NATIVE_MESH_SUPPORTED  0
+
 #ifdef __cplusplus
 extern "C" {
 #endif

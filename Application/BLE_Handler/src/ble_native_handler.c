@@ -567,6 +567,7 @@ esp_err_t ble_native_handler_init(void) {
         }
     }
 
+#if BLE_NATIVE_MESH_SUPPORTED
     /* Register callbacks BEFORE esp_ble_mesh_init (v5.x uses unified event callback) */
     esp_ble_mesh_register_prov_callback(prov_callback);
     esp_ble_mesh_register_generic_client_callback(onoff_client_cb);
@@ -586,6 +587,9 @@ esp_err_t ble_native_handler_init(void) {
      * ble_native_downlink.c to avoid double-enable errors. */
 
     s_mesh_initialized = true;
+#else
+    ESP_LOGI(TAG, "BLE Mesh stack skipped (BLE_NATIVE_MESH_SUPPORTED=0) — GATT Central only");
+#endif
     ESP_LOGI(TAG, "BLE Native handler initialized");
     return ESP_OK;
 }
