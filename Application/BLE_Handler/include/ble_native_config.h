@@ -147,6 +147,26 @@ bool ble_native_config_is_loaded(uint8_t stack_id);
  */
 esp_err_t ble_native_config_alloc_unicast(uint8_t stack_id, uint16_t *addr_out);
 
+/**
+ * @brief Get the total number of valid commands loaded for a stack.
+ *
+ * @param stack_id  Stack index
+ * @return Number of valid commands (0 if not loaded)
+ */
+uint8_t ble_native_config_get_num_cmds(uint8_t stack_id);
+
+/**
+ * @brief Retrieve a command entry by index.
+ *
+ * @param stack_id  Stack index
+ * @param index     Command index (0..num_commands-1)
+ * @param[out] out  Filled on success
+ * @return ESP_OK on success, ESP_ERR_INVALID_ARG if out of range
+ */
+esp_err_t ble_native_config_get_cmd_by_index(uint8_t stack_id,
+                                               uint8_t index,
+                                               ble_native_cmd_entry_t *out);
+
 #ifdef __cplusplus
 }
 #endif

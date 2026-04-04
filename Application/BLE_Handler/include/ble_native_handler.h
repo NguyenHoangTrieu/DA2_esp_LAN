@@ -96,6 +96,22 @@ void ble_native_scan_reset(uint8_t stack_id);
  */
 void ble_native_scan_flush(void);
 
+/**
+ * @brief Arm the provision-complete semaphore before calling add_unprov_dev.
+ *        Called from ble_native_downlink.c handle_provision().
+ */
+esp_err_t ble_native_start_provision_wait(void);
+
+/**
+ * @brief Block until PROVISIONER_PROV_COMPLETE_EVT fires or timeout expires.
+ *        Called from ble_native_downlink.c handle_provision() after add_unprov_dev.
+ *
+ * @param addr_out  Receives the unicast address assigned by the stack.
+ * @param timeout_ms  Maximum wait in milliseconds.
+ * @return ESP_OK on success, ESP_ERR_TIMEOUT on failure.
+ */
+esp_err_t ble_native_wait_provision_complete(uint16_t *addr_out, uint32_t timeout_ms);
+
 #ifdef __cplusplus
 }
 #endif

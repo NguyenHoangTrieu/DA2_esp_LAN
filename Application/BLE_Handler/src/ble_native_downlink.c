@@ -114,6 +114,15 @@ static void handle_scan(uint8_t stack_id, const char *params) {
  *
  * Command: "CFBN:<stack_id>:PROVISION:<uuid_hex_32chars>"
  * Response: "CFBN:<stack_id>:OK:PROVISIONED:<unicast_addr>" or FAIL
+ *
+ * Full flow (blocking in downlink FreeRTOS task):
+ *   1. Parse uuid
+ *   2. Arm provision-complete semaphore
+ *   3. add_unprov_dev  → BLE Mesh stack starts PB-ADV link
+ *   4. Block up to 30 s for PROV_COMPLETE event
+ *   5. APP_KEY_ADD    → deliver app key to the node's key store
+ *   6. MODEL_APP_BIND → bind app key to each model (ONOFF + LIGHTNESS)
+ * Only after step 6 will the node accept CONTROL messages.
  */
 static void handle_provision(uint8_t stack_id, const char *params) {
     if (!params || strlen(params) < 32) {
@@ -125,17 +134,37 @@ static void handle_provision(uint8_t stack_id, const char *params) {
         return;
     }
 
-    /* Parse 16-byte UUID from 32-char hex string */
+    /* Parse 16-byte UUID from first 32 hex chars */
     uint8_t uuid[16] = {0};
     for (int i = 0; i < 16; i++) {
         char b[3] = { params[i * 2], params[i * 2 + 1], '\0' };
         uuid[i] = (uint8_t)strtoul(b, NULL, 16);
     }
 
-    /* Allocate unicast address for the new node */
-    uint16_t unicast_addr = 0;
-    if (ble_native_config_alloc_unicast(stack_id, &unicast_addr) != ESP_OK) {
-        ble_native_uplink_send_fail(stack_id, "PROVISION:NO_ADDR");
+    /* Extended format: params[32..33] = addr_type, params[34..45] = addr (12 hex = 6 bytes)
+     * Provided by the widget using the BT address captured during scan.
+     * Without the actual BT address the provisioner cannot open the PB-ADV link. */
+    uint8_t bt_addr[6]  = {0};
+    uint8_t bt_addr_type = 0;
+    bool    has_addr    = (strlen(params) >= 46);
+    if (has_addr) {
+        char at_hex[3] = { params[32], params[33], '\0' };
+        bt_addr_type = (uint8_t)strtoul(at_hex, NULL, 16);
+        for (int i = 0; i < 6; i++) {
+            char b[3] = { params[34 + i * 2], params[34 + i * 2 + 1], '\0' };
+            bt_addr[i] = (uint8_t)strtoul(b, NULL, 16);
+        }
+        ESP_LOGI(TAG, "stack=%u: PROVISION addr_type=%u addr=%02X:%02X:%02X:%02X:%02X:%02X",
+                 stack_id, bt_addr_type,
+                 bt_addr[0], bt_addr[1], bt_addr[2],
+                 bt_addr[3], bt_addr[4], bt_addr[5]);
+    } else {
+        ESP_LOGW(TAG, "stack=%u: PROVISION — no BT address in params, UUID-only mode", stack_id);
+    }
+
+    /* Arm the provision-complete semaphore BEFORE add_unprov_dev */
+    if (ble_native_start_provision_wait() != ESP_OK) {
+        ble_native_uplink_send_fail(stack_id, "PROVISION:SEM_FAIL");
         return;
     }
 
@@ -151,11 +180,14 @@ static void handle_provision(uint8_t stack_id, const char *params) {
     }
 
     esp_ble_mesh_unprov_dev_add_t add_dev = {
-        .addr_type = 0,  /* will be filled by stack from adv report */
-        .oob_info = 0,
-        .bearer = ESP_BLE_MESH_PROV_ADV,
+        .addr_type = bt_addr_type,
+        .oob_info  = 0,
+        .bearer    = ESP_BLE_MESH_PROV_ADV,
     };
     memcpy(add_dev.uuid, uuid, 16);
+    if (has_addr) {
+        memcpy(add_dev.addr, bt_addr, 6);
+    }
 
     esp_err_t ret = esp_ble_mesh_provisioner_add_unprov_dev(
         &add_dev,
@@ -169,11 +201,120 @@ static void handle_provision(uint8_t stack_id, const char *params) {
         return;
     }
 
-    /* Actual provisioning result arrives in provisioner_prov_complete callback
-     * (registered in ble_native_handler.c).  Send an immediate ACK. */
-    char resp[64];
-    snprintf(resp, sizeof(resp), "PROVISION_IN_PROGRESS:0x%04X", unicast_addr);
-    ble_native_uplink_send_ok(stack_id, resp);
+    /* ── Wait for the mesh stack to confirm provisioning ──
+     * The provisioner's own PB-ADV transaction timeout is 30 s (ESP-IDF default).
+     * After that it closes the link and immediately retries, so one full PB-ADV
+     * cycle (attempt + retry) can take up to ~65 s.  Wait 90 s to cover at
+     * least one retry without reporting a false timeout.                    */
+    ESP_LOGI(TAG, "stack=%u: waiting for PROV_COMPLETE (up to 90s)...", stack_id);
+    uint16_t assigned_addr = 0;
+    if (ble_native_wait_provision_complete(&assigned_addr, 90000) != ESP_OK) {
+        ESP_LOGE(TAG, "stack=%u: PROV_COMPLETE timed out", stack_id);
+        ble_native_uplink_send_fail(stack_id, "PROVISION:TIMEOUT");
+        return;
+    }
+    ESP_LOGI(TAG, "stack=%u: provisioned OK — addr=0x%04X", stack_id, assigned_addr);
+
+    /* ── APP_KEY_ADD: deliver app key to the node's key store ── */
+    ble_native_mesh_cfg_t mesh_cfg;
+    if (ble_native_config_get_mesh(stack_id, &mesh_cfg) != ESP_OK) {
+        ble_native_uplink_send_fail(stack_id, "PROVISION:NO_MESH_CFG");
+        return;
+    }
+
+    const uint16_t net_idx = (uint16_t)(stack_id + 1);
+    const uint16_t app_idx = (uint16_t)(stack_id + 1);
+
+    esp_ble_mesh_model_t *cfg_model = ble_native_get_model(ESP_BLE_MESH_MODEL_ID_CONFIG_SRV);
+    if (!cfg_model) {
+        ble_native_uplink_send_fail(stack_id, "PROVISION:NO_CFG_MODEL");
+        return;
+    }
+
+    esp_ble_mesh_client_common_param_t common = {
+        .opcode       = ESP_BLE_MESH_MODEL_OP_APP_KEY_ADD,
+        .model        = cfg_model,
+        .ctx.net_idx  = net_idx,
+        .ctx.app_idx  = app_idx,
+        .ctx.addr     = assigned_addr,
+        .ctx.send_ttl = mesh_cfg.ttl,
+        .msg_timeout  = 5000,
+    };
+    esp_ble_mesh_cfg_client_set_state_t set_ak = {
+        .app_key_add.net_idx = net_idx,
+        .app_key_add.app_idx = app_idx,
+    };
+    memcpy(set_ak.app_key_add.app_key, mesh_cfg.app_key, 16);
+
+    if (esp_ble_mesh_config_client_set_state(&common, &set_ak) != ESP_OK) {
+        ble_native_uplink_send_fail(stack_id, "PROVISION:APP_KEY_ADD_FAIL");
+        return;
+    }
+    /* Give the Config Client time to receive the ACK */
+    vTaskDelay(pdMS_TO_TICKS(2000));
+
+    /* ── MODEL_APP_BIND: bind app key to every unique model in the config ──
+     * Without this binding the node silently drops all CONTROL messages.
+     * Deduplicate model_ids so we don't send redundant binds.              */
+    uint8_t  bind_errors = 0;
+    uint16_t bound_models[BLE_NATIVE_MAX_COMMANDS] = {0};
+    uint8_t  num_bound = 0;
+    uint8_t  num_cmds  = ble_native_config_get_num_cmds(stack_id);
+
+    esp_ble_mesh_client_common_param_t bind_common = {
+        .opcode       = ESP_BLE_MESH_MODEL_OP_MODEL_APP_BIND,
+        .model        = cfg_model,
+        .ctx.net_idx  = net_idx,
+        .ctx.app_idx  = app_idx,
+        .ctx.addr     = assigned_addr,
+        .ctx.send_ttl = mesh_cfg.ttl,
+        .msg_timeout  = 5000,
+    };
+
+    for (uint8_t ci = 0; ci < num_cmds; ci++) {
+        ble_native_cmd_entry_t entry;
+        if (ble_native_config_get_cmd_by_index(stack_id, ci, &entry) != ESP_OK) break;
+        if (!entry.valid || entry.model_id == 0) continue;
+
+        /* Skip if already bound */
+        bool already = false;
+        for (uint8_t bi = 0; bi < num_bound; bi++) {
+            if (bound_models[bi] == entry.model_id) { already = true; break; }
+        }
+        if (already) continue;
+
+        esp_ble_mesh_cfg_client_set_state_t set_bind = {
+            .model_app_bind = {
+                .element_addr  = assigned_addr,
+                .model_app_idx = app_idx,
+                .model_id      = entry.model_id,
+                .company_id    = ESP_BLE_MESH_CID_NVAL,  /* SIG model */
+            },
+        };
+        esp_err_t br = esp_ble_mesh_config_client_set_state(&bind_common, &set_bind);
+        if (br != ESP_OK) {
+            ESP_LOGW(TAG, "MODEL_APP_BIND model=0x%04X failed: %s",
+                     entry.model_id, esp_err_to_name(br));
+            bind_errors++;
+        } else {
+            ESP_LOGI(TAG, "MODEL_APP_BIND model=0x%04X → app_idx=%u",
+                     entry.model_id, app_idx);
+            bound_models[num_bound++] = entry.model_id;
+            /* Wait for ACK before binding the next model */
+            vTaskDelay(pdMS_TO_TICKS(1500));
+        }
+    }
+
+    if (bind_errors) {
+        char resp[64];
+        snprintf(resp, sizeof(resp), "PROVISIONED:0x%04X:BIND_WARN:%u_errors",
+                 assigned_addr, bind_errors);
+        ble_native_uplink_send_ok(stack_id, resp);
+    } else {
+        char resp[64];
+        snprintf(resp, sizeof(resp), "PROVISIONED:0x%04X", assigned_addr);
+        ble_native_uplink_send_ok(stack_id, resp);
+    }
 }
 
 /**
@@ -1074,6 +1215,96 @@ static void handle_scene_recall(uint8_t stack_id, const char *params_json) {
 }
 
 /**
+ * APP_KEY_BIND — bind an application key to a specific model on a remote node.
+ * "CFBN:<slot>:APP_KEY_BIND:<json>"
+ * JSON: { "addr":"0x0002", "elem_addr":"0x0002",
+ *         "model_id":"0x1000", "app_idx":1 }
+ *
+ * This is the explicit version of the MODEL_APP_BIND step that handle_provision
+ * runs automatically.  Use it to re-bind after a NODE_RESET or when adding new
+ * commands later.
+ */
+static void handle_app_key_bind(uint8_t stack_id, const char *params_json) {
+    if (!params_json || !params_json[0]) {
+        ble_native_uplink_send_fail(stack_id, "APP_KEY_BIND:MISSING_PARAMS");
+        return;
+    }
+    if (!ble_native_config_is_loaded(stack_id)) {
+        ble_native_uplink_send_fail(stack_id, "NOT_CONFIGURED");
+        return;
+    }
+
+    cJSON *j = cJSON_Parse(params_json);
+    if (!j) {
+        ble_native_uplink_send_fail(stack_id, "APP_KEY_BIND:JSON_FAIL");
+        return;
+    }
+
+    cJSON *j_addr    = cJSON_GetObjectItemCaseSensitive(j, "addr");
+    cJSON *j_elem    = cJSON_GetObjectItemCaseSensitive(j, "elem_addr");
+    cJSON *j_model   = cJSON_GetObjectItemCaseSensitive(j, "model_id");
+
+    if (!cJSON_IsString(j_addr) || !cJSON_IsString(j_model)) {
+        ble_native_uplink_send_fail(stack_id, "APP_KEY_BIND:MISSING_FIELDS");
+        cJSON_Delete(j);
+        return;
+    }
+
+    const char *ps_addr  = j_addr->valuestring;
+    const char *ps_elem  = j_elem ? j_elem->valuestring : ps_addr;
+    const char *ps_model = j_model->valuestring;
+
+    uint16_t unicast_addr = (uint16_t)strtoul(
+        (ps_addr[0]=='0' && (ps_addr[1]=='x'||ps_addr[1]=='X')) ? ps_addr+2 : ps_addr, NULL, 16);
+    uint16_t elem_addr = (uint16_t)strtoul(
+        (ps_elem[0]=='0' && (ps_elem[1]=='x'||ps_elem[1]=='X')) ? ps_elem+2 : ps_elem, NULL, 16);
+    uint16_t model_id = (uint16_t)strtoul(
+        (ps_model[0]=='0' && (ps_model[1]=='x'||ps_model[1]=='X')) ? ps_model+2 : ps_model, NULL, 16);
+    cJSON_Delete(j);
+
+    const uint16_t net_idx = (uint16_t)(stack_id + 1);
+    const uint16_t app_idx = (uint16_t)(stack_id + 1);
+
+    esp_ble_mesh_model_t *cfg_model = ble_native_get_model(ESP_BLE_MESH_MODEL_ID_CONFIG_SRV);
+    if (!cfg_model) {
+        ble_native_uplink_send_fail(stack_id, "APP_KEY_BIND:NO_CFG_MODEL");
+        return;
+    }
+
+    ble_native_mesh_cfg_t mesh_cfg;
+    ble_native_config_get_mesh(stack_id, &mesh_cfg);
+
+    esp_ble_mesh_client_common_param_t common = {
+        .opcode       = ESP_BLE_MESH_MODEL_OP_MODEL_APP_BIND,
+        .model        = cfg_model,
+        .ctx.net_idx  = net_idx,
+        .ctx.app_idx  = app_idx,
+        .ctx.addr     = unicast_addr,
+        .ctx.send_ttl = mesh_cfg.ttl,
+        .msg_timeout  = 4000,
+    };
+
+    esp_ble_mesh_cfg_client_set_state_t set = {
+        .model_app_bind = {
+            .element_addr  = elem_addr,
+            .model_app_idx = app_idx,
+            .model_id      = model_id,
+            .company_id    = ESP_BLE_MESH_CID_NVAL,   /* SIG model */
+        },
+    };
+
+    esp_err_t ret = esp_ble_mesh_config_client_set_state(&common, &set);
+    if (ret != ESP_OK) {
+        ble_native_uplink_send_fail(stack_id, "APP_KEY_BIND:SEND_FAIL");
+    } else {
+        char resp[72];
+        snprintf(resp, sizeof(resp), "APP_KEY_BIND:SENT:0x%04X:model=0x%04X:app_idx=%u",
+                 unicast_addr, model_id, app_idx);
+        ble_native_uplink_send_ok(stack_id, resp);
+    }
+}
+
+/**
  * VENDOR_CMD — send a vendor model command to a node.
  * "CFBN:<slot>:VENDOR_CMD:<json>"
  * JSON: { "addr":"0x0002", "company_id":"0x0059",
@@ -1294,6 +1525,8 @@ static void dispatch_item(const uint8_t *data, uint16_t len) {
         handle_group_op(stack_id, params, false);
     } else if (strcmp(verb_buf, "APP_KEY_ADD") == 0) {
         handle_app_key_add(stack_id, params);
+    } else if (strcmp(verb_buf, "APP_KEY_BIND") == 0) {
+        handle_app_key_bind(stack_id, params);
     } else if (strcmp(verb_buf, "NODE_CONFIG") == 0) {
         handle_node_config(stack_id, params);
     } else if (strcmp(verb_buf, "NODE_RESET") == 0) {

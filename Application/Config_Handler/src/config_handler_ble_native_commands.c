@@ -20,6 +20,13 @@
 #include <stdio.h>
 
 static const char *TAG = "cfbn_cmds";
+
+/**
+ * Set to 1 when BLE Mesh provisioner feature is fully validated and ready
+ * for production use. Keep at 0 to return NOT_SUPPORTED to all callers.
+ */
+#define BLE_NATIVE_MESH_SUPPORTED  0
+
 /* --------------------------------------------------------------------------
  * config_parse_ble_native_command
 
@@ -37,6 +44,14 @@ esp_err_t config_parse_ble_native_command(const uint8_t *data, uint16_t len) {
         ESP_LOGE(TAG, "CMD: bad prefix");
         return ESP_FAIL;
     }
+
+#if BLE_NATIVE_MESH_SUPPORTED == 0
+    ESP_LOGW(TAG, "CMD: BLE Mesh not supported in this build");
+    const char *not_sup = "CFBN:FAIL:NOT_SUPPORTED";
+    mcu_wan_enqueue_uplink(HANDLER_BLE_NATIVE,
+                           (uint8_t *)not_sup, (uint16_t)strlen(not_sup));
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
 
     /* Native BLE: no slot — always stack 0 */
     const uint8_t stack_id = 0;
@@ -79,6 +94,14 @@ esp_err_t config_parse_ble_native_json(const uint8_t *data, uint16_t len) {
         ESP_LOGE(TAG, "JSON: bad prefix");
         return ESP_FAIL;
     }
+
+#if BLE_NATIVE_MESH_SUPPORTED == 0
+    ESP_LOGW(TAG, "JSON: BLE Mesh not supported in this build");
+    const char *not_sup_j = "CFBN:FAIL:NOT_SUPPORTED";
+    mcu_wan_enqueue_uplink(HANDLER_BLE_NATIVE,
+                           (uint8_t *)not_sup_j, (uint16_t)strlen(not_sup_j));
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
 
     /* Native BLE: no slot — always stack 0 */
     const uint8_t stack_id = 0;
