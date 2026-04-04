@@ -386,7 +386,7 @@ skip_sd_retry:
 
       if ((now - last_rtc_request) >= pdMS_TO_TICKS(RTC_REQUEST_INTERVAL_MS)) {
         if (request_rtc_and_status() == ESP_OK) {
-          ESP_LOGI(TAG, "RTC and Internet status updated");
+          ESP_LOGD(TAG, "RTC and Internet status updated");
         }
         last_rtc_request = now;
       }
@@ -512,7 +512,7 @@ static esp_err_t request_rtc_and_status(void) {
     // Update internet status
     g_internet_status = (internet_status_t)response[22];
 
-    ESP_LOGI(TAG, "RTC: %s, Internet: %s", g_rtc_cache.rtc_string,
+    ESP_LOGD(TAG, "RTC: %s, Internet: %s", g_rtc_cache.rtc_string,
              g_internet_status ? "ONLINE" : "OFFLINE");
 
     return ESP_OK;

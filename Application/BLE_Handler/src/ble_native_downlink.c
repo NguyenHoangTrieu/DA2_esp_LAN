@@ -139,6 +139,17 @@ static void handle_provision(uint8_t stack_id, const char *params) {
         return;
     }
 
+    /* Re-enable PB-ADV scanning so the stack can establish the provisioning
+     * link.  handle_scan disables scanning when the scan timer expires, so
+     * we must turn it back on here.  ESP_ERR_INVALID_STATE = already on. */
+    esp_err_t prov_en = esp_ble_mesh_provisioner_prov_enable(ESP_BLE_MESH_PROV_ADV);
+    if (prov_en != ESP_OK && prov_en != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "stack=%u: prov_enable failed before provision: %s",
+                 stack_id, esp_err_to_name(prov_en));
+        ble_native_uplink_send_fail(stack_id, "PROVISION:PROV_ENABLE_FAILED");
+        return;
+    }
+
     esp_ble_mesh_unprov_dev_add_t add_dev = {
         .addr_type = 0,  /* will be filled by stack from adv report */
         .oob_info = 0,
@@ -267,7 +278,9 @@ static void handle_control(uint8_t stack_id, const char *params_json) {
 
     if (cmd_entry.model_id == ESP_BLE_MESH_MODEL_ID_GEN_ONOFF_SRV) {
         /* Generic OnOff (server model_id 0x1000 — matches JSON config and model table) */
+        /* Accept both "value" and "onoff" keys for forward/backward compat */
         cJSON *j_value = j_par ? cJSON_GetObjectItemCaseSensitive(j_par, "value") : NULL;
+        if (!j_value) j_value = j_par ? cJSON_GetObjectItemCaseSensitive(j_par, "onoff") : NULL;
         uint8_t onoff_val = cJSON_IsNumber(j_value) ? (uint8_t)j_value->valuedouble : 0;
 
         esp_ble_mesh_generic_client_set_state_t set_state = {
@@ -567,8 +580,6 @@ static void handle_app_key_add(uint8_t stack_id, const char *params_json) {
     }
 
     cJSON *j_addr    = cJSON_GetObjectItemCaseSensitive(j, "addr");
-    cJSON *j_net_idx = cJSON_GetObjectItemCaseSensitive(j, "net_idx");
-    cJSON *j_app_idx = cJSON_GetObjectItemCaseSensitive(j, "app_idx");
 
     if (!cJSON_IsString(j_addr)) {
         ble_native_uplink_send_fail(stack_id, "APP_KEY_ADD:MISSING_ADDR");
@@ -579,10 +590,10 @@ static void handle_app_key_add(uint8_t stack_id, const char *params_json) {
     const char *ps = j_addr->valuestring;
     uint16_t unicast_addr = (uint16_t)strtoul(
         (ps[0]=='0' && (ps[1]=='x'||ps[1]=='X')) ? ps+2 : ps, NULL, 16);
-    uint16_t net_idx = cJSON_IsNumber(j_net_idx) ? (uint16_t)j_net_idx->valuedouble
-                                                  : (uint16_t)stack_id;
-    uint16_t app_idx = cJSON_IsNumber(j_app_idx) ? (uint16_t)j_app_idx->valuedouble
-                                                  : (uint16_t)stack_id;
+    /* Always use stack_id+1: that is the net/app_idx registered in load_config.
+     * Index 0 (KEY_PRIMARY) is reserved and was never registered. */
+    uint16_t net_idx = (uint16_t)(stack_id + 1);
+    uint16_t app_idx = (uint16_t)(stack_id + 1);
     cJSON_Delete(j);
 
     esp_ble_mesh_model_t *cfg_model = ble_native_get_model(ESP_BLE_MESH_MODEL_ID_CONFIG_SRV);
