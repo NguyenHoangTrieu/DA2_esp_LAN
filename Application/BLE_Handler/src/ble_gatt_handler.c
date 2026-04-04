@@ -643,3 +643,56 @@ void ble_gatt_handler_report_scan_result(uint8_t stack_id,
 void ble_gatt_handler_set_pending_stack(uint8_t stack_id) {
     s_pending_stack_id = stack_id;
 }
+
+/**
+ * @brief Deinitialize the BLE GATT Central handler.
+ *
+ * Disconnects all devices, stops advertising, and unregisters callbacks.
+ * Safe to call even if not initialized.
+ */
+esp_err_t ble_gatt_handler_deinit(void) {
+    if (!s_initialized) {
+        ESP_LOGW(TAG, "BLE GATT handler not initialized, nothing to deinit");
+        return ESP_OK;
+    }
+
+    ESP_LOGI(TAG, "Deinitializing BLE GATT handler...");
+
+    /* Stop advertising */
+    ESP_LOGI(TAG, "Stopping BLE advertisement");
+    esp_ble_gap_stop_advertising();
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    /* Disconnect all devices */
+    if (s_devices) {
+        ESP_LOGI(TAG, "Disconnecting all GATT devices");
+        for (int i = 0; i < BLE_GATT_MAX_DEVICES; i++) {
+            if (s_devices[i].valid && s_devices[i].conn_id != 0xFFFF) {
+                esp_ble_gattc_close(s_gattc_if, s_devices[i].conn_id);
+            }
+        }
+        ble_gatt_handler_clear_devices();
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    /* Unregister GATTC app */
+    if (s_gattc_if != ESP_GATT_IF_NONE && s_bt_registered) {
+        ESP_LOGI(TAG, "Unregistering GATT application");
+        esp_ble_gattc_app_unregister(s_gattc_if);
+        s_gattc_if = ESP_GATT_IF_NONE;
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    /* Unregister GAP callback */
+    if (s_bt_registered) {
+        ESP_LOGI(TAG, "Unregistering GAP callback");
+        esp_ble_gap_register_callback(NULL);
+        esp_ble_gattc_register_callback(NULL);
+        s_bt_registered = false;
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    s_initialized = false;
+    ESP_LOGI(TAG, "BLE GATT handler deinitialized successfully");
+    return ESP_OK;
+}

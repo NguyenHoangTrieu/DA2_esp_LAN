@@ -392,6 +392,11 @@ static void config_handler_task(void *arg) {
       }
       case CONFIG_UPDATE_BLE_NATIVE_JSON: {
         if (config_ble_mode_get() != BLE_MODE_NATIVE) {
+          /* Cleanup previous BLE mode before switching */
+          if (config_ble_mode_get() == BLE_MODE_GATT) {
+            ESP_LOGI(TAG, "Deinitializing BLE GATT handler before switching to Native");
+            ble_gatt_handler_deinit();
+          }
           config_ble_mode_set(BLE_MODE_NATIVE);
           /* Ensure BLE Native handler is initialized when switching to NATIVE mode */
           esp_err_t init_ret = ble_native_handler_init();
@@ -416,6 +421,11 @@ static void config_handler_task(void *arg) {
       }
       case CONFIG_UPDATE_BLE_NATIVE_CMD: {
         if (config_ble_mode_get() != BLE_MODE_NATIVE) {
+          /* Cleanup previous BLE mode before switching */
+          if (config_ble_mode_get() == BLE_MODE_GATT) {
+            ESP_LOGI(TAG, "Deinitializing BLE GATT handler before switching to Native");
+            ble_gatt_handler_deinit();
+          }
           config_ble_mode_set(BLE_MODE_NATIVE);
           esp_err_t init_ret = ble_native_handler_init();
           if (init_ret != ESP_OK) {
@@ -431,7 +441,10 @@ static void config_handler_task(void *arg) {
         break;
       }
       case CONFIG_UPDATE_BLE_GATT_JSON: {
-        config_ble_mode_set(BLE_MODE_GATT);
+        if (config_ble_mode_get() != BLE_MODE_GATT) {
+          /* NOTE: Do NOT deinit BLE Native — keep Mesh stack running independent */
+          config_ble_mode_set(BLE_MODE_GATT);
+        }
         /* Always attempt init — safe no-op if already initialized.
          * Also retries if a previous attempt failed (e.g. NO_MEM). */
         esp_err_t init_ret = ble_gatt_handler_init();
@@ -448,7 +461,10 @@ static void config_handler_task(void *arg) {
         break;
       }
       case CONFIG_UPDATE_BLE_GATT_CMD: {
-        config_ble_mode_set(BLE_MODE_GATT);
+        if (config_ble_mode_get() != BLE_MODE_GATT) {
+          /* NOTE: Do NOT deinit BLE Native — keep Mesh stack running independent */
+          config_ble_mode_set(BLE_MODE_GATT);
+        }
         /* Always attempt init — retries if previous attempt failed */
         esp_err_t init_ret = ble_gatt_handler_init();
         if (init_ret != ESP_OK) {

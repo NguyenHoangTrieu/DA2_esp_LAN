@@ -10,6 +10,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "esp_heap_caps.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -84,10 +85,11 @@ esp_err_t ble_native_uplink_task_start(void) {
     }
 
     if (!s_uplink_queue) {
-        s_uplink_queue = xQueueCreate(BLE_NATIVE_UPLINK_QUEUE_DEPTH,
-                                      sizeof(uplink_item_t));
+        s_uplink_queue = xQueueCreateWithCaps(BLE_NATIVE_UPLINK_QUEUE_DEPTH,
+                                              sizeof(uplink_item_t),
+                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (!s_uplink_queue) {
-            ESP_LOGE(TAG, "Failed to create uplink queue");
+            ESP_LOGE(TAG, "Failed to create uplink queue (PSRAM)");
             return ESP_ERR_NO_MEM;
         }
     }
@@ -97,8 +99,10 @@ esp_err_t ble_native_uplink_task_start(void) {
                                  4 * 1024, NULL, 5, &s_uplink_task);
     if (ret != pdPASS) {
         s_task_running = false;
+        vQueueDelete(s_uplink_queue);
+        s_uplink_queue = NULL;
         ESP_LOGE(TAG, "Failed to create uplink task");
-        return ESP_FAIL;
+        return ESP_ERR_NO_MEM;
     }
 
     return ESP_OK;

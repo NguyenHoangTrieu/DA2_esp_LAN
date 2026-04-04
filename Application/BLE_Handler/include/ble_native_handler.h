@@ -33,6 +33,17 @@ extern "C" {
 esp_err_t ble_native_handler_init(void);
 
 /**
+ * @brief Deinitialize the ESP BLE Mesh stack.
+ *
+ * Stops uplink/downlink tasks, deinitializes the BLE Mesh provisioner,
+ * and deinitializes the mesh stack. Safe to call even if not initialized.
+ * Call this before switching to a different BLE mode.
+ *
+ * @return ESP_OK on success
+ */
+esp_err_t ble_native_handler_deinit(void);
+
+/**
  * @brief Load JSON configuration for one BLE Native stack.
  *
  * Called by config_handler_ble_native_commands.c when CFBN:JSON: is received.

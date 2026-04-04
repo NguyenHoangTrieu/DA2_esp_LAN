@@ -3,6 +3,8 @@
 */
 
 #include "DA2_esp_LAN.h"
+#include "esp_bt.h"
+#include "esp_bt_main.h"
 
 static const char *TAG = "MAIN APP";
 
@@ -51,7 +53,36 @@ void app_main(void)
     config_init();
     config_handler_task_start();
     ESP_LOGI(TAG, "Config handler started");
-    
+
+    /* Initialize BT controller and Bluedroid early at boot while internal RAM
+     * is fresh and unfragmented.  Lazy init after 600+ seconds of uptime
+     * causes bt_workqueue allocation failures (internal RAM fragmented).
+     * Both BLE Mesh (Native) and GATT Central share this single BT stack. */
+    {
+        esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+        esp_err_t bt_ret = esp_bt_controller_init(&bt_cfg);
+        if (bt_ret != ESP_OK) {
+            ESP_LOGE(TAG, "BT controller init failed: %s", esp_err_to_name(bt_ret));
+        } else {
+            bt_ret = esp_bt_controller_enable(ESP_BT_MODE_BLE);
+            if (bt_ret != ESP_OK) {
+                ESP_LOGE(TAG, "BT controller enable failed: %s", esp_err_to_name(bt_ret));
+            } else {
+                bt_ret = esp_bluedroid_init();
+                if (bt_ret != ESP_OK) {
+                    ESP_LOGE(TAG, "Bluedroid init failed: %s", esp_err_to_name(bt_ret));
+                } else {
+                    bt_ret = esp_bluedroid_enable();
+                    if (bt_ret != ESP_OK) {
+                        ESP_LOGE(TAG, "Bluedroid enable failed: %s", esp_err_to_name(bt_ret));
+                    } else {
+                        ESP_LOGI(TAG, "BT stack initialized at boot");
+                    }
+                }
+            }
+        }
+    }
+
     // Start WAN handler FIRST so its queue/mutexes are allocated before
     // module handlers (BLE/LoRa/etc.) consume internal RAM on NVS restore.
     mcu_wan_handler_start();

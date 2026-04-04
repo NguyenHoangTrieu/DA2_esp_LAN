@@ -1530,7 +1530,13 @@ CONFIG_BT_BLE_50_DTM_TEST_EN=y
 # default:
 CONFIG_BT_BLE_FEAT_CREATE_SYNC_RETRY_MAX=3
 # default:
-# CONFIG_BT_BLE_42_FEATURES_SUPPORTED is not set
+CONFIG_BT_BLE_42_FEATURES_SUPPORTED=y
+# default:
+CONFIG_BT_BLE_42_DTM_TEST_EN=y
+# default:
+CONFIG_BT_BLE_42_ADV_EN=y
+# default:
+CONFIG_BT_BLE_42_SCAN_EN=y
 # default:
 CONFIG_BT_BLE_VENDOR_HCI_EN=y
 # default:
@@ -1651,7 +1657,9 @@ CONFIG_BT_CTRL_SCAN_DUPL_CACHE_SIZE=100
 # default:
 CONFIG_BT_CTRL_DUPL_SCAN_CACHE_REFRESH_PERIOD=0
 # default:
-# CONFIG_BT_CTRL_BLE_MESH_SCAN_DUPL_EN is not set
+CONFIG_BT_CTRL_BLE_MESH_SCAN_DUPL_EN=y
+# default:
+CONFIG_BT_CTRL_MESH_DUPL_SCAN_CACHE_SIZE=100
 # default:
 # CONFIG_BT_CTRL_COEX_PHY_CODED_TX_RX_TLIM_EN is not set
 # default:
@@ -1748,8 +1756,292 @@ CONFIG_BT_SMP_CRYPTO_STACK_TINYCRYPT=y
 # CONFIG_BT_HCI_LOG_DEBUG_EN is not set
 # end of Bluetooth
 
+CONFIG_BLE_MESH=y
 # default:
-# CONFIG_BLE_MESH is not set
+CONFIG_BLE_MESH_HCI_5_0=y
+# default:
+CONFIG_BLE_MESH_V11_SUPPORT=y
+# default:
+# CONFIG_BLE_MESH_RANDOM_ADV_INTERVAL is not set
+# default:
+CONFIG_BLE_MESH_USE_UNIFIED_CRYPTO=y
+# default:
+CONFIG_BLE_MESH_USE_DUPLICATE_SCAN=y
+# default:
+# CONFIG_BLE_MESH_ACTIVE_SCAN is not set
+# default:
+CONFIG_BLE_MESH_MEM_ALLOC_MODE_INTERNAL=y
+# default:
+# CONFIG_BLE_MESH_MEM_ALLOC_MODE_EXTERNAL is not set
+# default:
+# CONFIG_BLE_MESH_MEM_ALLOC_MODE_DEFAULT is not set
+# default:
+CONFIG_BLE_MESH_DEINIT=y
+
+#
+# BLE Mesh and BLE coexistence support
+#
+# default:
+# CONFIG_BLE_MESH_SUPPORT_BLE_ADV is not set
+# default:
+# CONFIG_BLE_MESH_SUPPORT_BLE_SCAN is not set
+# end of BLE Mesh and BLE coexistence support
+
+# default:
+# CONFIG_BLE_MESH_FAST_PROV is not set
+# default:
+# CONFIG_BLE_MESH_NODE is not set
+CONFIG_BLE_MESH_PROVISIONER=y
+# default:
+CONFIG_BLE_MESH_WAIT_FOR_PROV_MAX_DEV_NUM=10
+# default:
+CONFIG_BLE_MESH_MAX_PROV_NODES=10
+# default:
+CONFIG_BLE_MESH_PBA_SAME_TIME=2
+# default:
+CONFIG_BLE_MESH_PROVISIONER_SUBNET_COUNT=3
+# default:
+CONFIG_BLE_MESH_PROVISIONER_APP_KEY_COUNT=3
+# default:
+# CONFIG_BLE_MESH_PROVISIONER_RECV_HB is not set
+# default:
+CONFIG_BLE_MESH_PROV=y
+# default:
+CONFIG_BLE_MESH_PROV_EPA=y
+# default:
+# CONFIG_BLE_MESH_CERT_BASED_PROV is not set
+# default:
+CONFIG_BLE_MESH_PB_ADV=y
+# default:
+# CONFIG_BLE_MESH_PB_GATT is not set
+# default:
+CONFIG_BLE_MESH_PROXY=y
+# default:
+# CONFIG_BLE_MESH_GATT_PROXY_CLIENT is not set
+# default:
+CONFIG_BLE_MESH_NET_BUF_POOL_USAGE=y
+# default:
+# CONFIG_BLE_MESH_SETTINGS is not set
+# default:
+CONFIG_BLE_MESH_SUBNET_COUNT=3
+# default:
+CONFIG_BLE_MESH_APP_KEY_COUNT=3
+# default:
+CONFIG_BLE_MESH_MODEL_KEY_COUNT=3
+# default:
+CONFIG_BLE_MESH_MODEL_GROUP_COUNT=3
+# default:
+CONFIG_BLE_MESH_LABEL_COUNT=3
+# default:
+CONFIG_BLE_MESH_CRPL=10
+# default:
+CONFIG_BLE_MESH_MSG_CACHE_SIZE=10
+# default:
+CONFIG_BLE_MESH_ADV_BUF_COUNT=60
+# default:
+CONFIG_BLE_MESH_IVU_DIVIDER=4
+# default:
+# CONFIG_BLE_MESH_IVU_RECOVERY_IVI is not set
+# default:
+# CONFIG_BLE_MESH_SAR_ENHANCEMENT is not set
+# default:
+CONFIG_BLE_MESH_TX_SEG_MSG_COUNT=1
+# default:
+CONFIG_BLE_MESH_RX_SEG_MSG_COUNT=1
+# default:
+CONFIG_BLE_MESH_RX_SDU_MAX=384
+# default:
+CONFIG_BLE_MESH_TX_SEG_MAX=32
+# default:
+# CONFIG_BLE_MESH_FRIEND is not set
+# default:
+# CONFIG_BLE_MESH_NO_LOG is not set
+
+#
+# BLE Mesh STACK DEBUG LOG LEVEL
+#
+# default:
+# CONFIG_BLE_MESH_TRACE_LEVEL_NONE is not set
+# default:
+# CONFIG_BLE_MESH_TRACE_LEVEL_ERROR is not set
+# default:
+CONFIG_BLE_MESH_TRACE_LEVEL_WARNING=y
+# default:
+# CONFIG_BLE_MESH_TRACE_LEVEL_INFO is not set
+# default:
+# CONFIG_BLE_MESH_TRACE_LEVEL_DEBUG is not set
+# default:
+# CONFIG_BLE_MESH_TRACE_LEVEL_VERBOSE is not set
+# default:
+CONFIG_BLE_MESH_STACK_TRACE_LEVEL=2
+# end of BLE Mesh STACK DEBUG LOG LEVEL
+
+#
+# BLE Mesh NET BUF DEBUG LOG LEVEL
+#
+# default:
+# CONFIG_BLE_MESH_NET_BUF_TRACE_LEVEL_NONE is not set
+# default:
+# CONFIG_BLE_MESH_NET_BUF_TRACE_LEVEL_ERROR is not set
+# default:
+CONFIG_BLE_MESH_NET_BUF_TRACE_LEVEL_WARNING=y
+# default:
+# CONFIG_BLE_MESH_NET_BUF_TRACE_LEVEL_INFO is not set
+# default:
+# CONFIG_BLE_MESH_NET_BUF_TRACE_LEVEL_DEBUG is not set
+# default:
+# CONFIG_BLE_MESH_NET_BUF_TRACE_LEVEL_VERBOSE is not set
+# default:
+CONFIG_BLE_MESH_NET_BUF_TRACE_LEVEL=2
+# end of BLE Mesh NET BUF DEBUG LOG LEVEL
+
+# default:
+CONFIG_BLE_MESH_CLIENT_MSG_TIMEOUT=4000
+
+#
+# Support for BLE Mesh Foundation models
+#
+CONFIG_BLE_MESH_CFG_CLI=y
+# default:
+# CONFIG_BLE_MESH_HEALTH_CLI is not set
+# default:
+CONFIG_BLE_MESH_HEALTH_SRV=y
+# default:
+# CONFIG_BLE_MESH_BRC_CLI is not set
+# default:
+# CONFIG_BLE_MESH_BRC_SRV is not set
+# default:
+# CONFIG_BLE_MESH_PRB_CLI is not set
+# default:
+# CONFIG_BLE_MESH_PRB_SRV is not set
+# default:
+# CONFIG_BLE_MESH_ODP_CLI is not set
+# default:
+# CONFIG_BLE_MESH_SRPL_CLI is not set
+# default:
+# CONFIG_BLE_MESH_AGG_CLI is not set
+# default:
+# CONFIG_BLE_MESH_AGG_SRV is not set
+# default:
+# CONFIG_BLE_MESH_SAR_CLI is not set
+# default:
+# CONFIG_BLE_MESH_SAR_SRV is not set
+# default:
+# CONFIG_BLE_MESH_COMP_DATA_1 is not set
+# default:
+# CONFIG_BLE_MESH_COMP_DATA_128 is not set
+# default:
+# CONFIG_BLE_MESH_MODELS_METADATA_0 is not set
+# default:
+# CONFIG_BLE_MESH_LCD_CLI is not set
+# default:
+# CONFIG_BLE_MESH_LCD_SRV is not set
+# default:
+# CONFIG_BLE_MESH_RPR_CLI is not set
+# default:
+# CONFIG_BLE_MESH_DF_CLI is not set
+# default:
+# CONFIG_BLE_MESH_DF_SRV is not set
+# end of Support for BLE Mesh Foundation models
+
+#
+# Support for BLE Mesh Client/Server models
+#
+CONFIG_BLE_MESH_GENERIC_ONOFF_CLI=y
+# default:
+# CONFIG_BLE_MESH_GENERIC_LEVEL_CLI is not set
+# default:
+# CONFIG_BLE_MESH_GENERIC_DEF_TRANS_TIME_CLI is not set
+# default:
+# CONFIG_BLE_MESH_GENERIC_POWER_ONOFF_CLI is not set
+# default:
+# CONFIG_BLE_MESH_GENERIC_POWER_LEVEL_CLI is not set
+# default:
+# CONFIG_BLE_MESH_GENERIC_BATTERY_CLI is not set
+# default:
+# CONFIG_BLE_MESH_GENERIC_LOCATION_CLI is not set
+# default:
+# CONFIG_BLE_MESH_GENERIC_PROPERTY_CLI is not set
+# default:
+# CONFIG_BLE_MESH_SENSOR_CLI is not set
+# default:
+# CONFIG_BLE_MESH_TIME_CLI is not set
+# default:
+CONFIG_BLE_MESH_SCENE_CLI=y
+# default:
+# CONFIG_BLE_MESH_SCHEDULER_CLI is not set
+# default:
+CONFIG_BLE_MESH_LIGHT_LIGHTNESS_CLI=y
+# default:
+CONFIG_BLE_MESH_LIGHT_CTL_CLI=y
+# default:
+# CONFIG_BLE_MESH_LIGHT_HSL_CLI is not set
+# default:
+# CONFIG_BLE_MESH_LIGHT_XYL_CLI is not set
+# default:
+# CONFIG_BLE_MESH_LIGHT_LC_CLI is not set
+# default:
+# CONFIG_BLE_MESH_GENERIC_SERVER is not set
+# default:
+# CONFIG_BLE_MESH_SENSOR_SERVER is not set
+# default:
+# CONFIG_BLE_MESH_TIME_SCENE_SERVER is not set
+# default:
+# CONFIG_BLE_MESH_LIGHTING_SERVER is not set
+# default:
+# CONFIG_BLE_MESH_MBT_CLI is not set
+# default:
+# CONFIG_BLE_MESH_MBT_SRV is not set
+
+#
+# Binary Larger Object Transfer model
+#
+# default:
+# CONFIG_BLE_MESH_BLOB_SRV is not set
+# default:
+# CONFIG_BLE_MESH_BLOB_CLI is not set
+# default:
+CONFIG_BLE_MESH_BLOB_CHUNK_COUNT_MAX=256
+# default:
+CONFIG_BLE_MESH_ALIGN_CHUNK_SIZE_TO_MAX_SEGMENT=y
+# end of Binary Larger Object Transfer model
+
+#
+# Device Firmware Update model
+#
+# default:
+CONFIG_BLE_MESH_DFU_FWID_MAXLEN=16
+# default:
+CONFIG_BLE_MESH_DFU_METADATA_MAXLEN=32
+# default:
+CONFIG_BLE_MESH_DFU_URI_MAXLEN=32
+# default:
+# CONFIG_BLE_MESH_DFU_SLOTS is not set
+# default:
+# CONFIG_BLE_MESH_DFD_CLI is not set
+# end of Device Firmware Update model
+# end of Support for BLE Mesh Client/Server models
+
+# default:
+# CONFIG_BLE_MESH_IV_UPDATE_TEST is not set
+# default:
+CONFIG_BLE_MESH_DISCARD_OLD_SEQ_AUTH=y
+
+#
+# BLE Mesh specific test option
+#
+# default:
+# CONFIG_BLE_MESH_SELF_TEST is not set
+# default:
+# CONFIG_BLE_MESH_BQB_TEST is not set
+# default:
+# CONFIG_BLE_MESH_SHELL is not set
+# default:
+# CONFIG_BLE_MESH_DEBUG is not set
+# end of BLE Mesh specific test option
+
+# default:
+# CONFIG_BLE_MESH_EXPERIMENTAL is not set
 
 #
 # Console Library

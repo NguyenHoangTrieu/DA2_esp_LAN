@@ -22,9 +22,12 @@
 #include "ble_native_downlink.h"
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "esp_bt.h"
+#include "esp_bt_main.h"
 #include "esp_ble_mesh_defs.h"
 #include "esp_ble_mesh_common_api.h"
 #include "esp_ble_mesh_provisioning_api.h"
+#include "esp_ble_mesh_networking_api.h"
 #include "esp_ble_mesh_generic_model_api.h"
 #include "esp_ble_mesh_lighting_model_api.h"
 #include "esp_ble_mesh_config_model_api.h"
@@ -53,17 +56,18 @@ typedef struct {
     char     uuid_str[33];  /* 32-char hex + NUL */
     char     addr_str[18];  /* xx:xx:xx:xx:xx:xx + NUL */
     uint16_t oob_info;
+    uint8_t  uuid_raw[16];  /* raw bytes for dedup check */
 } native_scan_dev_t;
 
 static native_scan_dev_t s_scan_buf[BLE_NATIVE_MAX_SCAN_DEVICES];
-static uint8_t           s_scan_count    = 0;
+static volatile uint8_t  s_scan_count    = 0;
 static uint8_t           s_scan_stack_id = 0;
 
 void ble_native_scan_reset(uint8_t stack_id) {
     s_scan_count    = 0;
     s_scan_stack_id = stack_id;
     memset(s_scan_buf, 0, sizeof(s_scan_buf));
-    ESP_LOGD(TAG, "Scan accumulation buffer reset (stack=%u)", stack_id);
+    ESP_LOGI(TAG, "Scan accumulation buffer reset (stack=%u)", stack_id);
 }
 
 void ble_native_scan_flush(void) {
@@ -88,8 +92,8 @@ void ble_native_scan_flush(void) {
     }
     ble_native_uplink_send_ok(s_scan_stack_id, buf);
     free(buf);
-    s_scan_count = 0;
     ESP_LOGI(TAG, "Scan flush: sent %u device(s) in one batch", s_scan_count);
+    s_scan_count = 0;
 }
 
 /* --------------------------------------------------------------------------
@@ -143,9 +147,12 @@ static esp_ble_mesh_elem_t elements[] = {
 /* Provisioner UUID — uses the ESP32 base MAC address */
 static uint8_t s_dev_uuid[16] = { 0 };
 
-/* In ESP-IDF v5.x, prov struct only needs prov_start_address for provisioner */
+/* prov_unicast_addr: provisioner's OWN element address (must be non-zero).
+ * prov_start_address: unicast address assigned to the FIRST provisioned node.
+ * Both are set once at init — cannot change after esp_ble_mesh_init(). */
 static esp_ble_mesh_prov_t prov = {
-    .prov_start_address = 0x0001,  /* may be overridden by JSON config */
+    .prov_unicast_addr  = 0x0001,  /* provisioner's own element address */
+    .prov_start_address = 0x0002,  /* first provisioned node gets 0x0002 */
 };
 
 static esp_ble_mesh_comp_t comp = {
@@ -194,7 +201,17 @@ static void prov_callback(esp_ble_mesh_prov_cb_event_t event,
                           esp_ble_mesh_prov_cb_param_t *param) {
     switch (event) {
     case ESP_BLE_MESH_PROV_REGISTER_COMP_EVT:
-        ESP_LOGI(TAG, "Provisioner registered successfully");
+        if (param->prov_register_comp.err_code != 0) {
+            ESP_LOGE(TAG, "BLE Mesh register FAILED: err=%d",
+                     param->prov_register_comp.err_code);
+        } else {
+            ESP_LOGI(TAG, "BLE Mesh provisioner stack ready");
+            /* Enable provisioner once immediately so the Zephyr mesh stack
+             * assigns elem->addr = prov_unicast_addr for each element.
+             * Without this, esp_ble_mesh_provisioner_bind_app_key_to_local_model
+             * returns -ENODEV because bt_mesh_elem_find() finds no element. */
+            esp_ble_mesh_provisioner_prov_enable(ESP_BLE_MESH_PROV_ADV);
+        }
         break;
 
     case ESP_BLE_MESH_PROVISIONER_PROV_ENABLE_COMP_EVT:
@@ -205,6 +222,61 @@ static void prov_callback(esp_ble_mesh_prov_cb_event_t event,
         ESP_LOGI(TAG, "Provisioner scan disabled");
         break;
 
+    case ESP_BLE_MESH_PROVISIONER_ADD_LOCAL_NET_KEY_COMP_EVT:
+        if (param->provisioner_add_net_key_comp.err_code != 0) {
+            ESP_LOGE(TAG, "Add net_key FAILED: err=%d net_idx=%u",
+                     param->provisioner_add_net_key_comp.err_code,
+                     param->provisioner_add_net_key_comp.net_idx);
+        } else {
+            ESP_LOGI(TAG, "Net key added: net_idx=%u",
+                     param->provisioner_add_net_key_comp.net_idx);
+        }
+        break;
+
+    case ESP_BLE_MESH_PROVISIONER_ADD_LOCAL_APP_KEY_COMP_EVT: {
+        uint16_t app_idx = param->provisioner_add_app_key_comp.app_idx;
+        if (param->provisioner_add_app_key_comp.err_code != 0) {
+            ESP_LOGE(TAG, "Add app_key FAILED: err=%d app_idx=%u",
+                     param->provisioner_add_app_key_comp.err_code, app_idx);
+            break;
+        }
+        ESP_LOGI(TAG, "App key added: app_idx=%u — binding to client models", app_idx);
+        /* Bind the app key to every client model on this provisioner element.
+         * element_addr = prov.prov_unicast_addr (provisioner's own element address).
+         * NOTE: must NOT use prov_start_address here — that is the first NODE's address.
+         * ESP_BLE_MESH_CID_NVAL = 0xFFFF means SIG model (no company ID). */
+        static const uint16_t client_model_ids[] = {
+            ESP_BLE_MESH_MODEL_ID_CONFIG_CLI,
+            ESP_BLE_MESH_MODEL_ID_GEN_ONOFF_CLI,
+            ESP_BLE_MESH_MODEL_ID_LIGHT_LIGHTNESS_CLI,
+            ESP_BLE_MESH_MODEL_ID_LIGHT_CTL_CLI,
+            ESP_BLE_MESH_MODEL_ID_SCENE_CLI,
+        };
+        for (size_t i = 0; i < ARRAY_SIZE(client_model_ids); i++) {
+            esp_err_t bind_ret = esp_ble_mesh_provisioner_bind_app_key_to_local_model(
+                prov.prov_unicast_addr, app_idx,
+                client_model_ids[i], ESP_BLE_MESH_CID_NVAL);
+            if (bind_ret != ESP_OK) {
+                ESP_LOGW(TAG, "Bind model 0x%04X to app_idx=%u failed: %s",
+                         client_model_ids[i], app_idx, esp_err_to_name(bind_ret));
+            }
+        }
+        break;
+    }
+
+    case ESP_BLE_MESH_PROVISIONER_BIND_APP_KEY_TO_MODEL_COMP_EVT:
+        if (param->provisioner_bind_app_key_to_model_comp.err_code != 0) {
+            ESP_LOGW(TAG, "Bind model 0x%04X to app_idx=%u err=%d",
+                     param->provisioner_bind_app_key_to_model_comp.model_id,
+                     param->provisioner_bind_app_key_to_model_comp.app_idx,
+                     param->provisioner_bind_app_key_to_model_comp.err_code);
+        } else {
+            ESP_LOGI(TAG, "Model 0x%04X bound to app_idx=%u",
+                     param->provisioner_bind_app_key_to_model_comp.model_id,
+                     param->provisioner_bind_app_key_to_model_comp.app_idx);
+        }
+        break;
+
     case ESP_BLE_MESH_PROVISIONER_RECV_UNPROV_ADV_PKT_EVT: {
         /* Unprovisioned device discovered — accumulate, do NOT send individually.
          * ble_native_scan_flush() will send all results as one batch at SCAN_DONE. */
@@ -212,8 +284,19 @@ static void prov_callback(esp_ble_mesh_prov_cb_event_t event,
         uint8_t *addr     = param->provisioner_recv_unprov_adv_pkt.addr;
         uint16_t oob_info = param->provisioner_recv_unprov_adv_pkt.oob_info;
 
+        /* Deduplicate: skip if UUID already in buffer (same device sends many packets) */
+        bool duplicate = false;
+        for (uint8_t j = 0; j < s_scan_count; j++) {
+            if (memcmp(s_scan_buf[j].uuid_raw, dev_uuid, 16) == 0) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) break;
+
         if (s_scan_count < BLE_NATIVE_MAX_SCAN_DEVICES) {
             native_scan_dev_t *d = &s_scan_buf[s_scan_count];
+            memcpy(d->uuid_raw, dev_uuid, 16);
             for (int i = 0; i < 16; i++) {
                 snprintf(d->uuid_str + i * 2, 3, "%02X", dev_uuid[i]);
             }
@@ -222,7 +305,7 @@ static void prov_callback(esp_ble_mesh_prov_cb_event_t event,
                      addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
             d->oob_info = oob_info;
             s_scan_count++;
-            ESP_LOGD(TAG, "Scan[%u]: uuid=%s addr=%s",
+            ESP_LOGI(TAG, "Scan[%u]: uuid=%s addr=%s",
                      s_scan_count - 1, d->uuid_str, d->addr_str);
         } else {
             ESP_LOGW(TAG, "Scan buffer full, ignoring device");
@@ -250,7 +333,7 @@ static void prov_callback(esp_ble_mesh_prov_cb_event_t event,
     }
 
     default:
-        ESP_LOGD(TAG, "Provisioning event: %d", event);
+        ESP_LOGI(TAG, "Provisioning event: %d", event);
         break;
     }
 }
@@ -390,6 +473,37 @@ esp_err_t ble_native_handler_init(void) {
         return ret;
     }
 
+    /* Initialize BT controller and Bluedroid if not already done.
+     * Normally initialized at startup in app_main; this is a safety fallback. */
+    if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_IDLE) {
+        ESP_LOGW(TAG, "BT controller not yet started — doing late init (may cause memory issues)");
+        esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+        ret = esp_bt_controller_init(&bt_cfg);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "BT controller init failed: %s", esp_err_to_name(ret));
+            return ret;
+        }
+    }
+    if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_INITED) {
+        ret = esp_bt_controller_enable(ESP_BT_MODE_BLE);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "BT controller enable failed: %s", esp_err_to_name(ret));
+            return ret;
+        }
+    }
+    if (esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_UNINITIALIZED) {
+        ret = esp_bluedroid_init();
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Bluedroid init failed: %s", esp_err_to_name(ret));
+            return ret;
+        }
+        ret = esp_bluedroid_enable();
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Bluedroid enable failed: %s", esp_err_to_name(ret));
+            return ret;
+        }
+    }
+
     /* Register callbacks BEFORE esp_ble_mesh_init (v5.x uses unified event callback) */
     esp_ble_mesh_register_prov_callback(prov_callback);
     esp_ble_mesh_register_generic_client_callback(onoff_client_cb);
@@ -404,13 +518,9 @@ esp_err_t ble_native_handler_init(void) {
         return ret;
     }
 
-    /* Enable provisioner role (ADV bearer) */
-    ret = esp_ble_mesh_provisioner_prov_enable(ESP_BLE_MESH_PROV_ADV);
-    if (ret != ESP_OK) {
-        /* Non-fatal — provisioner can be enabled later after JSON config */
-        ESP_LOGW(TAG, "Provisioner enable returned: %s (will retry after config)",
-                 esp_err_to_name(ret));
-    }
+    /* NOTE: Do NOT call esp_ble_mesh_provisioner_prov_enable() here.
+     * Provisioner enable/disable is managed exclusively by handle_scan() in
+     * ble_native_downlink.c to avoid double-enable errors. */
 
     s_mesh_initialized = true;
     ESP_LOGI(TAG, "BLE Native handler initialized");
@@ -435,7 +545,7 @@ esp_err_t ble_native_handler_load_config(uint8_t stack_id,
         return ret;
     }
 
-    /* Retrieve mesh config (keys are stored internally, no direct API call needed) */
+    /* Retrieve mesh config */
     ble_native_mesh_cfg_t mc;
     ret = ble_native_config_get_mesh(stack_id, &mc);
     if (ret != ESP_OK) {
@@ -443,10 +553,44 @@ esp_err_t ble_native_handler_load_config(uint8_t stack_id,
         return ret;
     }
 
-    /* In ESP-IDF v5.x, provisioner keys are managed internally.
-     * The mesh config is stored in ble_native_config for uplink dispatcher.
-     * Key setup is implicit when provisioning and will happen when
-     * esp_ble_mesh_provisioner_add_unprov_dev is called. */
+    /* Register net key with provisioner stack.
+     * net_idx = stack_id + 1 because index 0 (ESP_BLE_MESH_KEY_PRIMARY) is
+     * reserved and rejected by esp_ble_mesh_provisioner_add_local_net_key().
+     * If the key already exists (re-config), update it instead.
+     * Both calls are async — completion fires PROVISIONER_ADD_LOCAL_NET_KEY_COMP_EVT
+     * and PROVISIONER_ADD_LOCAL_APP_KEY_COMP_EVT in prov_callback. */
+    const uint16_t net_idx = (uint16_t)(stack_id + 1);
+    const uint16_t app_idx = (uint16_t)(stack_id + 1);
+
+    ret = esp_ble_mesh_provisioner_add_local_net_key(mc.net_key, net_idx);
+    if (ret != ESP_OK) {
+        /* ESP_ERR_INVALID_STATE means the key already exists — try update */
+        if (ret == ESP_ERR_INVALID_STATE) {
+            ret = esp_ble_mesh_provisioner_update_local_net_key(mc.net_key, net_idx);
+        }
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "stack=%u: add/update net_key failed: %s",
+                     stack_id, esp_err_to_name(ret));
+            ble_native_uplink_send_fail(stack_id, "NET_KEY_FAIL");
+            return ret;
+        }
+    }
+
+    ret = esp_ble_mesh_provisioner_add_local_app_key(mc.app_key, net_idx, app_idx);
+    if (ret != ESP_OK) {
+        if (ret == ESP_ERR_INVALID_STATE) {
+            ret = esp_ble_mesh_provisioner_update_local_app_key(mc.app_key, net_idx, app_idx);
+        }
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "stack=%u: add/update app_key failed: %s",
+                     stack_id, esp_err_to_name(ret));
+            ble_native_uplink_send_fail(stack_id, "APP_KEY_FAIL");
+            return ret;
+        }
+    }
+
+    ESP_LOGI(TAG, "stack=%u: net_key and app_key registered (net_idx=%u app_idx=%u)",
+             stack_id, net_idx, app_idx);
 
     ble_native_uplink_send_ok(stack_id, "JSON_LOADED");
     ESP_LOGI(TAG, "stack=%u: config applied (mesh keys staged for provisioning)", stack_id);
@@ -459,4 +603,38 @@ esp_err_t ble_native_handler_load_config(uint8_t stack_id,
 
 esp_err_t ble_native_handler_execute(const uint8_t *data, uint16_t len) {
     return ble_native_downlink_enqueue(data, len);
+}
+
+/* --------------------------------------------------------------------------
+ * Public API — Deinitialize Handler
+ * -------------------------------------------------------------------------- */
+
+/**
+ * @brief Deinitialize the BLE Native (Mesh) handler.
+ *
+ * Stops uplink/downlink tasks and deinitializes the BLE Mesh provisioner stack.
+ * Safe to call even if not initialized.
+ *
+ * @return ESP_OK on success, or an error code if mesh deinit fails.
+ */
+esp_err_t ble_native_handler_deinit(void) {
+    ESP_LOGI(TAG, "BLE Native handler deinitializing...");
+
+    /* Disable mesh provisioner — disable all bearers (PB-ADV + PB-GATT) */
+    esp_err_t ret = esp_ble_mesh_provisioner_prov_disable(
+        ESP_BLE_MESH_PROV_ADV | ESP_BLE_MESH_PROV_GATT);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "BLE Mesh provisioner disable returned: %s", esp_err_to_name(ret));
+    }
+
+    /* Deinitialize mesh stack — requires deinit_param */
+    esp_ble_mesh_deinit_param_t deinit_param = {0};
+    ret = esp_ble_mesh_deinit(&deinit_param);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "BLE Mesh deinit failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "BLE Native handler deinitialized successfully");
+    return ESP_OK;
 }

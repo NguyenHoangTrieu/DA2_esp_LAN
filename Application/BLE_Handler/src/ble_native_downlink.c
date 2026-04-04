@@ -26,6 +26,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "esp_heap_caps.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -83,24 +84,28 @@ static void handle_scan(uint8_t stack_id, const char *params) {
     /* Reset accumulation buffer before enabling provisioner scan */
     ble_native_scan_reset(stack_id);
 
-    /* Enable provisioner scan — discovered devices accumulated in provisioning cb */
+    /* Enable provisioner scan — discovered devices accumulated in provisioning cb.
+     * ESP_ERR_INVALID_STATE means already enabled (from init-time prov_enable),
+     * which is fine — scan is already running. */
     esp_err_t ret = esp_ble_mesh_provisioner_prov_enable(ESP_BLE_MESH_PROV_ADV);
-    if (ret != ESP_OK) {
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
         ESP_LOGE(TAG, "stack=%u: enable prov_adv failed: %s",
                  stack_id, esp_err_to_name(ret));
         ble_native_uplink_send_fail(stack_id, "SCAN_ENABLE_FAILED");
         return;
     }
 
-    char resp[64];
-    snprintf(resp, sizeof(resp), "SCAN_STARTED:%u", (unsigned)duration_ms);
-    ble_native_uplink_send_ok(stack_id, resp);
+    /* NOTE: Do NOT send SCAN_STARTED here.
+     * ThingsBoard two-way RPC closes on the FIRST response received.
+     * SCAN_DONE (sent by ble_native_scan_flush after the wait) must
+     * be the one and only response for this RPC request.          */
+    ESP_LOGI(TAG, "stack=%u: scanning for %u ms...", stack_id, (unsigned)duration_ms);
 
     /* Wait for scan duration */
     vTaskDelay(pdMS_TO_TICKS(duration_ms));
     esp_ble_mesh_provisioner_prov_disable(ESP_BLE_MESH_PROV_ADV);
 
-    /* Send all accumulated devices + SCAN_DONE as one batched uplink */
+    /* Send all accumulated devices + SCAN_DONE as the single RPC response */
     ble_native_scan_flush();
 }
 
@@ -240,13 +245,13 @@ static void handle_control(uint8_t stack_id, const char *params_json) {
     }
 
     /* Build common client params.
-     * net_idx / app_idx == stack_id because each stack loads its keys at
-     * index = stack_id via provisioner_add_local_net_key / _add_local_app_key. */
+     * net_idx / app_idx == stack_id + 1 because index 0 is KEY_PRIMARY (reserved).
+     * Keys are registered at index stack_id+1 in ble_native_handler_load_config. */
     esp_ble_mesh_client_common_param_t common = {
         .opcode      = cmd_entry.opcode,
         .model        = model,
-        .ctx.net_idx  = (uint16_t)stack_id,
-        .ctx.app_idx  = (uint16_t)stack_id,
+        .ctx.net_idx  = (uint16_t)(stack_id + 1),
+        .ctx.app_idx  = (uint16_t)(stack_id + 1),
         .ctx.addr     = dst_addr,
         .ctx.send_ttl = mesh_cfg.ttl,
         .msg_timeout  = 4000,    /* 4 s ack timeout */
@@ -411,8 +416,8 @@ static void handle_get_status(uint8_t stack_id, const char *params_json) {
     esp_ble_mesh_client_common_param_t common = {
         .opcode       = cmd_entry.ack_opcode,   /* GET opcode */
         .model        = model,
-        .ctx.net_idx  = (uint16_t)stack_id,
-        .ctx.app_idx  = (uint16_t)stack_id,
+        .ctx.net_idx  = (uint16_t)(stack_id + 1),
+        .ctx.app_idx  = (uint16_t)(stack_id + 1),
         .ctx.addr     = dst_addr,
         .ctx.send_ttl = mesh_cfg.ttl,
         .msg_timeout  = 4000,
@@ -507,8 +512,8 @@ static void handle_group_op(uint8_t stack_id, const char *params_json, bool add)
         .opcode       = add ? ESP_BLE_MESH_MODEL_OP_MODEL_SUB_ADD
                             : ESP_BLE_MESH_MODEL_OP_MODEL_SUB_DELETE,
         .model        = cfg_model,
-        .ctx.net_idx  = (uint16_t)stack_id,
-        .ctx.app_idx  = (uint16_t)stack_id,
+        .ctx.net_idx  = (uint16_t)(stack_id + 1),
+        .ctx.app_idx  = (uint16_t)(stack_id + 1),
         .ctx.addr     = unicast_addr,
         .ctx.send_ttl = mesh_cfg.ttl,
         .msg_timeout  = 4000,
@@ -665,8 +670,8 @@ static void handle_node_config(uint8_t stack_id, const char *params_json) {
 
     esp_ble_mesh_client_common_param_t common = {
         .model        = cfg_model,
-        .ctx.net_idx  = (uint16_t)stack_id,
-        .ctx.app_idx  = (uint16_t)stack_id,
+        .ctx.net_idx  = (uint16_t)(stack_id + 1),
+        .ctx.app_idx  = (uint16_t)(stack_id + 1),
         .ctx.addr     = unicast_addr,
         .ctx.send_ttl = mesh_cfg.ttl,
         .msg_timeout  = 4000,
@@ -745,8 +750,8 @@ static void handle_node_reset(uint8_t stack_id, const char *params) {
     esp_ble_mesh_client_common_param_t common = {
         .opcode       = ESP_BLE_MESH_MODEL_OP_NODE_RESET,
         .model        = cfg_model,
-        .ctx.net_idx  = (uint16_t)stack_id,
-        .ctx.app_idx  = (uint16_t)stack_id,
+        .ctx.net_idx  = (uint16_t)(stack_id + 1),
+        .ctx.app_idx  = (uint16_t)(stack_id + 1),
         .ctx.addr     = unicast_addr,
         .ctx.send_ttl = mesh_cfg.ttl,
         .msg_timeout  = 4000,
@@ -831,7 +836,7 @@ static void handle_set_pub(uint8_t stack_id, const char *params_json) {
     esp_ble_mesh_client_common_param_t common = {
         .opcode       = ESP_BLE_MESH_MODEL_OP_MODEL_PUB_SET,
         .model        = cfg_model,
-        .ctx.net_idx  = (uint16_t)stack_id,
+        .ctx.net_idx  = (uint16_t)(stack_id + 1),
         .ctx.app_idx  = app_idx,
         .ctx.addr     = unicast_addr,
         .ctx.send_ttl = mesh_cfg.ttl,
@@ -953,8 +958,8 @@ static void handle_scene_store(uint8_t stack_id, const char *params_json) {
     esp_ble_mesh_client_common_param_t common = {
         .opcode       = ESP_BLE_MESH_MODEL_OP_SCENE_STORE,
         .model        = scene_model,
-        .ctx.net_idx  = (uint16_t)stack_id,
-        .ctx.app_idx  = (uint16_t)stack_id,
+        .ctx.net_idx  = (uint16_t)(stack_id + 1),
+        .ctx.app_idx  = (uint16_t)(stack_id + 1),
         .ctx.addr     = dst_addr,
         .ctx.send_ttl = mesh_cfg.ttl,
         .msg_timeout  = 4000,
@@ -1029,8 +1034,8 @@ static void handle_scene_recall(uint8_t stack_id, const char *params_json) {
     esp_ble_mesh_client_common_param_t common = {
         .opcode       = ESP_BLE_MESH_MODEL_OP_SCENE_RECALL,
         .model        = scene_model,
-        .ctx.net_idx  = (uint16_t)stack_id,
-        .ctx.app_idx  = (uint16_t)stack_id,
+        .ctx.net_idx  = (uint16_t)(stack_id + 1),
+        .ctx.app_idx  = (uint16_t)(stack_id + 1),
         .ctx.addr     = dst_addr,
         .ctx.send_ttl = mesh_cfg.ttl,
         .msg_timeout  = 4000,
@@ -1184,8 +1189,8 @@ static void handle_heartbeat_sub(uint8_t stack_id, const char *params_json) {
     esp_ble_mesh_client_common_param_t common = {
         .opcode       = ESP_BLE_MESH_MODEL_OP_HEARTBEAT_SUB_SET,
         .model        = cfg_model,
-        .ctx.net_idx  = (uint16_t)stack_id,
-        .ctx.app_idx  = (uint16_t)stack_id,
+        .ctx.net_idx  = (uint16_t)(stack_id + 1),
+        .ctx.app_idx  = (uint16_t)(stack_id + 1),
         .ctx.addr     = src_addr,
         .ctx.send_ttl = mesh_cfg.ttl,
         .msg_timeout  = 4000,
@@ -1337,19 +1342,24 @@ esp_err_t ble_native_downlink_task_start(void) {
     }
 
     if (!s_dn_queue) {
-        s_dn_queue = xQueueCreate(BLE_NATIVE_DOWNLINK_QUEUE_DEPTH,
-                                   sizeof(downlink_item_t));
+        s_dn_queue = xQueueCreateWithCaps(BLE_NATIVE_DOWNLINK_QUEUE_DEPTH,
+                                          sizeof(downlink_item_t),
+                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (!s_dn_queue) {
+            ESP_LOGE(TAG, "Failed to create downlink queue (PSRAM)");
             return ESP_ERR_NO_MEM;
         }
     }
 
     s_task_running = true;
     BaseType_t ret = xTaskCreate(downlink_task, "ble_native_dn",
-                                  8 * 1024, NULL, 5, &s_dn_task);
+                                  6 * 1024, NULL, 5, &s_dn_task);
     if (ret != pdPASS) {
         s_task_running = false;
-        return ESP_FAIL;
+        vQueueDelete(s_dn_queue);
+        s_dn_queue = NULL;
+        ESP_LOGE(TAG, "Failed to create downlink task");
+        return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
 }
