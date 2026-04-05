@@ -84,7 +84,17 @@ static int find_by_conn_id(uint16_t conn_id) {
 
 void ble_gatt_handler_clear_devices(void) {
     for (int i = 0; i < BLE_GATT_MAX_DEVICES; i++) {
+        /* Skip slots that have an active BLE connection.
+         * Wiping a connected device slot mid-session causes the DISCONNECT_EVT
+         * callback to find no matching slot (find_by_conn_id returns -1), so the
+         * DISCONNECTED uplink is never sent and the widget UI never clears. */
+        if (s_devices[i].valid && s_devices[i].conn_id != 0xFFFF) {
+            continue;
+        }
         memset(&s_devices[i], 0, sizeof(s_devices[i]));
+        /* conn_id == 0 after memset would alias a real conn_id; restore sentinel */
+        s_devices[i].conn_id  = 0xFFFF;
+        s_devices[i].gattc_if = ESP_GATT_IF_NONE;
     }
 }
 
@@ -258,11 +268,29 @@ static void gattc_event_cb(esp_gattc_cb_event_t event,
         }
         ble_gatt_device_t *dev = &s_devices[idx];
         if (param->open.status != ESP_GATT_OK) {
-            ESP_LOGE(TAG, "Connect failed: status=%d", param->open.status);
-            char fail[48];
-            snprintf(fail, sizeof(fail), "CONNECT:FAILED:%d", param->open.status);
-            ble_gatt_uplink_send_fail(dev->stack_id, fail);
-            dev->valid = false;
+            /* ESP_GATT_ALREADY_OPEN (145 / 0x91): the BLE link is still live —
+             * typically happens when the ThingsBoard widget is reloaded while the
+             * peripheral stayed connected, and the widget sends CONNECT again.
+             * Bluedroid fires OPEN_EVT with this status but DOES supply the valid
+             * existing conn_id in param->open.conn_id.
+             * Recover the slot instead of invalidating it, then re-send CONNECTED
+             * so the widget can re-discover services and re-enable NOTIFY. */
+            if (param->open.status == ESP_GATT_ALREADY_OPEN) {
+                ESP_LOGW(TAG, "OPEN_EVT: already open idx=%d — recovering connId=0x%04X",
+                         idx, param->open.conn_id);
+                dev->conn_id  = param->open.conn_id;
+                dev->gattc_if = gattc_if;
+                char ok[80];
+                snprintf(ok, sizeof(ok), "CONNECTED:%d:0x%04X:" MACSTR,
+                         idx, dev->conn_id, MAC2STR(dev->addr));
+                ble_gatt_uplink_send_ok(dev->stack_id, ok);
+            } else {
+                ESP_LOGE(TAG, "Connect failed: status=%d", param->open.status);
+                char fail[48];
+                snprintf(fail, sizeof(fail), "CONNECT:FAILED:%d", param->open.status);
+                ble_gatt_uplink_send_fail(dev->stack_id, fail);
+                dev->valid = false;
+            }
             break;
         }
         dev->conn_id  = param->open.conn_id;
@@ -289,8 +317,12 @@ static void gattc_event_cb(esp_gattc_cb_event_t event,
         char ok[48];
         snprintf(ok, sizeof(ok), "DISCONNECTED:%d:0x%04X", idx, dev->conn_id);
         ble_gatt_uplink_send_ok(dev->stack_id, ok);
-        dev->conn_id  = 0xFFFF;
-        dev->gattc_if = ESP_GATT_IF_NONE;
+        /* Clear conn_id and char/service tables so find_by_conn_id never
+         * returns a stale slot whose conn_id matches a new connection. */
+        dev->conn_id     = 0xFFFF;
+        dev->gattc_if    = ESP_GATT_IF_NONE;
+        dev->num_chars   = 0;
+        dev->num_services = 0;
         break;
     }
 
@@ -474,6 +506,8 @@ static void gattc_event_cb(esp_gattc_cb_event_t event,
         char ok[320];
         snprintf(ok, sizeof(ok), "%s:%d:0x%04X:%s",
                  type, idx, param->notify.handle, hex);
+        ESP_LOGI(TAG, "[NOTIFY] dev[%d] handle=0x%04X len=%u data=%s",
+                 idx, param->notify.handle, param->notify.value_len, hex);
         ble_gatt_uplink_send_ok(dev->stack_id, ok);
         break;
     }

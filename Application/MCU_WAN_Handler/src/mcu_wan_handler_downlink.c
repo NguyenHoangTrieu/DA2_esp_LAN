@@ -33,6 +33,8 @@ extern SemaphoreHandle_t g_qspi_mutex;
 extern volatile bool g_handshake_done;
 extern bool g_handler_running;
 extern void (*g_config_callback)(const uint8_t *, uint16_t, bool);
+/* Shared with uplink task — updated here to suppress SD retry during BLE ops */
+extern volatile TickType_t g_last_cf_dispatch_tick;
 
 //
 // MODULE STATE
@@ -291,6 +293,10 @@ static bool poll_wan_with_retry(uint8_t *rx_buffer, size_t buffer_size) {
 
           if (g_config_callback != NULL) {
             g_config_callback(&rx_buffer[4], config_len, is_fota);
+            /* Mark the tick so the uplink task suppresses SD retries for
+             * CF_SD_SUPPRESS_MS — prevents stale SD packets from being
+             * returned as the RPC response instead of the real BLE event. */
+            g_last_cf_dispatch_tick = xTaskGetTickCount();
           }
 
           got_valid_response = true;

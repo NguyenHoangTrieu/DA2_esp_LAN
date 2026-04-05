@@ -197,6 +197,8 @@ static inline const char *handler_id_to_string(handler_id_t id) {
     return HANDLER_TYPE_BLE;
   case HANDLER_BLE_NATIVE:
     return HANDLER_TYPE_BLN;
+  case HANDLER_BLE_GATT:
+    return HANDLER_TYPE_BLG;
   default:
     return "UNK";
   }

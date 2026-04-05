@@ -481,7 +481,10 @@ esp_err_t storage_handler_prepare_retry(void) {
     return ESP_FAIL;
   }
 
-  g_retry_offset = 0;
+  /* Skip the 4-byte big-endian length header that sd_card_save() prepends.
+   * The batch buffer content starts at byte 4 and uses 2-byte per-packet
+   * length prefixes read by get_next_packet. */
+  g_retry_offset = 4;
   ESP_LOGI(TAG, "Opened retry file: %s", g_retry_path);
 
   xSemaphoreGive(g_storage_mutex);

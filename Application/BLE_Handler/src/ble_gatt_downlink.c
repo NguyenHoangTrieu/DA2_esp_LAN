@@ -357,15 +357,17 @@ static void handle_read(uint8_t stack_id, const char *params) {
         ble_gatt_uplink_send_fail(stack_id, "READ:NOT_CONNECTED");
         return;
     }
+    /* Save stack_id so READ_CHAR_EVT can route the response via the SAME RPC channel.
+       Do NOT send READ_STARTED here — that would consume g_last_rpc_id on the gateway
+       before the actual value arrives (READ_CHAR_EVT), causing the value to be routed
+       to telemetry instead of returning it as the RPC response the widget is waiting for. */
+    d->stack_id = stack_id;
     esp_err_t ret = esp_ble_gattc_read_char(d->gattc_if, d->conn_id,
                                              handle, ESP_GATT_AUTH_REQ_NONE);
     if (ret != ESP_OK) {
         ble_gatt_uplink_send_fail(stack_id, "READ:FAILED");
-    } else {
-        char ok[32];
-        snprintf(ok, sizeof(ok), "READ_STARTED:%d:0x%04X", idx, handle);
-        ble_gatt_uplink_send_ok(stack_id, ok);
     }
+    /* On success: no immediate ACK — READ_CHAR_EVT will send READ:<idx>:0x<handle>:<hex> */
 }
 
 /* CFBG:<slot>:WRITE:<idx>:<handle>:<hex_data>     (with response)
@@ -441,6 +443,18 @@ static void handle_cccd(uint8_t stack_id, const char *params, bool is_notify) {
         cccd_val = is_notify ? 0x0001 : 0x0002;
     }
     uint8_t val_buf[2] = { (uint8_t)(cccd_val & 0xFF), (uint8_t)(cccd_val >> 8) };
+
+    /* Register with ESP-IDF BLE stack so NOTIFY_EVT is delivered to the callback.
+     * char value handle = cccd_handle - 1 (BLE convention: CCCD immediately follows). */
+    if (enable) {
+        uint16_t char_handle = (handle > 0) ? (handle - 1) : handle;
+        esp_err_t reg_ret = esp_ble_gattc_register_for_notify(
+            d->gattc_if, d->addr, char_handle);
+        if (reg_ret != ESP_OK) {
+            ESP_LOGW("ble_gatt_dn", "register_for_notify failed: %d (char_handle=0x%04X)",
+                     reg_ret, char_handle);
+        }
+    }
 
     esp_err_t ret = esp_ble_gattc_write_char_descr(
         d->gattc_if, d->conn_id,
