@@ -5,6 +5,7 @@
 #include "DA2_esp_LAN.h"
 #include "esp_bt.h"
 #include "esp_bt_main.h"
+#include "driver/uart.h"
 
 static const char *TAG = "MAIN APP";
 
@@ -17,7 +18,7 @@ TaskHandle_t main_task_handle = NULL;
 #define PPP_UART_PORT                  UART_NUM_0
 #define PPP_UART_TX_PIN                GPIO_NUM_43
 #define PPP_UART_RX_PIN                GPIO_NUM_44
-#define PPP_UART_BAUDRATE              256000
+#define PPP_UART_BAUDRATE              921600
 #define PPP_UART_QUEUE_SIZE            40
 #define PPP_UART_RX_BUFFER_SIZE        (32*1024)
 
@@ -115,7 +116,17 @@ void lan_ppp_connect(void) {
   config.uart.queue_size = PPP_UART_QUEUE_SIZE;
 
   esp_netif_t *eppp_netif = eppp_connect(&config);
-
+    if (eppp_netif == NULL) {
+        ESP_LOGE(TAG, "PPP connect failed");
+        return;
+    }
+  /* Lower UART RX FIFO full threshold from default 120 → 16 bytes.
+   * At 921600 baud, default threshold fires ISR every 1.30ms; a flash page
+   * program holds interrupts ~0.1ms so this is normally fine, but bursts
+   * from multiple high-priority tasks (BLE + LwIP) can cumulatively delay
+   * the ISR long enough to overflow.  Threshold=16 fires every 0.17ms,
+   * well within any realistic ISR latency budget. */
+  uart_set_rx_full_threshold(PPP_UART_PORT, 16);
   // Get IP info
   esp_netif_ip_info_t ip_info;
   if (esp_netif_get_ip_info(eppp_netif, &ip_info) == ESP_OK) {

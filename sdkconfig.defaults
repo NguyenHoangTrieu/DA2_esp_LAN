@@ -1,0 +1,10 @@
+# LAN MCU sdkconfig overrides
+# TCP tuning for 921600 baud PPP (BDP = 90KB/s × 300ms RTT ≈ 27KB)
+# Use 14400 (10×MSS) to sustain CDN flow without 37s zero-window abort
+CONFIG_LWIP_TCP_WND_DEFAULT=14400
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=14400
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=16
+# RTO 500ms: retransmit chain (0.5+1+2+4=7.5s) finishes before CDN's 18s TLS timeout
+CONFIG_LWIP_TCP_RTO_TIME=500
+# Allow mbedTLS to use PSRAM for SSL context allocation (~50KB needed for TLS handshake)
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y

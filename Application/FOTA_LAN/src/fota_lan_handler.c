@@ -5,6 +5,95 @@
  * and optional OTA resumption using NVS.
  */
 #include "fota_lan_handler.h"
+#include "esp_heap_caps.h"
+
+static const char *TAG = "lan_advanced_ota";
+
+#if FOTA_CONFIG_LAN_ENABLE_CONNECTIVITY_CHECK
+#include "lwip/sockets.h"
+#include "lwip/netdb.h"
+#include "esp_tls.h"
+#include "esp_crt_bundle.h"
+
+/*
+ * Performs a full TLS handshake to <host>:<port> and logs:
+ *   - DNS resolution time
+ *   - TCP connect time (bare socket)
+ *   - TLS handshake time (with cert-bundle verification)
+ *
+ * This distinguishes between a simple TCP reachability problem and a
+ * TLS-layer stall (e.g. slow ECDH in software, CPU starvation by BLE tasks).
+ */
+static void connectivity_check(const char *host, uint16_t port) {
+  uint32_t t0;
+
+  /* ---- DNS ---- */
+  struct addrinfo hints = {.ai_family = AF_INET, .ai_socktype = SOCK_STREAM};
+  struct addrinfo *res  = NULL;
+  char port_str[8];
+  snprintf(port_str, sizeof(port_str), "%u", port);
+  t0 = esp_log_timestamp();
+  int dns_ret = getaddrinfo(host, port_str, &hints, &res);
+  uint32_t dns_ms = esp_log_timestamp() - t0;
+  if (dns_ret != 0 || res == NULL) {
+    ESP_LOGE(TAG, "[CHECK] DNS FAIL  %s  err=%d  (%lums)",
+             host, dns_ret, (unsigned long)dns_ms);
+    return;
+  }
+  char ip_str[INET_ADDRSTRLEN] = {0};
+  inet_ntoa_r(((struct sockaddr_in *)res->ai_addr)->sin_addr, ip_str, sizeof(ip_str));
+  freeaddrinfo(res);
+  ESP_LOGI(TAG, "[CHECK] DNS    %s -> %s  (%lums)", host, ip_str, (unsigned long)dns_ms);
+
+  /* ---- TCP connect (bare socket, 5s timeout) ---- */
+  {
+    struct addrinfo *r2 = NULL;
+    getaddrinfo(host, port_str, &hints, &r2);
+    if (r2) {
+      int sock = socket(AF_INET, SOCK_STREAM, 0);
+      if (sock >= 0) {
+        struct timeval tv = {.tv_sec = 5, .tv_usec = 0};
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+        t0 = esp_log_timestamp();
+        int c = connect(sock, r2->ai_addr, r2->ai_addrlen);
+        uint32_t tcp_ms = esp_log_timestamp() - t0;
+        if (c == 0)
+          ESP_LOGI(TAG, "[CHECK] TCP:443 OK    %s  (%lums)", host, (unsigned long)tcp_ms);
+        else
+          ESP_LOGE(TAG, "[CHECK] TCP:443 FAIL  %s  errno=%d  (%lums)", host, errno, (unsigned long)tcp_ms);
+        close(sock);
+      }
+      freeaddrinfo(r2);
+    }
+  }
+
+  /* ---- Full TLS handshake (25s timeout) ---- */
+  esp_tls_cfg_t cfg = {
+      .crt_bundle_attach = esp_crt_bundle_attach,
+      .timeout_ms        = 25000,
+      .non_block         = false,
+  };
+  esp_tls_t *tls = esp_tls_init();
+  if (!tls) {
+    ESP_LOGE(TAG, "[CHECK] esp_tls_init() OOM for %s", host);
+    return;
+  }
+  t0 = esp_log_timestamp();
+  int ret = esp_tls_conn_new_sync(host, (int)strlen(host), (int)port, &cfg, tls);
+  uint32_t tls_ms = esp_log_timestamp() - t0;
+  if (ret == 1) {
+    ESP_LOGI(TAG, "[CHECK] TLS OK    %s  (%lums)", host, (unsigned long)tls_ms);
+  } else {
+    int esp_err = 0, mbedtls_flags = 0;
+    esp_tls_error_handle_t eh = NULL;
+    esp_tls_get_error_handle(tls, &eh);
+    if (eh) esp_tls_get_and_clear_last_error(eh, &esp_err, &mbedtls_flags);
+    ESP_LOGE(TAG, "[CHECK] TLS FAIL  %s  ret=%d esp_err=0x%x mbedtls=0x%x  (%lums)",
+             host, ret, esp_err, mbedtls_flags, (unsigned long)tls_ms);
+  }
+  esp_tls_conn_destroy(tls);
+}
+#endif /* FOTA_CONFIG_LAN_ENABLE_CONNECTIVITY_CHECK */
 
 #if FOTA_CONFIG_LAN_FIRMWARE_UPGRADE_BIND_IF
 /* The interface name value can refer to if_desc in esp_netif_defaults.h */
@@ -14,8 +103,6 @@ static const char *bind_interface_name = NETIF_DESC_ETH;
 static const char *bind_interface_name = NETIF_DESC_STA;
 #endif
 #endif
-
-static const char *TAG = "lan_advanced_ota";
 
 extern const uint8_t server_cert_pem_start[] asm("_binary_ca_cert_pem_start");
 extern const uint8_t server_cert_pem_end[] asm("_binary_ca_cert_pem_end");
@@ -121,7 +208,6 @@ static void event_handler(void *arg, esp_event_base_t event_base,
     switch (event_id) {
     case ESP_HTTPS_OTA_START:
       ESP_LOGI(TAG, "OTA started");
-      ESP_LOGI(TAG, "Free heap: %d", esp_get_free_heap_size());
       break;
     case ESP_HTTPS_OTA_CONNECTED:
       ESP_LOGI(TAG, "Connected to server");
@@ -192,6 +278,8 @@ static esp_err_t validate_image_header(esp_app_desc_t *new_app_info) {
 }
 
 static esp_err_t _http_client_init_cb(esp_http_client_handle_t http_client) {
+  ESP_LOGI(TAG, "[OTA] HTTP client init cb: new TLS hop starting (t=%lums)",
+           (unsigned long)esp_log_timestamp());
   esp_err_t err = ESP_OK;
   return err;
 }
@@ -221,212 +309,273 @@ static void get_sha256_of_partitions(void) {
   print_sha256(sha_256, "SHA-256 for current firmware:");
 }
 
-void advanced_ota_task(void *pvParameter) {
-  ESP_LOGI(TAG, "Starting Advanced OTA - V1.0.0");
+/*
+ * Manual OTA download using esp_tls directly.
+ *
+ * esp_https_ota / esp_http_client TLS to raw.githubusercontent.com fails
+ * deterministically at 21s with -0x004C (RST) after cert validation.
+ * However, esp_tls_conn_new_sync() to the SAME host completes in ~700ms
+ * every time.  This function bypasses the broken esp_http_client TLS path
+ * and uses only esp_tls_conn_new_sync() + raw HTTP/1.0 GET.
+ *
+ * HTTP/1.0 is used intentionally: the server responds with Content-Length
+ * and Connection: close — no chunked transfer encoding to parse.
+ */
+#include "esp_tls.h"
 
-  esp_err_t err;
-  esp_err_t ota_finish_err = ESP_OK;
+#define OTA_HOST "raw.githubusercontent.com"
+#define OTA_PATH "/NguyenHoangTrieu/DATN_config_app/main/dist/bin/DA2_esp_LAN.bin"
+#define OTA_DL_BUF_SIZE 4096
 
-#if FOTA_CONFIG_LAN_FIRMWARE_UPGRADE_BIND_IF
-  esp_netif_t *netif = get_netif_from_desc(bind_interface_name);
-  if (netif == NULL) {
-    ESP_LOGE(TAG, "Can't find netif from interface description");
-    fota_lan_handler_task_stop();
-    vTaskDelete(NULL);
-  }
+static esp_err_t manual_ota_download(void) {
+  esp_err_t ret = ESP_FAIL;
+  esp_tls_t *tls = NULL;
+  uint8_t *buf = NULL;
+  esp_ota_handle_t ota_handle = 0;
+  bool ota_started = false;
 
-  struct ifreq ifr;
-  esp_netif_get_netif_impl_name(netif, ifr.ifr_name);
-  ESP_LOGI(TAG, "Bind interface name is %s", ifr.ifr_name);
-#endif
-
-  esp_http_client_config_t config = {
-      .url = FOTA_CONFIG_LAN_FIRMWARE_UPGRADE_URL,
-#if FOTA_CONFIG_LAN_USE_CERT_BUNDLE
+  /* ---- TLS connect (proven path) ---- */
+  /* ALPN "http/1.1" is required: Fastly CDN uses ALPN to route TLS
+   * connections to the HTTP handler. Without it, TLS connects fine but
+   * the CDN silently drops all HTTP requests (30s read timeout). */
+  static const char *alpn[] = {"http/1.1", NULL};
+  esp_tls_cfg_t tls_cfg = {
       .crt_bundle_attach = esp_crt_bundle_attach,
-#else
-      .cert_pem = (char *)server_cert_pem_start,
-#endif
-      .timeout_ms = FOTA_CONFIG_LAN_OTA_RECV_TIMEOUT,
-      .keep_alive_enable = true,
-      .keep_alive_idle = 30,      // Send keepalive after 5s idle
-      .keep_alive_interval = 10,  // Keepalive probe interval
-      .keep_alive_count = 5,     // Max failed probes before disconnect
-      .buffer_size = 4 * 1024,
-      .buffer_size_tx = 4 * 1024,
-#if FOTA_CONFIG_LAN_FIRMWARE_UPGRADE_BIND_IF
-      .if_name = &ifr,
-#endif
-#if FOTA_CONFIG_LAN_ENABLE_PARTIAL_HTTP_DOWNLOAD
-      .save_client_session = true,
-#endif
-#if FOTA_CONFIG_LAN_TLS_DYN_BUF_RX_STATIC
-      .tls_dyn_buf_strategy = HTTP_TLS_DYN_BUF_RX_STATIC,
-#endif
+      .timeout_ms        = 30000,
+      .non_block         = false,
+      .alpn_protos       = alpn,
   };
 
-#if FOTA_CONFIG_LAN_FIRMWARE_UPGRADE_URL_FROM_STDIN
-  char url_buf[OTA_URL_SIZE];
-  if (strcmp(config.url, "FROM_STDIN") == 0) {
-    configure_stdin_stdout();
-    fgets(url_buf, OTA_URL_SIZE, stdin);
-    int len = strlen(url_buf);
-    url_buf[len - 1] = '\0';
-    config.url = url_buf;
-  } else {
-    ESP_LOGE(TAG, "Configuration mismatch: wrong firmware upgrade image url");
-    fota_lan_handler_task_stop();
-    vTaskDelete(NULL);
-  }
-#endif
-
-#if FOTA_CONFIG_LAN_SKIP_COMMON_NAME_CHECK
-  config.skip_cert_common_name_check = true;
-#endif
-
-#if FOTA_CONFIG_LAN_ENABLE_OTA_RESUMPTION
-  nvs_handle_t nvs_ota_resumption_handle;
-  err = nvs_open(NVS_NAMESPACE_OTA_RESUMPTION, NVS_READWRITE,
-                 &nvs_ota_resumption_handle);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "Error (%s) opening NVS handle!", esp_err_to_name(err));
-    fota_lan_handler_task_stop();
-    vTaskDelete(NULL);
+  tls = esp_tls_init();
+  if (!tls) {
+    ESP_LOGE(TAG, "[OTA-TLS] esp_tls_init OOM");
+    return ESP_ERR_NO_MEM;
   }
 
-  uint32_t ota_wr_len = 0;
-  err = ota_res_get_written_len_from_nvs(nvs_ota_resumption_handle, config.url,
-                                         &ota_wr_len);
-  if (err != ESP_OK) {
-    ESP_LOGD(TAG, "Starting OTA from beginning");
-  } else {
-    ESP_LOGD(TAG, "OTA write length fetched successfully: %d bytes",
-             ota_wr_len);
-  }
-#endif
-
-  esp_https_ota_config_t ota_config = {
-      .http_config = &config,
-      .http_client_init_cb = _http_client_init_cb,
-#if FOTA_CONFIG_LAN_ENABLE_PARTIAL_HTTP_DOWNLOAD
-      .partial_http_download = true,
-      .max_http_request_size = FOTA_CONFIG_LAN_HTTP_REQUEST_SIZE,
-#endif
-#if FOTA_CONFIG_LAN_ENABLE_OTA_RESUMPTION
-      .ota_resumption = true,
-      .ota_image_bytes_written = ota_wr_len,
-#endif
-  };
-
-  ESP_LOGI(TAG, "Attempting to download update from %s", config.url);
-
-  esp_https_ota_handle_t https_ota_handle = NULL;
-  err = esp_https_ota_begin(&ota_config, &https_ota_handle);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "ESP HTTPS OTA Begin failed: %s", esp_err_to_name(err));
-    fota_lan_handler_task_stop();
-    ESP_LOGI(TAG, "FOTA error - restarting device");
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    esp_restart();
-  }
-  esp_app_desc_t app_desc = {};
-  err = esp_https_ota_get_img_desc(https_ota_handle, &app_desc);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "esp_https_ota_get_img_desc failed: %s", esp_err_to_name(err));
-    esp_https_ota_abort(https_ota_handle);
-    fota_lan_handler_task_stop();
-    ESP_LOGI(TAG, "FOTA error - restarting device");
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    esp_restart();
+  uint32_t t0 = esp_log_timestamp();
+  int r = esp_tls_conn_new_sync(OTA_HOST, strlen(OTA_HOST), 443, &tls_cfg, tls);
+  uint32_t tls_ms = esp_log_timestamp() - t0;
+  ESP_LOGI(TAG, "[OTA-TLS] connect ret=%d (%lums)", r, (unsigned long)tls_ms);
+  if (r != 1) {
+    ESP_LOGE(TAG, "[OTA-TLS] TLS connect failed");
+    goto cleanup;
   }
 
-  err = validate_image_header(&app_desc);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "image header verification failed");
-    esp_https_ota_abort(https_ota_handle);
-    fota_lan_handler_task_stop();
-    ESP_LOGI(TAG, "FOTA error - restarting device");
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    esp_restart();
-  }
-
-  while (1) {
-    err = esp_https_ota_perform(https_ota_handle);
-    if (err != ESP_ERR_HTTPS_OTA_IN_PROGRESS) {
-      break;
-    }
-
-    // Monitor OTA progress
-    const size_t len = esp_https_ota_get_image_len_read(https_ota_handle);
-    static size_t last_logged_len = 0;
-    static TickType_t last_log_time = 0;
-    TickType_t now = xTaskGetTickCount();
-    
-    // Log progress every 5 seconds or every 50KB
-    if (len - last_logged_len >= 51200 || (now - last_log_time) >= pdMS_TO_TICKS(5000)) {
-      ESP_LOGI(TAG, "OTA Progress: %d bytes downloaded (%.1f KB)", len, len / 1024.0);
-      last_logged_len = len;
-      last_log_time = now;
-    }
-
-#if FOTA_CONFIG_LAN_ENABLE_OTA_RESUMPTION
-    err = ota_res_save_cfg_to_nvs(nvs_ota_resumption_handle, len, config.url);
-    if (err != ESP_OK) {
-      ESP_LOGE(TAG, "Failed to save OTA config to NVS (%s)",
-               esp_err_to_name(err));
-    }
-#endif
-  }
-
-  if (esp_https_ota_is_complete_data_received(https_ota_handle) != true) {
-    ESP_LOGE(TAG, "Complete data was not received.");
-  } else {
-#if FOTA_CONFIG_LAN_ENABLE_OTA_RESUMPTION
-    err = ota_res_cleanup_cfg_from_nvs(nvs_ota_resumption_handle);
-    if (err != ESP_OK) {
-      ESP_LOGE(TAG, "Failed to clean up OTA config from NVS (%s)",
-               esp_err_to_name(err));
-    }
-#endif
-    ota_finish_err = esp_https_ota_finish(https_ota_handle);
-    if ((err == ESP_OK) && (ota_finish_err == ESP_OK)) {
-      ESP_LOGI(TAG, "ESP_HTTPS_OTA upgrade successful. Rebooting ...");
-      vTaskDelay(1000 / portTICK_PERIOD_MS);
-      esp_restart();
-    } else {
-      if (ota_finish_err == ESP_ERR_OTA_VALIDATE_FAILED) {
-        ESP_LOGE(TAG, "Image validation failed, image is corrupted");
+  /* ---- Send HTTP/1.1 GET (Fastly CDN drops HTTP/1.0 silently) ---- */
+  {
+    char req[512];
+    int req_len = snprintf(req, sizeof(req),
+        "GET " OTA_PATH " HTTP/1.1\r\n"
+        "Host: " OTA_HOST "\r\n"
+        "Connection: close\r\n"
+        "User-Agent: ESP32-OTA/1.0\r\n"
+        "\r\n");
+    int written = 0;
+    while (written < req_len) {
+      int w = esp_tls_conn_write(tls, req + written, req_len - written);
+      if (w < 0) {
+        ESP_LOGE(TAG, "[OTA-TLS] write failed: %d", w);
+        goto cleanup;
       }
-      ESP_LOGE(TAG, "ESP_HTTPS_OTA upgrade failed 0x%x", ota_finish_err);
-      fota_lan_handler_task_stop();
-      ESP_LOGI(TAG, "FOTA error - restarting device");
+      written += w;
+    }
+    ESP_LOGI(TAG, "[OTA-TLS] HTTP GET sent (%d bytes)", req_len);
+  }
+
+  /* ---- Read HTTP response headers ---- */
+  int content_length = -1;
+  {
+    char hdr[1024];
+    int hdr_len = 0;
+    while (hdr_len < (int)sizeof(hdr) - 1) {
+      int rd = esp_tls_conn_read(tls, (unsigned char *)hdr + hdr_len, 1);
+      if (rd <= 0) {
+        ESP_LOGE(TAG, "[OTA-TLS] header read failed: %d", rd);
+        goto cleanup;
+      }
+      hdr_len += rd;
+      hdr[hdr_len] = '\0';
+      if (hdr_len >= 4 && memcmp(hdr + hdr_len - 4, "\r\n\r\n", 4) == 0) {
+        break;
+      }
+    }
+
+    /* Check status */
+    if (strstr(hdr, " 200") == NULL) {
+      ESP_LOGE(TAG, "[OTA-TLS] HTTP response not 200:\n%.120s", hdr);
+      goto cleanup;
+    }
+    /* Parse Content-Length */
+    const char *cl = strstr(hdr, "Content-Length:");
+    if (!cl) cl = strstr(hdr, "content-length:");
+    if (cl) {
+      content_length = atoi(cl + 15);
+    }
+    ESP_LOGI(TAG, "[OTA-TLS] HTTP 200 OK, Content-Length=%d", content_length);
+  }
+
+  if (content_length <= 0) {
+    ESP_LOGE(TAG, "[OTA-TLS] Invalid Content-Length");
+    goto cleanup;
+  }
+
+  /* ---- Begin OTA flash write ---- */
+  {
+    const esp_partition_t *update = esp_ota_get_next_update_partition(NULL);
+    if (!update) {
+      ESP_LOGE(TAG, "[OTA-TLS] No OTA partition available");
+      goto cleanup;
+    }
+    ESP_LOGI(TAG, "[OTA-TLS] Writing to <%s> at offset 0x%lx",
+             update->label, (unsigned long)update->address);
+
+    ret = esp_ota_begin(update, (size_t)content_length, &ota_handle);
+    if (ret != ESP_OK) {
+      ESP_LOGE(TAG, "[OTA-TLS] esp_ota_begin failed: %s", esp_err_to_name(ret));
+      goto cleanup;
+    }
+    ota_started = true;
+
+    /* ---- Download body → flash ---- */
+    buf = malloc(OTA_DL_BUF_SIZE);
+    if (!buf) {
+      ESP_LOGE(TAG, "[OTA-TLS] malloc(%d) failed", OTA_DL_BUF_SIZE);
+      ret = ESP_ERR_NO_MEM;
+      goto cleanup;
+    }
+
+    int total = 0;
+    t0 = esp_log_timestamp();
+    while (total < content_length) {
+      int want = content_length - total;
+      if (want > OTA_DL_BUF_SIZE) want = OTA_DL_BUF_SIZE;
+
+      int rd = esp_tls_conn_read(tls, buf, want);
+      if (rd < 0) {
+        ESP_LOGE(TAG, "[OTA-TLS] read error %d at %d/%d", rd, total, content_length);
+        ret = ESP_FAIL;
+        goto cleanup;
+      }
+      if (rd == 0) {
+        ESP_LOGE(TAG, "[OTA-TLS] unexpected EOF at %d/%d", total, content_length);
+        ret = ESP_FAIL;
+        goto cleanup;
+      }
+
+      ret = esp_ota_write(ota_handle, buf, rd);
+      if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "[OTA-TLS] esp_ota_write failed: %s", esp_err_to_name(ret));
+        goto cleanup;
+      }
+
+      total += rd;
+      /* Log every ~64KB */
+      if ((total / (64 * 1024)) != ((total - rd) / (64 * 1024))) {
+        ESP_LOGI(TAG, "[OTA-TLS] %d/%d (%d%%)",
+                 total, content_length, total * 100 / content_length);
+      }
+    }
+
+    uint32_t dl_ms = esp_log_timestamp() - t0;
+    ESP_LOGI(TAG, "[OTA-TLS] Download complete: %d bytes in %lums (%ld B/s)",
+             total, (unsigned long)dl_ms,
+             dl_ms > 0 ? (long)(total * 1000L / dl_ms) : 0);
+
+    ret = esp_ota_end(ota_handle);
+    ota_started = false; /* esp_ota_end was called, don't abort */
+    if (ret != ESP_OK) {
+      if (ret == ESP_ERR_OTA_VALIDATE_FAILED) {
+        ESP_LOGE(TAG, "[OTA-TLS] Image validation failed (corrupted)");
+      } else {
+        ESP_LOGE(TAG, "[OTA-TLS] esp_ota_end failed: %s", esp_err_to_name(ret));
+      }
+      goto cleanup;
+    }
+
+    ret = esp_ota_set_boot_partition(update);
+    if (ret != ESP_OK) {
+      ESP_LOGE(TAG, "[OTA-TLS] set_boot_partition failed: %s", esp_err_to_name(ret));
+      goto cleanup;
+    }
+
+    ESP_LOGI(TAG, "[OTA-TLS] OTA successful! Rebooting in 1s...");
+    ret = ESP_OK;
+  }
+
+cleanup:
+  free(buf);
+  if (ota_started) {
+    esp_ota_abort(ota_handle);
+  }
+  if (tls) {
+    esp_tls_conn_destroy(tls);
+  }
+  return ret;
+}
+
+void advanced_ota_task(void *pvParameter) {
+  ESP_LOGI(TAG, "Starting Advanced OTA (direct TLS) - V2.0.0");
+
+  const int max_retries = 5;
+  esp_err_t err = ESP_FAIL;
+
+  for (int attempt = 1; attempt <= max_retries; attempt++) {
+    uint32_t t0 = esp_log_timestamp();
+    ESP_LOGI(TAG, "OTA attempt %d/%d (t=%lums)",
+             attempt, max_retries, (unsigned long)t0);
+
+    err = manual_ota_download();
+
+    uint32_t elapsed = esp_log_timestamp() - t0;
+    if (err == ESP_OK) {
+      ESP_LOGI(TAG, "OTA attempt %d succeeded after %lums",
+               attempt, (unsigned long)elapsed);
       vTaskDelay(pdMS_TO_TICKS(1000));
       esp_restart();
     }
+
+    ESP_LOGE(TAG, "OTA attempt %d failed after %lums: %s (0x%x)",
+             attempt, (unsigned long)elapsed, esp_err_to_name(err), err);
+
+    if (attempt < max_retries) {
+      uint32_t delay_ms = 3000 * attempt;
+      ESP_LOGW(TAG, "Retrying in %lums ...", (unsigned long)delay_ms);
+      vTaskDelay(pdMS_TO_TICKS(delay_ms));
+    }
   }
 
-  esp_https_ota_abort(https_ota_handle);
-  ESP_LOGE(TAG, "ESP_HTTPS_OTA upgrade failed");
-  fota_lan_handler_task_stop();
-  ESP_LOGI(TAG, "FOTA error - restarting device");
-  vTaskDelay(pdMS_TO_TICKS(1000));
+  ESP_LOGE(TAG, "OTA failed after %d attempts, rebooting", max_retries);
   esp_restart();
+  vTaskDelete(NULL);
 }
 
 void fota_lan_handler_task_start(void) {
   ota_task_close = false;
   get_sha256_of_partitions();
 
-  // Register event handler for OTA events
-  ESP_ERROR_CHECK(esp_event_handler_register(
-      ESP_HTTPS_OTA_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL));
+  size_t internal_free    = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  size_t internal_largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  ESP_LOGI(TAG, "Heap before OTA task: total=%d, internal=%d, internal_largest=%d",
+           esp_get_free_heap_size(), internal_free, internal_largest);
 
-#if FOTA_CONFIG_LAN_CONNECT_WIFI
-  esp_wifi_set_ps(WIFI_PS_NONE);
-#endif
-
-  xTaskCreate(&advanced_ota_task, "advanced_ota_task", 32 * 1024, NULL, 5,
-              NULL);
+  /* Stack MUST be in internal RAM for mbedTLS performance.
+   * 12KB is sufficient; fallback to PSRAM if internal RAM is fragmented. */
+  /* Priority 5: P-256 TLS handshake completes in ~760ms even at low priority.
+   * Higher priority starved PPP/LwIP tasks → UART_FIFO_OVF → TCP data corruption.
+   * Do NOT raise this above the LwIP task priority (CONFIG_LWIP_TCPIP_TASK_PRIO). */
+  const UBaseType_t ota_prio = 5;
+  BaseType_t ret = xTaskCreate(&advanced_ota_task, "advanced_ota_task", 12 * 1024, NULL, ota_prio, NULL);
+  if (ret != pdPASS) {
+    ESP_LOGW(TAG, "Internal RAM stack failed (largest=%d), retrying in PSRAM", internal_largest);
+    ret = xTaskCreateWithCaps(&advanced_ota_task, "advanced_ota_task",
+                              32 * 1024, NULL, ota_prio, NULL,
+                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (ret != pdPASS) {
+      ESP_LOGE(TAG, "Failed to create OTA task (internal AND PSRAM)");
+      return;
+    }
+  }
+  ESP_LOGI(TAG, "OTA task created successfully");
 }
 
 void fota_lan_handler_task_stop(void) { ota_task_close = true; }

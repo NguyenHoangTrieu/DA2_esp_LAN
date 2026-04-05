@@ -2,7 +2,12 @@
 #define FOTA_LAN_CONFIG_H
 
 /* Firmware upgrade URL endpoint */
-#define FOTA_CONFIG_LAN_FIRMWARE_UPGRADE_URL "https://github.com/NguyenHoangTrieu/DA2_esp_release/releases/download/V0.0.1/DA2_esp_LAN.bin"
+/* Use raw.githubusercontent.com (Fastly CDN, P-256 cert) to avoid github.com's
+ * P-384 TLS handshake which is too expensive over PPP and causes server RST at ~20s.
+ * NOTE: use raw.githubusercontent.com, NOT the /blob/main/ GitHub viewer URL
+ *       (blob URL returns HTML, not binary — firmware validation will fail).
+ * To update: push DA2_esp_LAN.bin to dist/bin/ in the DATN_config_app repo. */
+#define FOTA_CONFIG_LAN_FIRMWARE_UPGRADE_URL "https://raw.githubusercontent.com/NguyenHoangTrieu/DATN_config_app/main/dist/bin/DA2_esp_LAN.bin"
 
 /* Enable certificate bundle (default: enabled) */
 #define FOTA_CONFIG_LAN_USE_CERT_BUNDLE 1
@@ -33,13 +38,21 @@
 #define FOTA_CONFIG_LAN_CONNECT_ETHERNET 0
 
 /* OTA Receive Timeout in milliseconds */
-#define FOTA_CONFIG_LAN_OTA_RECV_TIMEOUT 300000
+#define FOTA_CONFIG_LAN_OTA_RECV_TIMEOUT 120000
+
+/* Pre-OTA connectivity check (DNS + TCP + TLS probe to CDN).
+ * MUST remain disabled (0): the full TLS handshake to raw.githubusercontent.com
+ * triggers Fastly CDN's per-IP TLS rate limiter, causing ALL subsequent OTA
+ * TLS handshakes to stall at 21s and get RST.  Without this check, OTA
+ * attempt 2 (at PPP+34s) consistently succeeds.
+ * Only set to 1 for DNS/TCP-level debugging — never use with TLS check. */
+#define FOTA_CONFIG_LAN_ENABLE_CONNECTIVITY_CHECK 0
 
 /* Enable partial HTTP download (for large firmware images) */
 #define FOTA_CONFIG_LAN_ENABLE_PARTIAL_HTTP_DOWNLOAD 0
 
 /* HTTP request size for partial download (in bytes) */
-#define FOTA_CONFIG_LAN_HTTP_REQUEST_SIZE 8192
+#define FOTA_CONFIG_LAN_HTTP_REQUEST_SIZE 4096
 
 /* Enable OTA resumption feature */
 #define FOTA_CONFIG_LAN_ENABLE_OTA_RESUMPTION 0
