@@ -312,22 +312,160 @@ static void get_sha256_of_partitions(void) {
 }
 
 /*
+ * FIX 1: Synchronous BLE disable with status polling.
+ *
+ * Original code used vTaskDelay(500ms) which is a blind wait — BLE controller
+ * disable is asynchronous and 500ms may not be enough. If BLE interrupt fires
+ * during esp_tls_conn_read(), it stalls UART DMA for 1-3ms per interrupt,
+ * causing PPP/LwIP to drop TCP segments, which stalls TLS record reassembly
+ * and ultimately triggers MBEDTLS_ERR_SSL_TIMEOUT (-26880 / 0x6900).
+ *
+ * This helper polls esp_bt_controller_get_status() until IDLE or timeout.
+ */
+#include "esp_bt.h"
+#include "esp_bt_main.h"
+
+static void ble_disable_sync(void) {
+  ESP_LOGW(TAG, "[OTA-TLS] Temporarily disabling BLE to secure UART DMA...");
+
+  esp_bluedroid_disable();
+  /* Poll until bluedroid is fully stopped (max 2s) */
+  for (int i = 0; i < 20; i++) {
+    if (esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_UNINITIALIZED ||
+        esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_ENABLED) {
+      /* ENABLED means disable() call hasn't taken effect yet, keep polling */
+      if (esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_UNINITIALIZED) break;
+    } else {
+      break;
+    }
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
+
+  esp_bt_controller_disable();
+  /* Poll until BT controller reaches IDLE state (max 2s) */
+  for (int i = 0; i < 20; i++) {
+    esp_bt_controller_status_t st = esp_bt_controller_get_status();
+    if (st == ESP_BT_CONTROLLER_STATUS_IDLE) {
+      ESP_LOGI(TAG, "[OTA-TLS] BT controller idle after %dms", (i + 1) * 100);
+      break;
+    }
+    if (i == 19) {
+      ESP_LOGW(TAG, "[OTA-TLS] BT controller not idle after 2s (status=%d), proceeding anyway", st);
+    }
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
+}
+
+/*
  * Manual OTA download using esp_tls directly.
  *
  * esp_https_ota / esp_http_client TLS to raw.githubusercontent.com fails
  * deterministically at 21s with -0x004C (RST) after cert validation.
  * However, esp_tls_conn_new_sync() to the SAME host completes in ~700ms
  * every time.  This function bypasses the broken esp_http_client TLS path
- * and uses only esp_tls_conn_new_sync() + raw HTTP/1.0 GET.
- *
- * HTTP/1.0 is used intentionally: the server responds with Content-Length
- * and Connection: close — no chunked transfer encoding to parse.
+ * and uses only esp_tls_conn_new_sync() + raw HTTP/1.1 GET.
  */
 #include "esp_tls.h"
 
 #define OTA_HOST "raw.githubusercontent.com"
 #define OTA_PATH "/NguyenHoangTrieu/DATN_config_app/main/dist/bin/DA2_esp_LAN.bin"
 #define OTA_DL_BUF_SIZE 4096
+
+/*
+ * FIX 3: Block-read HTTP response headers with sliding-window CRLFCRLF detector.
+ *
+ * Original code read 1 byte per esp_tls_conn_read() call. With TLS record
+ * overhead, this generates up to 1024 round-trips just to read the header,
+ * consuming most of the 30s timeout window before any body data arrives.
+ *
+ * This implementation reads up to HDR_CHUNK_SIZE bytes per call and detects
+ * the end-of-headers marker (\r\n\r\n) using a 4-byte sliding window.
+ * Reduces TLS record calls from ~1024 to ~3-5 for a typical HTTP response header.
+ */
+#define HDR_BUF_SIZE   2048
+#define HDR_CHUNK_SIZE 256
+
+static esp_err_t read_http_headers(esp_tls_t *tls, char *hdr_out, int hdr_out_size,
+                                   int *hdr_len_out) {
+  int hdr_len = 0;
+  /* Sliding window: track last 3 bytes to detect \r\n\r\n across chunk boundaries */
+  uint8_t tail[3] = {0};
+  bool header_done = false;
+
+  while (hdr_len < hdr_out_size - 1) {
+    int want = hdr_out_size - 1 - hdr_len;
+    if (want > HDR_CHUNK_SIZE) want = HDR_CHUNK_SIZE;
+
+    int rd = esp_tls_conn_read(tls, (unsigned char *)hdr_out + hdr_len, want);
+    if (rd <= 0) {
+      hdr_out[hdr_len] = '\0';
+      ESP_LOGE(TAG, "[OTA-TLS] header read failed: %d. Read %d bytes so far: [\n%s\n]",
+               rd, hdr_len, hdr_out);
+      return ESP_FAIL;
+    }
+
+    /* Scan newly read chunk for \r\n\r\n */
+    for (int i = 0; i < rd; i++) {
+      uint8_t b = (uint8_t)hdr_out[hdr_len + i];
+      /* Check the 4-byte window: tail[0] tail[1] tail[2] b */
+      if (hdr_len + i >= 3) {
+        /* All 4 bytes available in hdr_out */
+        if (hdr_out[hdr_len + i - 3] == '\r' &&
+            hdr_out[hdr_len + i - 2] == '\n' &&
+            hdr_out[hdr_len + i - 1] == '\r' &&
+            b == '\n') {
+          hdr_len += (i + 1);
+          hdr_out[hdr_len] = '\0';
+          header_done = true;
+          break;
+        }
+      } else {
+        /* Straddles the boundary: use tail[] for the first bytes */
+        int pos = hdr_len + i; /* absolute position in hdr_out */
+        uint8_t w[4];
+        /* Build a 4-byte window from tail + current chunk */
+        for (int j = 0; j < 4; j++) {
+          int abs = pos - 3 + j;
+          if (abs < 0) {
+            /* Before start of hdr_out — use tail ring */
+            w[j] = tail[3 + abs]; /* tail has indices 0,1,2 for positions -3,-2,-1 */
+          } else if (abs < hdr_len) {
+            w[j] = (uint8_t)hdr_out[abs];
+          } else {
+            w[j] = (uint8_t)hdr_out[hdr_len + (abs - hdr_len)];
+          }
+        }
+        if (w[0] == '\r' && w[1] == '\n' && w[2] == '\r' && w[3] == '\n') {
+          hdr_len += (i + 1);
+          hdr_out[hdr_len] = '\0';
+          header_done = true;
+          break;
+        }
+      }
+    }
+
+    if (!header_done) {
+      /* Update tail with last 3 bytes of hdr_out so far */
+      hdr_len += rd;
+      int tstart = hdr_len - 3;
+      if (tstart < 0) tstart = 0;
+      for (int j = 0; j < 3; j++) {
+        int src = tstart + j;
+        tail[j] = (src < hdr_len) ? (uint8_t)hdr_out[src] : 0;
+      }
+    } else {
+      break;
+    }
+  }
+
+  if (!header_done) {
+    ESP_LOGE(TAG, "[OTA-TLS] Header buffer overflow (%d bytes, no CRLFCRLF found)", hdr_len);
+    return ESP_FAIL;
+  }
+
+  *hdr_len_out = hdr_len;
+  return ESP_OK;
+}
 
 static esp_err_t manual_ota_download(void) {
   esp_err_t ret = ESP_FAIL;
@@ -342,14 +480,13 @@ static esp_err_t manual_ota_download(void) {
     return ESP_ERR_NO_MEM;
   }
 
-  /* Temporary disable BLE to avoid UART HW FIFO overruns during HTTPS payload bursts at 921600 baud 
-   * (BLE interrupts disable CPU interrupts for 1-3ms which drops UART bytes). */
-  ESP_LOGW(TAG, "[OTA-TLS] Temporarily disabling BLE to secure UART DMA...");
-  extern esp_err_t esp_bluedroid_disable(void);
-  extern esp_err_t esp_bt_controller_disable(void);
-  esp_bluedroid_disable();
-  esp_bt_controller_disable();
-  vTaskDelay(pdMS_TO_TICKS(500));
+  /*
+   * FIX 1: Synchronous BLE disable — poll until controller reaches IDLE.
+   * Previous: vTaskDelay(500ms) was a blind wait that could leave BLE interrupts
+   * active during TLS read, causing UART DMA overruns -> PPP segment loss ->
+   * MBEDTLS_ERR_SSL_TIMEOUT.
+   */
+  ble_disable_sync();
 
   /* ALPN "http/1.1" is required: Fastly CDN uses ALPN to route TLS
    * connections to the HTTP handler. Without it, TLS connects fine but
@@ -358,7 +495,13 @@ static esp_err_t manual_ota_download(void) {
 
   esp_tls_cfg_t tls_cfg = {
       .crt_bundle_attach = esp_crt_bundle_attach,
-      .timeout_ms        = 30000,
+      /*
+       * FIX 2: Increased from 30000ms to 60000ms.
+       * Fastly CDN has a ~30s idle timeout. The previous value raced exactly at
+       * that limit — any scheduling jitter caused deterministic timeout before
+       * the first response byte arrived.
+       */
+      .timeout_ms        = 60000,
       .non_block         = false,
       .alpn_protos       = alpn,
   };
@@ -395,28 +538,27 @@ static esp_err_t manual_ota_download(void) {
     ESP_LOGI(TAG, "[OTA-TLS] HTTP GET sent (%d bytes)", req_len);
   }
 
-  /* ---- Read HTTP response headers ---- */
+  /* ---- Read HTTP response headers (FIX 3: block read, not byte-by-byte) ---- */
   int content_length = -1;
   {
-    char hdr[1024];
+    char *hdr = malloc(HDR_BUF_SIZE);
+    if (!hdr) {
+      ESP_LOGE(TAG, "[OTA-TLS] malloc(%d) for header buffer failed", HDR_BUF_SIZE);
+      ret = ESP_ERR_NO_MEM;
+      goto cleanup;
+    }
+
     int hdr_len = 0;
-    while (hdr_len < (int)sizeof(hdr) - 1) {
-      int rd = esp_tls_conn_read(tls, (unsigned char *)hdr + hdr_len, 1);
-      if (rd <= 0) {
-        hdr[hdr_len] = '\0';
-        ESP_LOGE(TAG, "[OTA-TLS] header read failed: %d. Read %d bytes so far: [\n%s\n]", rd, hdr_len, hdr);
-        goto cleanup;
-      }
-      hdr_len += rd;
-      hdr[hdr_len] = '\0';
-      if (hdr_len >= 4 && memcmp(hdr + hdr_len - 4, "\r\n\r\n", 4) == 0) {
-        break;
-      }
+    esp_err_t hdr_err = read_http_headers(tls, hdr, HDR_BUF_SIZE, &hdr_len);
+    if (hdr_err != ESP_OK) {
+      free(hdr);
+      goto cleanup;
     }
 
     /* Check status */
     if (strstr(hdr, " 200") == NULL) {
       ESP_LOGE(TAG, "[OTA-TLS] HTTP response not 200:\n%.120s", hdr);
+      free(hdr);
       goto cleanup;
     }
     /* Parse Content-Length */
@@ -426,6 +568,7 @@ static esp_err_t manual_ota_download(void) {
       content_length = atoi(cl + 15);
     }
     ESP_LOGI(TAG, "[OTA-TLS] HTTP 200 OK, Content-Length=%d", content_length);
+    free(hdr);
   }
 
   if (content_length <= 0) {
