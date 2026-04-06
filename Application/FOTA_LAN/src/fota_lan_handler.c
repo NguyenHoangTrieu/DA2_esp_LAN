@@ -82,6 +82,13 @@ static void connectivity_check(const char *host, uint16_t port) {
   }
   t0 = esp_log_timestamp();
   int ret = esp_tls_conn_new_sync(host, (int)strlen(host), (int)port, &cfg, tls);
+  int fd = -1;
+  esp_tls_get_conn_sockfd(tls, &fd);
+  if (fd >= 0) {
+    struct timeval tv = { .tv_sec = 30, .tv_usec = 0 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    ESP_LOGI(TAG, "[OTA-TLS] SO_RCVTIMEO set to 30s on fd=%d", fd);
+  }
   uint32_t tls_ms = esp_log_timestamp() - t0;
   if (ret == 1) {
     ESP_LOGI(TAG, "[CHECK] TLS OK    %s  (%lums)", host, (unsigned long)tls_ms);
@@ -398,10 +405,15 @@ static esp_err_t read_http_headers(esp_tls_t *tls, char *hdr_out, int hdr_out_si
 
     int rd = esp_tls_conn_read(tls, (unsigned char *)hdr_out + hdr_len, want);
     if (rd <= 0) {
-      hdr_out[hdr_len] = '\0';
-      ESP_LOGE(TAG, "[OTA-TLS] header read failed: %d. Read %d bytes so far: [\n%s\n]",
-               rd, hdr_len, hdr_out);
-      return ESP_FAIL;
+        int esp_err_code = 0, mbedtls_flags = 0;
+        esp_tls_error_handle_t eh = NULL;
+        esp_tls_get_error_handle(tls, &eh);
+        if (eh) {
+            esp_tls_get_and_clear_last_error(eh, &esp_err_code, &mbedtls_flags);
+        }
+        ESP_LOGE(TAG, "[OTA-TLS] header read failed: rd=%d, esp_err=0x%x, mbedtls=0x%x, errno=%d (%s)",
+                rd, esp_err_code, mbedtls_flags, errno, strerror(errno));
+        goto cleanup;
     }
 
     /* Scan newly read chunk for \r\n\r\n */
@@ -520,23 +532,25 @@ static esp_err_t manual_ota_download(void) {
   {
     char req[512];
     int req_len = snprintf(req, sizeof(req),
-        "GET " OTA_PATH " HTTP/1.1\r\n"
+        "GET " OTA_PATH " HTTP/1.0\r\n"
         "Host: " OTA_HOST "\r\n"
         "Accept: */*\r\n"
-        "Connection: close\r\n"
         "User-Agent: ESP32-OTA/1.0\r\n"
         "\r\n");
     int written = 0;
     while (written < req_len) {
-      int w = esp_tls_conn_write(tls, req + written, req_len - written);
-      if (w < 0) {
-        ESP_LOGE(TAG, "[OTA-TLS] write failed: %d", w);
-        goto cleanup;
-      }
-      written += w;
+        int w = esp_tls_conn_write(tls, req + written, req_len - written);
+        if (w < 0) {
+            ESP_LOGE(TAG, "[OTA-TLS] write failed: %d, errno=%d", w, errno);
+            goto cleanup;
+        }
+        if (w == 0) {
+            ESP_LOGE(TAG, "[OTA-TLS] write returned 0 (connection closed by peer)");
+            goto cleanup;
+        }
+        written += w;
     }
-    ESP_LOGI(TAG, "[OTA-TLS] HTTP GET sent (%d bytes)", req_len);
-  }
+    ESP_LOGI(TAG, "[OTA-TLS] Request first line: %.50s", req);
 
   /* ---- Read HTTP response headers (FIX 3: block read, not byte-by-byte) ---- */
   int content_length = -1;
@@ -668,6 +682,7 @@ cleanup:
     esp_tls_conn_destroy(tls);
   }
   return ret;
+}
 }
 
 void advanced_ota_task(void *pvParameter) {
