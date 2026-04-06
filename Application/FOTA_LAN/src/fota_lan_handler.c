@@ -14,6 +14,8 @@ static const char *TAG = "lan_advanced_ota";
 #include "lwip/netdb.h"
 #include "esp_tls.h"
 #include "esp_crt_bundle.h"
+#include "esp_bt.h"
+#include "esp_bt_main.h"
 
 /*
  * Performs a full TLS handshake to <host>:<port> and logs:
@@ -334,11 +336,26 @@ static esp_err_t manual_ota_download(void) {
   esp_ota_handle_t ota_handle = 0;
   bool ota_started = false;
 
-  /* ---- TLS connect (proven path) ---- */
+  tls = esp_tls_init();
+  if (!tls) {
+    ESP_LOGE(TAG, "[OTA-TLS] esp_tls_init failed");
+    return ESP_ERR_NO_MEM;
+  }
+
+  /* Temporary disable BLE to avoid UART HW FIFO overruns during HTTPS payload bursts at 921600 baud 
+   * (BLE interrupts disable CPU interrupts for 1-3ms which drops UART bytes). */
+  ESP_LOGW(TAG, "[OTA-TLS] Temporarily disabling BLE to secure UART DMA...");
+  extern esp_err_t esp_bluedroid_disable(void);
+  extern esp_err_t esp_bt_controller_disable(void);
+  esp_bluedroid_disable();
+  esp_bt_controller_disable();
+  vTaskDelay(pdMS_TO_TICKS(500));
+
   /* ALPN "http/1.1" is required: Fastly CDN uses ALPN to route TLS
    * connections to the HTTP handler. Without it, TLS connects fine but
    * the CDN silently drops all HTTP requests (30s read timeout). */
   static const char *alpn[] = {"http/1.1", NULL};
+
   esp_tls_cfg_t tls_cfg = {
       .crt_bundle_attach = esp_crt_bundle_attach,
       .timeout_ms        = 30000,
@@ -346,13 +363,8 @@ static esp_err_t manual_ota_download(void) {
       .alpn_protos       = alpn,
   };
 
-  tls = esp_tls_init();
-  if (!tls) {
-    ESP_LOGE(TAG, "[OTA-TLS] esp_tls_init OOM");
-    return ESP_ERR_NO_MEM;
-  }
-
   uint32_t t0 = esp_log_timestamp();
+  ESP_LOGI(TAG, "[OTA-TLS] connect to %s:443", OTA_HOST);
   int r = esp_tls_conn_new_sync(OTA_HOST, strlen(OTA_HOST), 443, &tls_cfg, tls);
   uint32_t tls_ms = esp_log_timestamp() - t0;
   ESP_LOGI(TAG, "[OTA-TLS] connect ret=%d (%lums)", r, (unsigned long)tls_ms);
@@ -367,6 +379,7 @@ static esp_err_t manual_ota_download(void) {
     int req_len = snprintf(req, sizeof(req),
         "GET " OTA_PATH " HTTP/1.1\r\n"
         "Host: " OTA_HOST "\r\n"
+        "Accept: */*\r\n"
         "Connection: close\r\n"
         "User-Agent: ESP32-OTA/1.0\r\n"
         "\r\n");
@@ -390,7 +403,8 @@ static esp_err_t manual_ota_download(void) {
     while (hdr_len < (int)sizeof(hdr) - 1) {
       int rd = esp_tls_conn_read(tls, (unsigned char *)hdr + hdr_len, 1);
       if (rd <= 0) {
-        ESP_LOGE(TAG, "[OTA-TLS] header read failed: %d", rd);
+        hdr[hdr_len] = '\0';
+        ESP_LOGE(TAG, "[OTA-TLS] header read failed: %d. Read %d bytes so far: [\n%s\n]", rd, hdr_len, hdr);
         goto cleanup;
       }
       hdr_len += rd;

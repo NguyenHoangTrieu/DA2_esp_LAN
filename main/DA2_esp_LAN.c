@@ -114,6 +114,10 @@ void lan_ppp_connect(void) {
   config.uart.baud = PPP_UART_BAUDRATE;
   config.uart.rx_buffer_size = PPP_UART_RX_BUFFER_SIZE;
   config.uart.queue_size = PPP_UART_QUEUE_SIZE;
+  
+  /* Increase eppp_link task priority above LwIP (Priority 18) 
+   * to prevent UART FIFO overflow during heavy payload (OTA TLS recv). */
+  config.task.priority = 19;
 
   esp_netif_t *eppp_netif = eppp_connect(&config);
     if (eppp_netif == NULL) {
