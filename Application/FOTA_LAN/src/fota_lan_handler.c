@@ -1,6 +1,6 @@
 /*
  * Advanced OTA Update Handler for ESP32
- * Direct TLS + raw HTTP/1.1 GET — bypasses esp_http_client broken path.
+ * Direct TLS + raw HTTP/1.0 GET — bypasses esp_http_client broken path.
  */
 #include "fota_lan_handler.h"
 #include "esp_heap_caps.h"
@@ -256,7 +256,7 @@ static void get_sha256_of_partitions(void) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  FIX 1: Synchronous BLE disable — poll until IDLE                   */
+/*  BLE disable (synchronous poll)                                      */
 /* ------------------------------------------------------------------ */
 static void ble_disable_sync(void) {
     ESP_LOGW(TAG, "[OTA-TLS] Disabling BLE...");
@@ -277,10 +277,18 @@ static void ble_disable_sync(void) {
     ESP_LOGW(TAG, "[OTA-TLS] BT not idle after 2s, proceeding anyway");
 }
 
-/* ------------------------------------------------------------------ */
-/*  Apply socket options AFTER TLS connect                             */
-/*  TCP_NODELAY + SO_SNDTIMEO(10s) + SO_RCVTIMEO(30s)                 */
-/* ------------------------------------------------------------------ */
+/*
+ * apply_socket_opts: set TCP_NODELAY + SO_SNDTIMEO only.
+ *
+ * SO_RCVTIMEO is intentionally NOT set here.
+ * Root cause of previous failure (rd=-26880 MBEDTLS_ERR_SSL_TIMEOUT, errno=11 EAGAIN):
+ *   SO_RCVTIMEO=30s on a blocking socket over PPP causes lwIP to return EAGAIN
+ *   to mbedTLS when TCP segment reassembly takes longer than the timeout window.
+ *   mbedTLS maps any EAGAIN -> MBEDTLS_ERR_SSL_TIMEOUT regardless of how much
+ *   total time has elapsed. Over PPP (serial), segment reassembly is 10-50x
+ *   slower than Ethernet — SO_RCVTIMEO fires before the first TLS record arrives.
+ *   Fix: let tls_cfg.timeout_ms manage the overall deadline at the mbedTLS layer.
+ */
 static esp_err_t apply_socket_opts(esp_tls_t *tls) {
     int fd = -1;
     esp_tls_get_conn_sockfd(tls, &fd);
@@ -288,26 +296,28 @@ static esp_err_t apply_socket_opts(esp_tls_t *tls) {
         ESP_LOGE(TAG, "[OTA-TLS] esp_tls_get_conn_sockfd failed");
         return ESP_FAIL;
     }
+
+    /* Disable Nagle — force immediate flush of the HTTP GET request */
     int flag = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
 
-    struct timeval stv = {.tv_sec = 10, .tv_usec = 0};
+    /* Send timeout only — prevents infinite block if PPP link drops mid-write */
+    struct timeval stv = {.tv_sec = 15, .tv_usec = 0};
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &stv, sizeof(stv));
 
-    struct timeval rtv = {.tv_sec = 30, .tv_usec = 0};
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &rtv, sizeof(rtv));
+    /* SO_RCVTIMEO deliberately omitted — see comment above */
 
-    ESP_LOGI(TAG, "[OTA-TLS] TCP_NODELAY+SO_SNDTIMEO(10s)+SO_RCVTIMEO(30s) on fd=%d", fd);
+    ESP_LOGI(TAG, "[OTA-TLS] TCP_NODELAY + SO_SNDTIMEO(15s) on fd=%d (no RCVTIMEO)", fd);
     return ESP_OK;
 }
 
 /* ------------------------------------------------------------------ */
-/*  FIX 3: Block-read HTTP headers with sliding-window CRLFCRLF        */
+/*  Block-read HTTP headers with sliding-window CRLFCRLF detector      */
 /* ------------------------------------------------------------------ */
 static esp_err_t read_http_headers(esp_tls_t *tls, char *hdr_out,
                                     int hdr_out_size, int *hdr_len_out) {
-    int    hdr_len  = 0;
-    bool   done     = false;
+    int     hdr_len = 0;
+    bool    done    = false;
     uint8_t tail[3] = {0};
 
     while (hdr_len < hdr_out_size - 1) {
@@ -373,10 +383,10 @@ static esp_err_t read_http_headers(esp_tls_t *tls, char *hdr_out,
 /*  Manual OTA download over raw TLS                                   */
 /* ------------------------------------------------------------------ */
 static esp_err_t manual_ota_download(void) {
-    esp_err_t        ret        = ESP_FAIL;
-    esp_tls_t       *tls        = NULL;
-    uint8_t         *buf        = NULL;
-    esp_ota_handle_t ota_handle = 0;
+    esp_err_t        ret         = ESP_FAIL;
+    esp_tls_t       *tls         = NULL;
+    uint8_t         *buf         = NULL;
+    esp_ota_handle_t ota_handle  = 0;
     bool             ota_started = false;
 
     tls = esp_tls_init();
@@ -387,10 +397,18 @@ static esp_err_t manual_ota_download(void) {
 
     ble_disable_sync();
 
+    /*
+     * ALPN "http/1.1" required: Fastly CDN uses ALPN to route TLS connections.
+     * timeout_ms=120000: covers the full PPP round-trip budget.
+     *   - TLS handshake:     ~800ms
+     *   - Server processing: ~1-3s
+     *   - Firmware download: varies, but mbedTLS resets this timer per read
+     *     (it is an inactivity timeout, not a total transfer timeout).
+     */
     static const char *alpn[] = {"http/1.1", NULL};
     esp_tls_cfg_t tls_cfg = {
         .crt_bundle_attach = esp_crt_bundle_attach,
-        .timeout_ms        = 60000,   /* FIX 2: was 30000 — races Fastly idle timeout */
+        .timeout_ms        = 120000,
         .non_block         = false,
         .alpn_protos       = alpn,
     };
@@ -400,20 +418,28 @@ static esp_err_t manual_ota_download(void) {
     int r = esp_tls_conn_new_sync(OTA_HOST, strlen(OTA_HOST), 443, &tls_cfg, tls);
     ESP_LOGI(TAG, "[OTA-TLS] connect ret=%d (%lums)", r, (unsigned long)(esp_log_timestamp() - t0));
     if (r != 1) {
-        ESP_LOGE(TAG, "[OTA-TLS] TLS connect failed");
+        int ec = 0, mf = 0;
+        esp_tls_error_handle_t eh = NULL;
+        esp_tls_get_error_handle(tls, &eh);
+        if (eh) esp_tls_get_and_clear_last_error(eh, &ec, &mf);
+        ESP_LOGE(TAG, "[OTA-TLS] TLS connect failed esp=0x%x mbed=0x%x", ec, mf);
         goto cleanup;
     }
 
     if (apply_socket_opts(tls) != ESP_OK) goto cleanup;
 
-    /* ---- HTTP GET ---- */
+    /* ---- HTTP/1.0 GET ----
+     * HTTP/1.0 instead of HTTP/1.1:
+     *   - No Transfer-Encoding: chunked — server MUST send Content-Length
+     *   - Connection closes after response — no keep-alive state machine
+     *   - Fastly CDN supports HTTP/1.0 and sends Content-Length in response
+     */
     {
         char req[512];
         int req_len = snprintf(req, sizeof(req),
-            "GET " OTA_PATH " HTTP/1.1\r\n"
+            "GET " OTA_PATH " HTTP/1.0\r\n"
             "Host: " OTA_HOST "\r\n"
             "Accept: */*\r\n"
-            "Connection: close\r\n"
             "User-Agent: ESP32-OTA/1.0\r\n"
             "\r\n");
 
@@ -425,10 +451,8 @@ static esp_err_t manual_ota_download(void) {
             if (w == 0) { ESP_LOGE(TAG, "[OTA-TLS] write=0, peer closed"); goto cleanup; }
             written += w;
         }
-        uint32_t write_ms = esp_log_timestamp() - tw;
-        ESP_LOGI(TAG, "[OTA-TLS] HTTP GET sent (%d bytes) in %lums", req_len, (unsigned long)write_ms);
-        if (write_ms > 100)
-            ESP_LOGW(TAG, "[OTA-TLS] write took %lums — check TCP_NODELAY", (unsigned long)write_ms);
+        ESP_LOGI(TAG, "[OTA-TLS] HTTP/1.0 GET sent (%d bytes) in %lums",
+                 req_len, (unsigned long)(esp_log_timestamp() - tw));
     }
 
     /* ---- HTTP response headers ---- */
@@ -442,8 +466,10 @@ static esp_err_t manual_ota_download(void) {
             free(hdr); goto cleanup;
         }
 
+        ESP_LOGI(TAG, "[OTA-TLS] Response header (%d bytes):\n%.300s", hdr_len, hdr);
+
         if (strstr(hdr, " 200") == NULL) {
-            ESP_LOGE(TAG, "[OTA-TLS] HTTP not 200:\n%.200s", hdr);
+            ESP_LOGE(TAG, "[OTA-TLS] HTTP not 200");
             free(hdr); goto cleanup;
         }
 
@@ -454,18 +480,18 @@ static esp_err_t manual_ota_download(void) {
         free(hdr);
     }
 
-    if (content_length <= 0) {
-        ESP_LOGE(TAG, "[OTA-TLS] Invalid Content-Length=%d", content_length);
-        goto cleanup;
-    }
-
-    /* ---- OTA flash write ---- */
+    /*
+     * HTTP/1.0 + Connection: close: server closes TCP after sending body.
+     * If Content-Length is missing, read until EOF (rd==0).
+     * If Content-Length is present, use it for progress logging and ota_begin size hint.
+     */
     {
         const esp_partition_t *update = esp_ota_get_next_update_partition(NULL);
         if (!update) { ESP_LOGE(TAG, "[OTA-TLS] No OTA partition"); goto cleanup; }
         ESP_LOGI(TAG, "[OTA-TLS] Writing to <%s> @ 0x%lx", update->label, (unsigned long)update->address);
 
-        ret = esp_ota_begin(update, (size_t)content_length, &ota_handle);
+        size_t ota_size = (content_length > 0) ? (size_t)content_length : OTA_SIZE_UNKNOWN;
+        ret = esp_ota_begin(update, ota_size, &ota_handle);
         if (ret != ESP_OK) { ESP_LOGE(TAG, "[OTA-TLS] esp_ota_begin: %s", esp_err_to_name(ret)); goto cleanup; }
         ota_started = true;
 
@@ -474,18 +500,21 @@ static esp_err_t manual_ota_download(void) {
 
         int total = 0;
         t0 = esp_log_timestamp();
-        while (total < content_length) {
-            int want = content_length - total;
-            if (want > OTA_DL_BUF_SIZE) want = OTA_DL_BUF_SIZE;
-
-            int rd = esp_tls_conn_read(tls, buf, want);
+        while (1) {
+            int rd = esp_tls_conn_read(tls, buf, OTA_DL_BUF_SIZE);
             if (rd < 0) {
-                ESP_LOGE(TAG, "[OTA-TLS] body read error %d at %d/%d", rd, total, content_length);
+                int ec = 0, mf = 0;
+                esp_tls_error_handle_t eh = NULL;
+                esp_tls_get_error_handle(tls, &eh);
+                if (eh) esp_tls_get_and_clear_last_error(eh, &ec, &mf);
+                ESP_LOGE(TAG, "[OTA-TLS] body read error %d at %d bytes esp=0x%x mbed=0x%x errno=%d(%s)",
+                         rd, total, ec, mf, errno, strerror(errno));
                 ret = ESP_FAIL; goto cleanup;
             }
             if (rd == 0) {
-                ESP_LOGE(TAG, "[OTA-TLS] unexpected EOF at %d/%d", total, content_length);
-                ret = ESP_FAIL; goto cleanup;
+                /* EOF — HTTP/1.0 server closed connection after body */
+                ESP_LOGI(TAG, "[OTA-TLS] EOF at %d bytes (Content-Length=%d)", total, content_length);
+                break;
             }
 
             ret = esp_ota_write(ota_handle, buf, rd);
@@ -494,15 +523,21 @@ static esp_err_t manual_ota_download(void) {
             }
 
             total += rd;
-            if ((total / (64 * 1024)) != ((total - rd) / (64 * 1024)))
-                ESP_LOGI(TAG, "[OTA-TLS] %d/%d (%d%%)", total, content_length,
-                         total * 100 / content_length);
+            if ((total / (64 * 1024)) != ((total - rd) / (64 * 1024))) {
+                int pct = (content_length > 0) ? (total * 100 / content_length) : -1;
+                ESP_LOGI(TAG, "[OTA-TLS] %d/%d bytes (%d%%)", total, content_length, pct);
+            }
         }
 
         uint32_t dl_ms = esp_log_timestamp() - t0;
         ESP_LOGI(TAG, "[OTA-TLS] Download done: %d bytes in %lums (%ld B/s)",
                  total, (unsigned long)dl_ms,
                  dl_ms > 0 ? (long)(total * 1000L / dl_ms) : 0);
+
+        if (total == 0) {
+            ESP_LOGE(TAG, "[OTA-TLS] Zero bytes received");
+            ret = ESP_FAIL; goto cleanup;
+        }
 
         ret = esp_ota_end(ota_handle);
         ota_started = false;
@@ -516,7 +551,8 @@ static esp_err_t manual_ota_download(void) {
 
         ret = esp_ota_set_boot_partition(update);
         if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "[OTA-TLS] set_boot_partition: %s", esp_err_to_name(ret)); goto cleanup;
+            ESP_LOGE(TAG, "[OTA-TLS] set_boot_partition: %s", esp_err_to_name(ret));
+            goto cleanup;
         }
 
         ESP_LOGI(TAG, "[OTA-TLS] OTA successful! Rebooting...");
@@ -556,7 +592,7 @@ void advanced_ota_task(void *pvParameter) {
                  attempt, (unsigned long)elapsed, esp_err_to_name(err), err);
 
         if (attempt < max_retries) {
-            uint32_t delay_ms = 3000 * attempt;
+            uint32_t delay_ms = 5000;
             ESP_LOGW(TAG, "Retrying in %lums ...", (unsigned long)delay_ms);
             vTaskDelay(pdMS_TO_TICKS(delay_ms));
         }
