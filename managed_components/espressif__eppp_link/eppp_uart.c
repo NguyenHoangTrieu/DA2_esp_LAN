@@ -221,20 +221,41 @@ esp_err_t eppp_perform(esp_netif_t *netif)
     if (xQueueReceive(h->uart_event_queue, &event, pdMS_TO_TICKS(100)) != pdTRUE) {
         return ESP_OK;
     }
-    if (event.type == UART_DATA) {
-        size_t len;
-        uart_get_buffered_data_len(h->uart_port, &len);
-        if (len) {
-#ifdef CONFIG_EPPP_LINK_USES_PPP
-            static uint8_t buffer[UART_BUF_SIZE] = {};
-            len = uart_read_bytes(h->uart_port, buffer, UART_BUF_SIZE, 0);
-            ESP_LOG_BUFFER_HEXDUMP("ppp_uart_recv", buffer, len, ESP_LOG_DEBUG);
-            esp_netif_receive(netif, buffer, len, NULL);
-#else
-            // Read directly in process_packet to save one buffer
-            process_packet(netif, h->uart_port, len);
-#endif
+    if (event.type == UART_DATA || event.type == UART_BUFFER_FULL) {
+        if (event.type == UART_BUFFER_FULL) {
+            ESP_LOGW(TAG, "UART_BUFFER_FULL — draining overflow");
         }
+#ifdef CONFIG_EPPP_LINK_USES_PPP
+        /* Drain ALL available bytes in one shot.
+         * At 921600 baud (~92 KB/s) during OTA, data arrives faster than
+         * one UART_DATA event per UART_BUF_SIZE chunk.  Reading only
+         * UART_BUF_SIZE bytes per event leaves data in the ring buffer,
+         * which eventually fires UART_BUFFER_FULL and drops packets.
+         * Loop until the ring buffer is empty so the PPP framer always
+         * sees a contiguous stream. */
+        {
+            static uint8_t buffer[UART_BUF_SIZE] = {};
+            size_t len;
+            do {
+                uart_get_buffered_data_len(h->uart_port, &len);
+                if (len == 0) break;
+                if (len > UART_BUF_SIZE) len = UART_BUF_SIZE;
+                len = uart_read_bytes(h->uart_port, buffer, len, 0);
+                if (len > 0) {
+                    ESP_LOG_BUFFER_HEXDUMP("ppp_uart_recv", buffer, len, ESP_LOG_DEBUG);
+                    esp_netif_receive(netif, buffer, len, NULL);
+                }
+            } while (len > 0);
+        }
+#else
+        {
+            size_t len;
+            uart_get_buffered_data_len(h->uart_port, &len);
+            if (len) {
+                process_packet(netif, h->uart_port, len);
+            }
+        }
+#endif
     } else {
         ESP_LOGW(TAG, "Received UART event: %d", event.type);
     }

@@ -10,6 +10,8 @@
 #include "esp_tls.h"
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
+#include <errno.h>
+#include <string.h>
 
 
 static const char *TAG = "lan_advanced_ota";
@@ -17,12 +19,22 @@ static const char *TAG = "lan_advanced_ota";
 /* ------------------------------------------------------------------ */
 /*  OTA target                                                          */
 /* ------------------------------------------------------------------ */
-#define OTA_HOST "raw.githubusercontent.com"
-#define OTA_PATH                                                               \
+/* OTA target — raw.githubusercontent.com uses Fastly CDN.
+ * If Fastly rate-limits the IP (silent hold, no HTTP response),
+ * we fall back to objects.githubusercontent.com which uses a
+ * different Fastly PoP / backend pool and may not be blocked. */
+#define OTA_HOST_PRIMARY  "raw.githubusercontent.com"
+#define OTA_HOST_FALLBACK "objects.githubusercontent.com"
+#define OTA_PATH \
   "/NguyenHoangTrieu/DATN_config_app/main/dist/bin/DA2_esp_LAN.bin"
+/* objects.githubusercontent.com uses the same path format as raw for
+ * content served via GitHub's blob CDN (same content, different PoP). */
+#define OTA_PATH_FALLBACK OTA_PATH
+#define OTA_HOST OTA_HOST_PRIMARY   /* default — overridden per attempt */
 #define OTA_DL_BUF_SIZE 4096
 #define HDR_BUF_SIZE 2048
 #define HDR_CHUNK_SIZE 256
+
 
 /* ------------------------------------------------------------------ */
 /*  Connectivity check (diagnostic only)                               */
@@ -322,6 +334,55 @@ static void ble_disable_sync(void) {
   ESP_LOGW(TAG, "[OTA-TLS] BT not idle after 2s, proceeding anyway");
 }
 
+/* ------------------------------------------------------------------ */
+/*  Internet connectivity pre-check (no TLS — avoids CDN rate limit)   */
+/* ------------------------------------------------------------------ */
+/*
+ * internet_reachable: TCP connect to 1.1.1.1:80 (Cloudflare HTTP).
+ *
+ * Purpose: verify PPP routing works BEFORE spending 60s on a TLS
+ * attempt to Fastly CDN.  Using plain TCP (not TLS) so we do not
+ * trigger Fastly's per-IP TLS rate limiter, which causes subsequent
+ * OTA TLS handshakes to stall.
+ *
+ * If TCP connect to 1.1.1.1:80 fails the PPP link or its NAT table
+ * is not forwarding return traffic yet — wait and try again.
+ * If it succeeds, internet routing is confirmed working, proceed with
+ * the HTTPS OTA download.
+ */
+static bool internet_reachable(void) {
+  /* 1.1.1.1 = Cloudflare public DNS / HTTP server, always reachable */
+  struct sockaddr_in addr = {
+      .sin_family = AF_INET,
+      .sin_port   = htons(80),
+  };
+  addr.sin_addr.s_addr = inet_addr("1.1.1.1");
+
+  int sock = socket(AF_INET, SOCK_STREAM, 0);
+  if (sock < 0) {
+    ESP_LOGE(TAG, "[OTA-CHECK] socket() failed: errno=%d", errno);
+    return false;
+  }
+
+  /* 10s connect timeout */
+  struct timeval tv = {.tv_sec = 10, .tv_usec = 0};
+  setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+  setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+  uint32_t t0 = esp_log_timestamp();
+  int r = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
+  uint32_t ms = esp_log_timestamp() - t0;
+  close(sock);
+
+  if (r == 0) {
+    ESP_LOGI(TAG, "[OTA-CHECK] 1.1.1.1:80 reachable (%lums)", (unsigned long)ms);
+    return true;
+  }
+  ESP_LOGW(TAG, "[OTA-CHECK] 1.1.1.1:80 unreachable (%lums) errno=%d(%s)",
+           (unsigned long)ms, errno, strerror(errno));
+  return false;
+}
+
 /*
  * apply_socket_opts: set TCP_NODELAY + SO_SNDTIMEO + SO_RCVTIMEO.
  *
@@ -363,8 +424,14 @@ static esp_err_t apply_socket_opts(esp_tls_t *tls) {
 /* ------------------------------------------------------------------ */
 /*  Block-read HTTP headers with sliding-window CRLFCRLF detector      */
 /* ------------------------------------------------------------------ */
+/* deadline_ms: absolute timestamp (esp_log_timestamp) after which we abort.
+ * Needed because SO_RCVTIMEO is not reliable on lwIP PPP — when the PPP
+ * link is silently dead, lwIP never fires EAGAIN; we'd spin WANT_READ
+ * forever until TCP RTO (~388s) finally aborts. The deadline short-circuits
+ * that wait well before LCP Echo (15s) even fires. */
 static esp_err_t read_http_headers(esp_tls_t *tls, char *hdr_out,
-                                   int hdr_out_size, int *hdr_len_out) {
+                                   int hdr_out_size, int *hdr_len_out,
+                                   uint32_t deadline_ms) {
   int hdr_len = 0;
   bool done = false;
   uint8_t tail[3] = {0};
@@ -376,7 +443,15 @@ static esp_err_t read_http_headers(esp_tls_t *tls, char *hdr_out,
 
     int rd = esp_tls_conn_read(tls, (unsigned char *)hdr_out + hdr_len, want);
     if (rd == ESP_TLS_ERR_SSL_WANT_READ || rd == ESP_TLS_ERR_SSL_WANT_WRITE) {
-      /* SO_RCVTIMEO fired with no data yet — retry */
+      /* SO_RCVTIMEO fired with no data yet — check deadline then retry */
+      if (esp_log_timestamp() >= deadline_ms) {
+        hdr_out[hdr_len] = '\0';
+        ESP_LOGE(TAG,
+                 "[OTA-TLS] header read deadline exceeded (%lums), "
+                 "read_so_far=%d bytes:[%.80s]",
+                 (unsigned long)deadline_ms, hdr_len, hdr_out);
+        return ESP_FAIL;
+      }
       vTaskDelay(pdMS_TO_TICKS(100));
       continue;
     }
@@ -441,7 +516,7 @@ static esp_err_t read_http_headers(esp_tls_t *tls, char *hdr_out,
 /* ------------------------------------------------------------------ */
 /*  Manual OTA download over raw TLS                                   */
 /* ------------------------------------------------------------------ */
-static esp_err_t manual_ota_download(void) {
+static esp_err_t manual_ota_download(const char *host, const char *path) {
   esp_err_t ret = ESP_FAIL;
   esp_tls_t *tls = NULL;
   uint8_t *buf = NULL;
@@ -473,8 +548,8 @@ static esp_err_t manual_ota_download(void) {
   };
 
   uint32_t t0 = esp_log_timestamp();
-  ESP_LOGI(TAG, "[OTA-TLS] connect to %s:443", OTA_HOST);
-  int r = esp_tls_conn_new_sync(OTA_HOST, strlen(OTA_HOST), 443, &tls_cfg, tls);
+  ESP_LOGI(TAG, "[OTA-TLS] connect to %s:443", host);
+  int r = esp_tls_conn_new_sync(host, strlen(host), 443, &tls_cfg, tls);
   ESP_LOGI(TAG, "[OTA-TLS] connect ret=%d (%lums)", r,
            (unsigned long)(esp_log_timestamp() - t0));
   if (r != 1) {
@@ -491,21 +566,27 @@ static esp_err_t manual_ota_download(void) {
     goto cleanup;
 
   /* ---- HTTP/1.1 GET + Connection: close ----
-   * MUST use HTTP/1.1 to match ALPN "http/1.1" negotiated in TLS.
-   * HTTP/1.0 over an ALPN http/1.1 session causes Fastly CDN to
-   * silently drop the response (server never replies, 120s timeout).
-   * Connection: close ensures server closes TCP after body — same
-   * end-of-stream semantics as HTTP/1.0.
+   * curl/8.11.0 User-Agent: GitHub/Fastly whitelist curl by default.
+   *   ESP32-OTA/x.x triggered Fastly's bot detection → silent hold
+   *   (server keeps connection open but never sends HTTP response).
+   * Accept-Encoding: identity: disables compression (simpler for ESP32)
+   *   and changes the CDN's cache key, which may route to a different
+   *   backend that is not holding the connection.
+   * Cache-Control: no-cache: prevents Fastly from serving a stale
+   *   "hold" response from its cache.
    */
   {
     char req[512];
     int req_len = snprintf(req, sizeof(req),
-                           "GET " OTA_PATH " HTTP/1.1\r\n"
-                           "Host: " OTA_HOST "\r\n"
+                           "GET %s HTTP/1.1\r\n"
+                           "Host: %s\r\n"
                            "Connection: close\r\n"
                            "Accept: */*\r\n"
-                           "User-Agent: ESP32-OTA/1.0\r\n"
-                           "\r\n");
+                           "Accept-Encoding: identity\r\n"
+                           "Cache-Control: no-cache\r\n"
+                           "User-Agent: curl/8.11.0\r\n"
+                           "\r\n",
+                           path, host);
 
     int written = 0;
     uint32_t tw = esp_log_timestamp();
@@ -535,7 +616,12 @@ static esp_err_t manual_ota_download(void) {
     }
 
     int hdr_len = 0;
-    if (read_http_headers(tls, hdr, HDR_BUF_SIZE, &hdr_len) != ESP_OK) {
+    /* 60s hard deadline for receiving the HTTP response header.
+     * Normal CDN response arrives in < 5s over PPP. If LCP Echo
+     * has already torn down the link (15s), this 60s is a last resort. */
+    uint32_t hdr_deadline_ms = esp_log_timestamp() + 60000;
+    if (read_http_headers(tls, hdr, HDR_BUF_SIZE, &hdr_len,
+                          hdr_deadline_ms) != ESP_OK) {
       free(hdr);
       goto cleanup;
     }
@@ -590,10 +676,20 @@ static esp_err_t manual_ota_download(void) {
 
     int total = 0;
     t0 = esp_log_timestamp();
+    /* Per-chunk deadline: reset on every successful read chunk.
+     * 60s without a new chunk → link is dead, abort. */
+    uint32_t body_deadline_ms = esp_log_timestamp() + 60000;
     while (1) {
       int rd = esp_tls_conn_read(tls, buf, OTA_DL_BUF_SIZE);
       if (rd == ESP_TLS_ERR_SSL_WANT_READ || rd == ESP_TLS_ERR_SSL_WANT_WRITE) {
-        /* SO_RCVTIMEO fired with no data yet — retry */
+        /* SO_RCVTIMEO fired with no data yet — check deadline then retry */
+        if (esp_log_timestamp() >= body_deadline_ms) {
+          ESP_LOGE(TAG,
+                   "[OTA-TLS] body read deadline exceeded (60s, no new chunk), "
+                   "total=%d bytes", total);
+          ret = ESP_FAIL;
+          goto cleanup;
+        }
         vTaskDelay(pdMS_TO_TICKS(100));
         continue;
       }
@@ -624,6 +720,8 @@ static esp_err_t manual_ota_download(void) {
       }
 
       total += rd;
+      /* Reset per-chunk deadline — data is flowing normally */
+      body_deadline_ms = esp_log_timestamp() + 60000;
       if ((total / (64 * 1024)) != ((total - rd) / (64 * 1024))) {
         int pct = (content_length > 0) ? (total * 100 / content_length) : -1;
         ESP_LOGI(TAG, "[OTA-TLS] %d/%d bytes (%d%%)", total, content_length,
@@ -677,7 +775,9 @@ cleanup:
 void advanced_ota_task(void *pvParameter) {
   ESP_LOGI(TAG, "Starting Advanced OTA (direct TLS) - V2.0.0");
 
-  const int max_retries = 5;
+  /* Increase retries: with exponential backoff each attempt is more spread
+   * out, giving Fastly CDN time to recover from rate limiting. */
+  const int max_retries = 8;
   esp_err_t err = ESP_FAIL;
 
   for (int attempt = 1; attempt <= max_retries; attempt++) {
@@ -685,7 +785,34 @@ void advanced_ota_task(void *pvParameter) {
     ESP_LOGI(TAG, "OTA attempt %d/%d (t=%lums)", attempt, max_retries,
              (unsigned long)t0);
 
-    err = manual_ota_download();
+    /* ---- Connectivity pre-check ----
+     * Verify PPP → internet routing is working before spending 60s on a
+     * TLS attempt that Fastly might silently ignore.  Uses plain TCP (no
+     * TLS) so it does NOT trigger Fastly's per-IP TLS rate limiter. */
+    if (!internet_reachable()) {
+      ESP_LOGW(TAG, "[OTA] Internet routing not ready, waiting 30s...");
+      vTaskDelay(pdMS_TO_TICKS(30000));
+      /* Count as a failed attempt so we eventually reboot instead of
+       * looping forever if the PPP link itself is broken. */
+      ESP_LOGE(TAG, "OTA attempt %d skipped (no internet)", attempt);
+      if (attempt < max_retries) {
+        uint32_t delay_ms = 30000;
+        ESP_LOGW(TAG, "Retrying in %lums ...", (unsigned long)delay_ms);
+        vTaskDelay(pdMS_TO_TICKS(delay_ms));
+      }
+      continue;
+    }
+
+    /* Alternate between CDN hosts on each attempt.
+     * Primary:  raw.githubusercontent.com  (Fastly, sometimes rate-limits)
+     * Fallback: objects.githubusercontent.com (different Fastly PoP/pool)
+     * Odd attempts → primary, even attempts → fallback. */
+    const char *host = (attempt % 2 == 1) ? OTA_HOST_PRIMARY : OTA_HOST_FALLBACK;
+    const char *path = OTA_PATH;
+    ESP_LOGI(TAG, "[OTA] Using host: %s", host);
+
+    err = manual_ota_download(host, path);
+
 
     uint32_t elapsed = esp_log_timestamp() - t0;
     if (err == ESP_OK) {
@@ -699,8 +826,17 @@ void advanced_ota_task(void *pvParameter) {
              (unsigned long)elapsed, esp_err_to_name(err), err);
 
     if (attempt < max_retries) {
-      uint32_t delay_ms = 5000;
-      ESP_LOGW(TAG, "Retrying in %lums ...", (unsigned long)delay_ms);
+      /* Exponential backoff: 10s, 20s, 40s, 80s (capped), 80s, ...
+       * Spreading retries reduces the TLS connection rate seen by the
+       * Fastly CDN, avoiding the per-IP rate limiter that causes the
+       * server to silently drop our GET requests. */
+      uint32_t delay_ms;
+      if (attempt == 1)      delay_ms = 10000;
+      else if (attempt == 2) delay_ms = 20000;
+      else if (attempt == 3) delay_ms = 40000;
+      else                   delay_ms = 80000;
+      ESP_LOGW(TAG, "Retrying in %lums (exp backoff attempt %d)...",
+               (unsigned long)delay_ms, attempt);
       vTaskDelay(pdMS_TO_TICKS(delay_ms));
     }
   }
@@ -725,7 +861,7 @@ void fota_lan_handler_task_start(void) {
            "Heap before OTA task: total=%d, internal=%d, internal_largest=%d",
            esp_get_free_heap_size(), internal_free, internal_largest);
 
-  const UBaseType_t ota_prio = 5;
+  const UBaseType_t ota_prio = 8; /* above WAN_DL(7) and WAN_UL(5) */
   BaseType_t ret = xTaskCreate(&advanced_ota_task, "advanced_ota_task",
                                12 * 1024, NULL, ota_prio, NULL);
   if (ret != pdPASS) {

@@ -8,3 +8,13 @@ CONFIG_LWIP_TCP_RECVMBOX_SIZE=16
 CONFIG_LWIP_TCP_RTO_TIME=500
 # Allow mbedTLS to use PSRAM for SSL context allocation (~50KB needed for TLS handshake)
 CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+# --- OTA connection stability fixes ---
+# LCP Echo: detect dead PPP link within 15s (5s interval × 3 fails)
+# instead of waiting 388s for TCP RTO chain to expire.
+CONFIG_LWIP_ENABLE_LCP_ECHO=y
+CONFIG_LWIP_LCP_ECHOINTERVAL=5
+CONFIG_LWIP_LCP_MAXECHOFAILS=3
+# TCP max retransmits: limit RTO backoff chain to ~63s (safety fallback
+# if LCP Echo is not available on the peer side).
+# Default is 12 (~388s). 7 retries = 0.5+1+2+4+8+16+32 = ~63s.
+CONFIG_LWIP_TCP_MAXRTX=7
