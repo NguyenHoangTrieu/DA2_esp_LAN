@@ -35,6 +35,17 @@ extern "C" {
 esp_err_t ble_gatt_handler_init(void);
 
 /**
+ * @brief Deinitialize the GATT Central handler.
+ *
+ * Stops uplink/downlink tasks, disconnects all devices, stops advertising,
+ * and unregisters callbacks. Safe to call even if not initialized.
+ * Call this before switching to a different BLE mode.
+ *
+ * @return ESP_OK on success
+ */
+esp_err_t ble_gatt_handler_deinit(void);
+
+/**
  * @brief Load JSON configuration for one GATT Central stack.
  *
  * Called by config_handler_ble_gatt_commands.c when CFBG:JSON: is received.
@@ -97,6 +108,11 @@ esp_gatt_if_t ble_gatt_handler_get_if(void);
 void ble_gatt_handler_report_scan_result(uint8_t stack_id,
                                           const ble_gatt_device_t *dev,
                                           uint8_t dev_idx);
+
+/**
+ * @brief Clear all device table entries (call before starting a new scan).
+ */
+void ble_gatt_handler_clear_devices(void);
 
 /**
  * @brief Set the pending stack ID for the next GAP/GATTC operation.

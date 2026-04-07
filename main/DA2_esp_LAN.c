@@ -3,6 +3,9 @@
 */
 
 #include "DA2_esp_LAN.h"
+#include "esp_bt.h"
+#include "esp_bt_main.h"
+#include "driver/uart.h"
 
 static const char *TAG = "MAIN APP";
 
@@ -15,7 +18,7 @@ TaskHandle_t main_task_handle = NULL;
 #define PPP_UART_PORT                  UART_NUM_0
 #define PPP_UART_TX_PIN                GPIO_NUM_43
 #define PPP_UART_RX_PIN                GPIO_NUM_44
-#define PPP_UART_BAUDRATE              256000
+#define PPP_UART_BAUDRATE              921600
 #define PPP_UART_QUEUE_SIZE            40
 #define PPP_UART_RX_BUFFER_SIZE        (32*1024)
 
@@ -51,7 +54,36 @@ void app_main(void)
     config_init();
     config_handler_task_start();
     ESP_LOGI(TAG, "Config handler started");
-    
+
+    /* Initialize BT controller and Bluedroid early at boot while internal RAM
+     * is fresh and unfragmented.  Lazy init after 600+ seconds of uptime
+     * causes bt_workqueue allocation failures (internal RAM fragmented).
+     * Both BLE Mesh (Native) and GATT Central share this single BT stack. */
+    {
+        esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+        esp_err_t bt_ret = esp_bt_controller_init(&bt_cfg);
+        if (bt_ret != ESP_OK) {
+            ESP_LOGE(TAG, "BT controller init failed: %s", esp_err_to_name(bt_ret));
+        } else {
+            bt_ret = esp_bt_controller_enable(ESP_BT_MODE_BLE);
+            if (bt_ret != ESP_OK) {
+                ESP_LOGE(TAG, "BT controller enable failed: %s", esp_err_to_name(bt_ret));
+            } else {
+                bt_ret = esp_bluedroid_init();
+                if (bt_ret != ESP_OK) {
+                    ESP_LOGE(TAG, "Bluedroid init failed: %s", esp_err_to_name(bt_ret));
+                } else {
+                    bt_ret = esp_bluedroid_enable();
+                    if (bt_ret != ESP_OK) {
+                        ESP_LOGE(TAG, "Bluedroid enable failed: %s", esp_err_to_name(bt_ret));
+                    } else {
+                        ESP_LOGI(TAG, "BT stack initialized at boot");
+                    }
+                }
+            }
+        }
+    }
+
     // Start WAN handler FIRST so its queue/mutexes are allocated before
     // module handlers (BLE/LoRa/etc.) consume internal RAM on NVS restore.
     mcu_wan_handler_start();
@@ -61,17 +93,10 @@ void app_main(void)
     ESP_ERROR_CHECK(module_monitor_task_start());
     ESP_LOGI(TAG, "Module Monitor Task started (Module Base Setting enabled)");
 
-    /* Initialize BLE GATT Central (runs after ble_native_handler_init
-     * which has already brought up Bluetooth).  ble_gatt_handler_init()
-     * registers GAP/GATTC callbacks and starts uplink/downlink tasks.
-     * All operational parameters come from CFBG:JSON:<slot>: at runtime. */
-    esp_err_t gatt_ret = ble_gatt_handler_init();
-    if (gatt_ret != ESP_OK) {
-        ESP_LOGW(TAG, "BLE GATT Central init returned: %s (CFBG: commands unavailable)",
-                 esp_err_to_name(gatt_ret));
-    } else {
-        ESP_LOGI(TAG, "BLE GATT Central initialized (CFBG: prefix ready)");
-    }
+    /* Restore BLE config from NVS if it was configured before last reboot.
+     * This replaces the old eager ble_gatt_handler_init() call — the handler
+     * now self-initializes the BT stack so timing no longer matters. */
+    config_restore_ble_from_nvs();
 
     while (1) {
       vTaskDelay(pdMS_TO_TICKS(1000));
@@ -89,9 +114,23 @@ void lan_ppp_connect(void) {
   config.uart.baud = PPP_UART_BAUDRATE;
   config.uart.rx_buffer_size = PPP_UART_RX_BUFFER_SIZE;
   config.uart.queue_size = PPP_UART_QUEUE_SIZE;
+  
+  /* Increase eppp_link task priority above LwIP (Priority 18) 
+   * to prevent UART FIFO overflow during heavy payload (OTA TLS recv). */
+  config.task.priority = 19;
 
   esp_netif_t *eppp_netif = eppp_connect(&config);
-
+    if (eppp_netif == NULL) {
+        ESP_LOGE(TAG, "PPP connect failed");
+        return;
+    }
+  /* Lower UART RX FIFO full threshold from default 120 → 16 bytes.
+   * At 921600 baud, default threshold fires ISR every 1.30ms; a flash page
+   * program holds interrupts ~0.1ms so this is normally fine, but bursts
+   * from multiple high-priority tasks (BLE + LwIP) can cumulatively delay
+   * the ISR long enough to overflow.  Threshold=16 fires every 0.17ms,
+   * well within any realistic ISR latency budget. */
+  uart_set_rx_full_threshold(PPP_UART_PORT, 16);
   // Get IP info
   esp_netif_ip_info_t ip_info;
   if (esp_netif_get_ip_info(eppp_netif, &ip_info) == ESP_OK) {

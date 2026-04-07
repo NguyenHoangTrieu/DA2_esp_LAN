@@ -15,12 +15,15 @@
 #include "ble_gatt_config.h"
 #include "ble_gatt_uplink.h"
 #include "ble_gatt_handler.h"
+#include "config_ble_mode.h"
 #include "esp_log.h"
 #include "esp_gap_ble_api.h"
 #include "esp_gattc_api.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "freertos/idf_additions.h"
+#include "esp_heap_caps.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -124,6 +127,9 @@ static void handle_scan(uint8_t stack_id, const char *params) {
         return;
     }
 
+    /* Clear stale device table entries so fresh scan starts empty */
+    ble_gatt_handler_clear_devices();
+
     /* Set pending stack so GAP callbacks know which channel to use */
     ble_gatt_handler_set_pending_stack(stack_id);
 
@@ -133,10 +139,8 @@ static void handle_scan(uint8_t stack_id, const char *params) {
         ble_gatt_uplink_send_fail(stack_id, "SCAN:START_FAIL");
         return;
     }
-
-    char ok[48];
-    snprintf(ok, sizeof(ok), "SCAN_STARTED:%u", (unsigned)(duration_sec * 1000));
-    ble_gatt_uplink_send_ok(stack_id, ok);
+    /* Results will be sent as a single batched SCAN_DONE from GAP SCAN_STOP_COMPLETE */
+    ESP_LOGI(TAG, "Scanning for %us...", (unsigned)duration_sec);
 }
 
 /* CFBG:<slot>:STOP */
@@ -250,7 +254,11 @@ static void handle_connect(uint8_t stack_id, const char *params) {
         free_dev->valid = true;
     }
 
-    /* Mark pending stack for OPEN_EVT callback */
+    /* Ensure device has current stack_id so OPEN_EVT callback can respond */
+    ble_gatt_device_t *connecting_dev = ble_gatt_handler_get_device(slot_idx);
+    if (connecting_dev) connecting_dev->stack_id = stack_id;
+
+    /* Mark pending stack for scan callbacks (kept for compatibility) */
     ble_gatt_handler_set_pending_stack(stack_id);
 
     ble_gatt_stack_config_t *cfg = ble_gatt_config_get(stack_id);
@@ -271,10 +279,7 @@ static void handle_connect(uint8_t stack_id, const char *params) {
     };
     memcpy(conn_params.bda, addr, ESP_BD_ADDR_LEN);
     esp_ble_gap_update_conn_params(&conn_params);
-
-    char ok[48];
-    snprintf(ok, sizeof(ok), "CONNECTING:%d:" MACSTR, slot_idx, MAC2STR(addr));
-    ble_gatt_uplink_send_ok(stack_id, ok);
+    /* No CONNECTING ack here — OPEN_EVT will send CONNECTED once established */
 }
 
 /* CFBG:<slot>:DISCONNECT:<idx> */
@@ -325,14 +330,14 @@ static void handle_disc(uint8_t stack_id, const char *params) {
     memset(d->services, 0, sizeof(d->services));
     memset(d->chars,    0, sizeof(d->chars));
 
+    /* Store stack_id so SEARCH_CMPL_EVT can send the batched response */
+    d->stack_id = stack_id;
+
     esp_err_t ret = esp_ble_gattc_search_service(d->gattc_if, d->conn_id, NULL);
     if (ret != ESP_OK) {
         ble_gatt_uplink_send_fail(stack_id, "DISC:SEARCH_FAILED");
-    } else {
-        char ok[40];
-        snprintf(ok, sizeof(ok), "DISC_STARTED:%d", idx);
-        ble_gatt_uplink_send_ok(stack_id, ok);
     }
+    /* No DISC_STARTED ack — SEARCH_CMPL_EVT will send batched DISC_DONE */
 }
 
 /* CFBG:<slot>:READ:<idx>:<handle> */
@@ -352,15 +357,17 @@ static void handle_read(uint8_t stack_id, const char *params) {
         ble_gatt_uplink_send_fail(stack_id, "READ:NOT_CONNECTED");
         return;
     }
+    /* Save stack_id so READ_CHAR_EVT can route the response via the SAME RPC channel.
+       Do NOT send READ_STARTED here — that would consume g_last_rpc_id on the gateway
+       before the actual value arrives (READ_CHAR_EVT), causing the value to be routed
+       to telemetry instead of returning it as the RPC response the widget is waiting for. */
+    d->stack_id = stack_id;
     esp_err_t ret = esp_ble_gattc_read_char(d->gattc_if, d->conn_id,
                                              handle, ESP_GATT_AUTH_REQ_NONE);
     if (ret != ESP_OK) {
         ble_gatt_uplink_send_fail(stack_id, "READ:FAILED");
-    } else {
-        char ok[32];
-        snprintf(ok, sizeof(ok), "READ_STARTED:%d:0x%04X", idx, handle);
-        ble_gatt_uplink_send_ok(stack_id, ok);
     }
+    /* On success: no immediate ACK — READ_CHAR_EVT will send READ:<idx>:0x<handle>:<hex> */
 }
 
 /* CFBG:<slot>:WRITE:<idx>:<handle>:<hex_data>     (with response)
@@ -437,6 +444,18 @@ static void handle_cccd(uint8_t stack_id, const char *params, bool is_notify) {
     }
     uint8_t val_buf[2] = { (uint8_t)(cccd_val & 0xFF), (uint8_t)(cccd_val >> 8) };
 
+    /* Register with ESP-IDF BLE stack so NOTIFY_EVT is delivered to the callback.
+     * char value handle = cccd_handle - 1 (BLE convention: CCCD immediately follows). */
+    if (enable) {
+        uint16_t char_handle = (handle > 0) ? (handle - 1) : handle;
+        esp_err_t reg_ret = esp_ble_gattc_register_for_notify(
+            d->gattc_if, d->addr, char_handle);
+        if (reg_ret != ESP_OK) {
+            ESP_LOGW("ble_gatt_dn", "register_for_notify failed: %d (char_handle=0x%04X)",
+                     reg_ret, char_handle);
+        }
+    }
+
     esp_err_t ret = esp_ble_gattc_write_char_descr(
         d->gattc_if, d->conn_id,
         handle, 2, val_buf,
@@ -454,23 +473,46 @@ static void handle_cccd(uint8_t stack_id, const char *params, bool is_notify) {
  * -------------------------------------------------------------------------- */
 
 static void dispatch_item(const uint8_t *data, uint16_t len) {
-    if (!data || len < 7) return;
-    if (strncmp((const char *)data, "CFBG:", 5) != 0) return;
+    if (!data || len < 8) {
+        ESP_LOGD(TAG, "dispatch_item: invalid input (len=%d)", len);
+        return;
+    }
+    if (strncmp((const char *)data, "CFBG:", 5) != 0) {
+        ESP_LOGD(TAG, "dispatch_item: not CFBG prefix");
+        return;
+    }
 
-    /* Native BLE GATT: always use stack 0 */
-    const uint8_t stack_id = 0;
+    ESP_LOGD(TAG, "dispatch_item: received %.16s... (len=%d)", (const char*)data, len);
 
-    /* Verb directly after "CFBG:" */
-    const char *verb = (const char *)(data + 5);
-    const char *c2   = strchr(verb, ':');
-    size_t verb_len  = c2 ? (size_t)(c2 - verb) : strlen(verb);
-    const char *params = c2 ? c2 + 1 : "";
+    /* Format: CFBG:<slot>:<verb>:<params...>
+     * Skip slot field, then extract verb and params. */
+    const char *after_prefix = (const char *)(data + 5);
+    const char *slot_end = strchr(after_prefix, ':');
+    if (!slot_end) {
+        ESP_LOGW(TAG, "dispatch_item: malformed - no slot:verb separator");
+        return; /* malformed — no verb */
+    }
+
+    const uint8_t stack_id = 0; /* native GATT always uses stack 0 */
+
+    const char *verb    = slot_end + 1;
+    const char *c2      = strchr(verb, ':');
+    size_t      verb_len = c2 ? (size_t)(c2 - verb) : strlen(verb);
+    const char *params  = c2 ? c2 + 1 : "";
 
     char verb_buf[32] = {0};
     if (verb_len >= sizeof(verb_buf)) verb_len = sizeof(verb_buf) - 1;
     memcpy(verb_buf, verb, verb_len);
 
-    ESP_LOGI(TAG, "stack=%u verb='%s'", stack_id, verb_buf);
+    ESP_LOGI(TAG, "stack=%u verb='%s' params='%.20s'", stack_id, verb_buf, params);
+
+    /* Check if GATT mode is active */
+    if (!config_ble_mode_is_active(BLE_MODE_GATT)) {
+        ESP_LOGW(TAG, "GATT command rejected: module not active (mode=%s)",
+                 config_ble_mode_name(config_ble_mode_get()));
+        ble_gatt_uplink_send_fail(stack_id, "MODULE_NOT_ACTIVE");
+        return;
+    }
 
     if      (strcmp(verb_buf, "SCAN")       == 0) handle_scan(stack_id, params);
     else if (strcmp(verb_buf, "STOP")       == 0) handle_stop(stack_id);
@@ -496,23 +538,18 @@ static void dispatch_item(const uint8_t *data, uint16_t len) {
  * -------------------------------------------------------------------------- */
 
 static void downlink_task(void *arg) {
-    downlink_item_t *item = NULL;
     ESP_LOGI(TAG, "Downlink task started");
 
     while (s_task_running) {
-        if (!item) {
-            item = (downlink_item_t *)malloc(sizeof(downlink_item_t));
-            if (!item) {
-                vTaskDelay(pdMS_TO_TICKS(200));
-                continue;
+        downlink_item_t *item = NULL;
+        if (xQueueReceive(s_dn_queue, &item, pdMS_TO_TICKS(100)) == pdTRUE) {
+            if (item) {
+                dispatch_item(item->raw, item->len);
+                free(item);
             }
-        }
-        if (xQueueReceive(s_dn_queue, item, pdMS_TO_TICKS(100)) == pdTRUE) {
-            dispatch_item(item->raw, item->len);
         }
     }
 
-    free(item);
     ESP_LOGI(TAG, "Downlink task exiting");
     vTaskDelete(NULL);
 }
@@ -525,8 +562,11 @@ esp_err_t ble_gatt_downlink_task_start(void) {
     if (s_task_running) return ESP_OK;
 
     if (!s_dn_queue) {
+        /* Store pointers (4 bytes/slot) instead of full items (1024 bytes/slot).
+         * Items are malloc'd from PSRAM in enqueue; this queue only needs
+         * QUEUE_DEPTH * sizeof(ptr) = 32 bytes of internal RAM. */
         s_dn_queue = xQueueCreate(BLE_GATT_DOWNLINK_QUEUE_DEPTH,
-                                   sizeof(downlink_item_t));
+                                   sizeof(downlink_item_t *));
         if (!s_dn_queue) {
             ESP_LOGE(TAG, "Failed to create downlink queue");
             return ESP_ERR_NO_MEM;
@@ -534,8 +574,17 @@ esp_err_t ble_gatt_downlink_task_start(void) {
     }
 
     s_task_running = true;
-    BaseType_t ret = xTaskCreate(downlink_task, "ble_gatt_dn",
-                                  8 * 1024, NULL, 5, &s_dn_task);
+    /* Allocate task stack from PSRAM — 8KB in SPIRAM leaves internal RAM
+     * available for BT stack and other time-critical allocations. */
+    BaseType_t ret = xTaskCreateWithCaps(downlink_task, "ble_gatt_dn",
+                                          8 * 1024, NULL, 5, &s_dn_task,
+                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (ret != pdPASS) {
+        /* Fall back to internal RAM if PSRAM allocation failed */
+        ESP_LOGW(TAG, "PSRAM stack alloc failed, retrying with internal RAM");
+        ret = xTaskCreate(downlink_task, "ble_gatt_dn",
+                          4 * 1024, NULL, 5, &s_dn_task);
+    }
     if (ret != pdPASS) {
         s_task_running = false;
         return ESP_FAIL;
@@ -550,17 +599,31 @@ void ble_gatt_downlink_task_stop(void) {
 }
 
 esp_err_t ble_gatt_downlink_enqueue(const uint8_t *data, uint16_t len) {
-    if (!s_dn_queue || !data || len == 0) return ESP_ERR_INVALID_ARG;
+    if (!s_dn_queue) {
+        ESP_LOGW(TAG, "Enqueue: queue not initialized");
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!data || len == 0) {
+        ESP_LOGW(TAG, "Enqueue: invalid data");
+        return ESP_ERR_INVALID_ARG;
+    }
     if (len >= BLE_GATT_DOWNLINK_ITEM_MAX) len = BLE_GATT_DOWNLINK_ITEM_MAX - 1;
 
-    downlink_item_t item;
-    memcpy(item.raw, data, len);
-    item.raw[len] = '\0';
-    item.len = len;
-
-    if (xQueueSend(s_dn_queue, &item, pdMS_TO_TICKS(50)) != pdTRUE) {
-        ESP_LOGW(TAG, "Downlink queue full");
+    downlink_item_t *item = (downlink_item_t *)malloc(sizeof(downlink_item_t));
+    if (!item) {
+        ESP_LOGE(TAG, "Enqueue: out of memory");
         return ESP_ERR_NO_MEM;
     }
+    memcpy(item->raw, data, len);
+    item->raw[len] = '\0';
+    item->len = len;
+
+    ESP_LOGD(TAG, "Enqueue: sending %d bytes to task", len);
+    if (xQueueSend(s_dn_queue, &item, pdMS_TO_TICKS(50)) != pdTRUE) {
+        ESP_LOGW(TAG, "Downlink queue full (item=%d bytes)", len);
+        free(item);
+        return ESP_ERR_NO_MEM;
+    }
+    ESP_LOGD(TAG, "Enqueue: item queued successfully");
     return ESP_OK;
 }

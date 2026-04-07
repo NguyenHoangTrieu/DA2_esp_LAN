@@ -28,6 +28,7 @@
 #include "esp_gap_ble_api.h"
 #include "esp_gattc_api.h"
 #include "esp_gatt_defs.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <string.h>
@@ -46,8 +47,9 @@ static const char *TAG = "ble_gatt_hdl";
  * -------------------------------------------------------------------------- */
 
 static bool          s_initialized    = false;
+static bool          s_bt_registered  = false; /* GAP/GATTC callbacks + app_register done */
 static esp_gatt_if_t s_gattc_if       = ESP_GATT_IF_NONE;
-static ble_gatt_device_t s_devices[BLE_GATT_MAX_DEVICES];
+static ble_gatt_device_t *s_devices   = NULL;  /* PSRAM-allocated device table */
 
 /* Stack id for the currently pending scan or connect (single-threaded ops) */
 static volatile uint8_t s_pending_stack_id = 0;
@@ -78,6 +80,52 @@ static int find_by_conn_id(uint16_t conn_id) {
         if (s_devices[i].valid && s_devices[i].conn_id == conn_id) return i;
     }
     return -1;
+}
+
+void ble_gatt_handler_clear_devices(void) {
+    for (int i = 0; i < BLE_GATT_MAX_DEVICES; i++) {
+        /* Skip slots that have an active BLE connection.
+         * Wiping a connected device slot mid-session causes the DISCONNECT_EVT
+         * callback to find no matching slot (find_by_conn_id returns -1), so the
+         * DISCONNECTED uplink is never sent and the widget UI never clears. */
+        if (s_devices[i].valid && s_devices[i].conn_id != 0xFFFF) {
+            continue;
+        }
+        memset(&s_devices[i], 0, sizeof(s_devices[i]));
+        /* conn_id == 0 after memset would alias a real conn_id; restore sentinel */
+        s_devices[i].conn_id  = 0xFFFF;
+        s_devices[i].gattc_if = ESP_GATT_IF_NONE;
+    }
+}
+
+/* --------------------------------------------------------------------------
+ * Scan-done reporter — builds consolidated uplink for the RPC response
+ * -------------------------------------------------------------------------- */
+static void send_scan_done(void) {
+    int scan_count = 0;
+    for (int i = 0; i < BLE_GATT_MAX_DEVICES; i++) {
+        if (s_devices[i].valid) scan_count++;
+    }
+    ESP_LOGI(TAG, "Scan done: %d device(s)", scan_count);
+
+    char *buf = heap_caps_malloc(2048, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) {
+        ble_gatt_uplink_send_ok(s_pending_stack_id, "SCAN_DONE:0");
+        return;
+    }
+    int pos = snprintf(buf, 2048, "SCAN_DONE:%d", scan_count);
+    for (int i = 0; i < BLE_GATT_MAX_DEVICES && pos + 70 < 2048; i++) {
+        if (!s_devices[i].valid) continue;
+        char name[21];
+        strncpy(name, s_devices[i].name, 20);
+        name[20] = '\0';
+        pos += snprintf(buf + pos, 2048 - pos,
+                        "\x1ESCAN_RESULT:%d," MACSTR ",%d,%s",
+                        i, MAC2STR(s_devices[i].addr),
+                        (int)s_devices[i].rssi, name);
+    }
+    ble_gatt_uplink_send_ok(s_pending_stack_id, buf);
+    free(buf);
 }
 
 /** Extract device name from advertising data. Returns false if not found. */
@@ -129,13 +177,19 @@ static void gap_event_cb(esp_gap_ble_cb_event_t event,
         break;
 
     case ESP_GAP_BLE_SCAN_STOP_COMPLETE_EVT:
-        if (param->scan_stop_cmpl.status == ESP_BT_STATUS_SUCCESS) {
-            ESP_LOGI(TAG, "Scan stopped");
-        }
+        /* Fired only when esp_ble_gap_stop_scanning() is called explicitly (e.g. STOP command) */
+        send_scan_done();
         break;
 
     case ESP_GAP_BLE_SCAN_RESULT_EVT: {
         esp_ble_gap_cb_param_t *scan = param;
+
+        /* Duration-based scan expired — this is the normal completion path */
+        if (scan->scan_rst.search_evt == ESP_GAP_SEARCH_INQ_CMPL_EVT) {
+            send_scan_done();
+            break;
+        }
+
         if (scan->scan_rst.search_evt != ESP_GAP_SEARCH_INQ_RES_EVT) break;
 
         const uint8_t *bda = scan->scan_rst.bda;
@@ -169,15 +223,8 @@ static void gap_event_cb(esp_gap_ble_cb_event_t event,
             snprintf(dev->name, BLE_GATT_DEV_NAME_LEN, "Unknown");
         }
 
-        /* Report to uplink: "+SCAN:<idx>,<MAC>,<RSSI>,<name>" */
-        char report[128];
-        snprintf(report, sizeof(report),
-                 "SCAN_RESULT:%d," MACSTR ",%d,%s",
-                 slot,
-                 MAC2STR(bda),
-                 (int)dev->rssi,
-                 dev->name);
-        ble_gatt_uplink_send_ok(s_pending_stack_id, report);
+        ESP_LOGI(TAG, "Scan[%d]: " MACSTR " RSSI=%d Name='%s'",
+                 slot, MAC2STR(bda), (int)dev->rssi, dev->name);
         break;
     }
 
@@ -221,11 +268,29 @@ static void gattc_event_cb(esp_gattc_cb_event_t event,
         }
         ble_gatt_device_t *dev = &s_devices[idx];
         if (param->open.status != ESP_GATT_OK) {
-            ESP_LOGE(TAG, "Connect failed: status=%d", param->open.status);
-            char fail[48];
-            snprintf(fail, sizeof(fail), "CONNECT:FAILED:%d", param->open.status);
-            ble_gatt_uplink_send_fail(dev->stack_id, fail);
-            dev->valid = false;
+            /* ESP_GATT_ALREADY_OPEN (145 / 0x91): the BLE link is still live —
+             * typically happens when the ThingsBoard widget is reloaded while the
+             * peripheral stayed connected, and the widget sends CONNECT again.
+             * Bluedroid fires OPEN_EVT with this status but DOES supply the valid
+             * existing conn_id in param->open.conn_id.
+             * Recover the slot instead of invalidating it, then re-send CONNECTED
+             * so the widget can re-discover services and re-enable NOTIFY. */
+            if (param->open.status == ESP_GATT_ALREADY_OPEN) {
+                ESP_LOGW(TAG, "OPEN_EVT: already open idx=%d — recovering connId=0x%04X",
+                         idx, param->open.conn_id);
+                dev->conn_id  = param->open.conn_id;
+                dev->gattc_if = gattc_if;
+                char ok[80];
+                snprintf(ok, sizeof(ok), "CONNECTED:%d:0x%04X:" MACSTR,
+                         idx, dev->conn_id, MAC2STR(dev->addr));
+                ble_gatt_uplink_send_ok(dev->stack_id, ok);
+            } else {
+                ESP_LOGE(TAG, "Connect failed: status=%d", param->open.status);
+                char fail[48];
+                snprintf(fail, sizeof(fail), "CONNECT:FAILED:%d", param->open.status);
+                ble_gatt_uplink_send_fail(dev->stack_id, fail);
+                dev->valid = false;
+            }
             break;
         }
         dev->conn_id  = param->open.conn_id;
@@ -252,8 +317,12 @@ static void gattc_event_cb(esp_gattc_cb_event_t event,
         char ok[48];
         snprintf(ok, sizeof(ok), "DISCONNECTED:%d:0x%04X", idx, dev->conn_id);
         ble_gatt_uplink_send_ok(dev->stack_id, ok);
-        dev->conn_id  = 0xFFFF;
-        dev->gattc_if = ESP_GATT_IF_NONE;
+        /* Clear conn_id and char/service tables so find_by_conn_id never
+         * returns a stale slot whose conn_id matches a new connection. */
+        dev->conn_id     = 0xFFFF;
+        dev->gattc_if    = ESP_GATT_IF_NONE;
+        dev->num_chars   = 0;
+        dev->num_services = 0;
         break;
     }
 
@@ -276,21 +345,10 @@ static void gattc_event_cb(esp_gattc_cb_event_t event,
             dev->services[svc_idx].valid = true;
             dev->num_services++;
         }
-
-        char ok[80];
-        if (param->search_res.srvc_id.uuid.len == ESP_UUID_LEN_16) {
-            snprintf(ok, sizeof(ok), "SERVICE:%d:0x%04X:0x%04X:0x%04X",
-                     idx,
-                     param->search_res.srvc_id.uuid.uuid.uuid16,
-                     param->search_res.start_handle,
-                     param->search_res.end_handle);
-        } else {
-            snprintf(ok, sizeof(ok), "SERVICE:%d:128-BIT:0x%04X:0x%04X",
-                     idx,
-                     param->search_res.start_handle,
-                     param->search_res.end_handle);
-        }
-        ble_gatt_uplink_send_ok(dev->stack_id, ok);
+        /* SERVICE lines are NOT sent individually here.
+         * They are included in the batched DISC_DONE response at SEARCH_CMPL_EVT
+         * so the WAN MCU sends a single complete packet to the server. */
+        ESP_LOGD(TAG, "Service found: idx=%d svc#%u", idx, svc_idx);
         break;
     }
 
@@ -322,24 +380,49 @@ static void gattc_event_cb(esp_gattc_cb_event_t event,
                         memcpy(ce->uuid128, char_buf[ci].uuid.uuid.uuid128, 16);
                     }
                     ce->valid = true;
-
-                    char ok[80];
-                    if (ce->uuid16) {
-                        snprintf(ok, sizeof(ok), "CHAR:%d:0x%04X:0x%04X:0x%02X",
-                                 idx, ce->uuid16, ce->handle, ce->properties);
-                    } else {
-                        snprintf(ok, sizeof(ok), "CHAR:%d:128-BIT:0x%04X:0x%02X",
-                                 idx, ce->handle, ce->properties);
-                    }
-                    ble_gatt_uplink_send_ok(dev->stack_id, ok);
                 }
             }
         }
 
-        char disc_done[48];
-        snprintf(disc_done, sizeof(disc_done), "DISC_DONE:%d:%u_CHARS",
-                 idx, dev->num_chars);
-        ble_gatt_uplink_send_ok(dev->stack_id, disc_done);
+        /* Build one batched DISC_DONE response so the RPC caller sees all services and chars */
+        char *batch = heap_caps_malloc(2048, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!batch) {
+            char small[48];
+            snprintf(small, sizeof(small), "DISC_DONE:%d:%u_CHARS", idx, dev->num_chars);
+            ble_gatt_uplink_send_ok(dev->stack_id, small);
+            break;
+        }
+        int pos = snprintf(batch, 2048, "DISC_DONE:%d:%u_CHARS", idx, dev->num_chars);
+        /* Append all SERVICE lines first */
+        for (uint8_t si = 0; si < dev->num_services && pos + 60 < 2048; si++) {
+            ble_gatt_svc_entry_t *se = &dev->services[si];
+            if (!se->valid) continue;
+            if (se->uuid16) {
+                pos += snprintf(batch + pos, 2048 - pos,
+                                "\x1E" "SERVICE:%d:0x%04X:0x%04X:0x%04X",
+                                idx, se->uuid16, se->start_handle, se->end_handle);
+            } else {
+                pos += snprintf(batch + pos, 2048 - pos,
+                                "\x1E" "SERVICE:%d:128-BIT:0x%04X:0x%04X",
+                                idx, se->start_handle, se->end_handle);
+            }
+        }
+        /* Append all CHAR lines */
+        for (uint8_t ci = 0; ci < dev->num_chars && pos + 60 < 2048; ci++) {
+            ble_gatt_char_entry_t *ce = &dev->chars[ci];
+            if (!ce->valid) continue;
+            if (ce->uuid16) {
+                pos += snprintf(batch + pos, 2048 - pos,
+                                "\x1E" "CHAR:%d:0x%04X:0x%04X:0x%02X",
+                                idx, ce->uuid16, ce->handle, ce->properties);
+            } else {
+                pos += snprintf(batch + pos, 2048 - pos,
+                                "\x1E" "CHAR:%d:128-BIT:0x%04X:0x%02X",
+                                idx, ce->handle, ce->properties);
+            }
+        }
+        ble_gatt_uplink_send_ok(dev->stack_id, batch);
+        heap_caps_free(batch);
         break;
     }
 
@@ -423,6 +506,8 @@ static void gattc_event_cb(esp_gattc_cb_event_t event,
         char ok[320];
         snprintf(ok, sizeof(ok), "%s:%d:0x%04X:%s",
                  type, idx, param->notify.handle, hex);
+        ESP_LOGI(TAG, "[NOTIFY] dev[%d] handle=0x%04X len=%u data=%s",
+                 idx, param->notify.handle, param->notify.value_len, hex);
         ble_gatt_uplink_send_ok(dev->stack_id, ok);
         break;
     }
@@ -439,35 +524,88 @@ static void gattc_event_cb(esp_gattc_cb_event_t event,
 esp_err_t ble_gatt_handler_init(void) {
     if (s_initialized) return ESP_OK;
 
-    memset(s_devices, 0, sizeof(s_devices));
+    /* Allocate (or re-zero) device table from PSRAM */
+    if (!s_devices) {
+        s_devices = heap_caps_calloc(BLE_GATT_MAX_DEVICES, sizeof(ble_gatt_device_t),
+                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s_devices) {
+            ESP_LOGE(TAG, "Failed to alloc device table from PSRAM");
+            return ESP_ERR_NO_MEM;
+        }
+    } else {
+        memset(s_devices, 0, BLE_GATT_MAX_DEVICES * sizeof(ble_gatt_device_t));
+    }
     for (int i = 0; i < BLE_GATT_MAX_DEVICES; i++) {
         s_devices[i].conn_id  = 0xFFFF;
         s_devices[i].gattc_if = ESP_GATT_IF_NONE;
     }
 
-    /* Register GAP and GATTC callbacks
-     * Note: Bluetooth is already initialized by ble_native_handler_init() */
     esp_err_t ret;
 
-    ret = esp_ble_gap_register_callback(gap_event_cb);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "GAP register callback failed: %s", esp_err_to_name(ret));
-        return ret;
+    /* Initialize BT controller and Bluedroid stack if not already done.
+     * ble_native_handler_init() handles this automatically via esp_ble_mesh_init().
+     * For GATT-only scenarios (no BLE Mesh), we must do it manually here. */
+    if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_IDLE) {
+        esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+        ret = esp_bt_controller_init(&bt_cfg);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "BT controller init failed: %s", esp_err_to_name(ret));
+            return ret;
+        }
+    }
+    if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_INITED) {
+        ret = esp_bt_controller_enable(ESP_BT_MODE_BLE);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "BT controller enable failed: %s", esp_err_to_name(ret));
+            return ret;
+        }
+    }
+    if (esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_UNINITIALIZED) {
+        ret = esp_bluedroid_init();
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Bluedroid init failed: %s", esp_err_to_name(ret));
+            return ret;
+        }
+        ret = esp_bluedroid_enable();
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Bluedroid enable failed: %s", esp_err_to_name(ret));
+            return ret;
+        }
     }
 
-    ret = esp_ble_gattc_register_callback(gattc_event_cb);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "GATTC register callback failed: %s", esp_err_to_name(ret));
-        return ret;
+    /* Register GAP and GATTC callbacks — only once, even across retries.
+     * GAP may fail if BLE Native already claimed it; that is non-fatal.
+     * GATTC app_register creates a new interface slot each call, so we
+     * MUST NOT call it again after the first successful registration. */
+    bool gap_available = true;
+
+    if (!s_bt_registered) {
+        ret = esp_ble_gap_register_callback(gap_event_cb);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "GAP register callback failed: %s (likely BLE Native conflict)",
+                     esp_err_to_name(ret));
+            gap_available = false;
+        }
+
+        ret = esp_ble_gattc_register_callback(gattc_event_cb);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "GATTC register callback failed: %s", esp_err_to_name(ret));
+            return ret;
+        }
+
+        ret = esp_ble_gattc_app_register(GATTC_APP_ID);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "GATTC app register failed: %s", esp_err_to_name(ret));
+            return ret;
+        }
+
+        s_bt_registered = true;
+        if (!gap_available) {
+            ESP_LOGW(TAG, "GAP unavailable (BLE Native conflict) — scan/connect disabled");
+        }
     }
 
-    ret = esp_ble_gattc_app_register(GATTC_APP_ID);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "GATTC app register failed: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    /* Start uplink/downlink tasks */
+    /* Start uplink/downlink tasks (always start these, even if GAP unavailable) */
     ret = ble_gatt_uplink_task_start();
     if (ret != ESP_OK) return ret;
 
@@ -475,7 +613,7 @@ esp_err_t ble_gatt_handler_init(void) {
     if (ret != ESP_OK) return ret;
 
     s_initialized = true;
-    ESP_LOGI(TAG, "BLE GATT Central initialized (CFBG: prefix)");
+    ESP_LOGI(TAG, "BLE GATT Central initialized (CFBG: prefix ready)");
     return ESP_OK;
 }
 
@@ -538,4 +676,57 @@ void ble_gatt_handler_report_scan_result(uint8_t stack_id,
 
 void ble_gatt_handler_set_pending_stack(uint8_t stack_id) {
     s_pending_stack_id = stack_id;
+}
+
+/**
+ * @brief Deinitialize the BLE GATT Central handler.
+ *
+ * Disconnects all devices, stops advertising, and unregisters callbacks.
+ * Safe to call even if not initialized.
+ */
+esp_err_t ble_gatt_handler_deinit(void) {
+    if (!s_initialized) {
+        ESP_LOGW(TAG, "BLE GATT handler not initialized, nothing to deinit");
+        return ESP_OK;
+    }
+
+    ESP_LOGI(TAG, "Deinitializing BLE GATT handler...");
+
+    /* Stop advertising */
+    ESP_LOGI(TAG, "Stopping BLE advertisement");
+    esp_ble_gap_stop_advertising();
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    /* Disconnect all devices */
+    if (s_devices) {
+        ESP_LOGI(TAG, "Disconnecting all GATT devices");
+        for (int i = 0; i < BLE_GATT_MAX_DEVICES; i++) {
+            if (s_devices[i].valid && s_devices[i].conn_id != 0xFFFF) {
+                esp_ble_gattc_close(s_gattc_if, s_devices[i].conn_id);
+            }
+        }
+        ble_gatt_handler_clear_devices();
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    /* Unregister GATTC app */
+    if (s_gattc_if != ESP_GATT_IF_NONE && s_bt_registered) {
+        ESP_LOGI(TAG, "Unregistering GATT application");
+        esp_ble_gattc_app_unregister(s_gattc_if);
+        s_gattc_if = ESP_GATT_IF_NONE;
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    /* Unregister GAP callback */
+    if (s_bt_registered) {
+        ESP_LOGI(TAG, "Unregistering GAP callback");
+        esp_ble_gap_register_callback(NULL);
+        esp_ble_gattc_register_callback(NULL);
+        s_bt_registered = false;
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    s_initialized = false;
+    ESP_LOGI(TAG, "BLE GATT handler deinitialized successfully");
+    return ESP_OK;
 }

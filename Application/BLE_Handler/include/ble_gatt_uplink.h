@@ -18,7 +18,7 @@ extern "C" {
 #endif
 
 #define BLE_GATT_UPLINK_QUEUE_DEPTH  16
-#define BLE_GATT_UPLINK_MSG_MAX      512
+#define BLE_GATT_UPLINK_MSG_MAX      2048
 
 /**
  * @brief Start the uplink task.  Called from ble_gatt_handler_init().

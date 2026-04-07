@@ -17,6 +17,13 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+/**
+ * Set to 1 when BLE Mesh provisioner feature is fully validated and ready
+ * for production use. Keep at 0 to return NOT_SUPPORTED to all callers and
+ * to skip esp_ble_mesh_init() so the mesh stack never starts BLE scanning.
+ */
+#define BLE_NATIVE_MESH_SUPPORTED  0
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -31,6 +38,17 @@ extern "C" {
  * @return ESP_OK on success
  */
 esp_err_t ble_native_handler_init(void);
+
+/**
+ * @brief Deinitialize the ESP BLE Mesh stack.
+ *
+ * Stops uplink/downlink tasks, deinitializes the BLE Mesh provisioner,
+ * and deinitializes the mesh stack. Safe to call even if not initialized.
+ * Call this before switching to a different BLE mode.
+ *
+ * @return ESP_OK on success
+ */
+esp_err_t ble_native_handler_deinit(void);
 
 /**
  * @brief Load JSON configuration for one BLE Native stack.
@@ -72,6 +90,34 @@ esp_err_t ble_native_handler_execute(const uint8_t *data, uint16_t len);
  * @return Pointer to model, or NULL if not registered
  */
 esp_ble_mesh_model_t *ble_native_get_model(uint16_t model_id);
+
+/**
+ * @brief Clear the scan accumulation buffer before starting a new scan.
+ *        Called from ble_native_downlink.c handle_scan().
+ */
+void ble_native_scan_reset(uint8_t stack_id);
+
+/**
+ * @brief Send all accumulated UNPROV_DEV results as a single batched uplink.
+ *        Called from ble_native_downlink.c after the scan timer expires.
+ */
+void ble_native_scan_flush(void);
+
+/**
+ * @brief Arm the provision-complete semaphore before calling add_unprov_dev.
+ *        Called from ble_native_downlink.c handle_provision().
+ */
+esp_err_t ble_native_start_provision_wait(void);
+
+/**
+ * @brief Block until PROVISIONER_PROV_COMPLETE_EVT fires or timeout expires.
+ *        Called from ble_native_downlink.c handle_provision() after add_unprov_dev.
+ *
+ * @param addr_out  Receives the unicast address assigned by the stack.
+ * @param timeout_ms  Maximum wait in milliseconds.
+ * @return ESP_OK on success, ESP_ERR_TIMEOUT on failure.
+ */
+esp_err_t ble_native_wait_provision_complete(uint16_t *addr_out, uint32_t timeout_ms);
 
 #ifdef __cplusplus
 }

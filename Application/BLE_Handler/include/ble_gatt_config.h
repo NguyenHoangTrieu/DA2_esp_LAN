@@ -27,7 +27,7 @@ extern "C" {
  * Sizing constants
  * -------------------------------------------------------------------------- */
 #define BLE_GATT_MAX_STACKS      2   /**< Parallel GATT Central stacks */
-#define BLE_GATT_MAX_DEVICES     8   /**< Scanned / connected device slots */
+#define BLE_GATT_MAX_DEVICES     32  /**< Scanned / connected device slots (PSRAM) */
 #define BLE_GATT_MAX_CHARS       32  /**< Per-device characteristic cache */
 #define BLE_GATT_DEV_NAME_LEN    32  /**< Max device name length          */
 #define BLE_GATT_MAX_SERVICES    12  /**< Per-device service cache         */

@@ -36,7 +36,8 @@ static const char *BLE_FUNCTION_NAMES[JSON_BLE_FUNC_MAX] = {
     "MODULE_SEND_DATA",
     "MODULE_GET_DIAGNOSTICS",
     "MODULE_DISCOVER_SERVICES",
-    "MODULE_DISCOVER_CHARACTERISTICS"
+    "MODULE_DISCOVER_CHARACTERISTICS",
+    "MODULE_NOTIFY"
 };
 
 /* ============================================================================

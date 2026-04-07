@@ -43,6 +43,6 @@ void config_parse_ble_gatt_command(const char *data, uint16_t len) {
         ESP_LOGE(TAG, "CMD: payload too short");
         return;
     }
-    ESP_LOGD(TAG, "Routing CFBG command: %.*s", (int)len, data);
+    ESP_LOGI(TAG, "Routing CFBG command: %.*s", (int)len, data);
     ble_gatt_handler_execute((const uint8_t *)data, len);
 }

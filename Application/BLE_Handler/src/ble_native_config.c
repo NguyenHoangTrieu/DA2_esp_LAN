@@ -232,3 +232,21 @@ esp_err_t ble_native_config_alloc_unicast(uint8_t stack_id, uint16_t *addr_out) 
     mc->next_unicast_addr++;
     return ESP_OK;
 }
+
+uint8_t ble_native_config_get_num_cmds(uint8_t stack_id) {
+    if (stack_id >= BLE_NATIVE_MAX_STACKS) return 0;
+    return s_cfg[stack_id].num_commands;
+}
+
+esp_err_t ble_native_config_get_cmd_by_index(uint8_t stack_id,
+                                               uint8_t index,
+                                               ble_native_cmd_entry_t *out) {
+    if (stack_id >= BLE_NATIVE_MAX_STACKS || !out) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (index >= s_cfg[stack_id].num_commands) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    memcpy(out, &s_cfg[stack_id].commands[index], sizeof(*out));
+    return ESP_OK;
+}

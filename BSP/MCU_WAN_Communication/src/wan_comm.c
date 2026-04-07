@@ -408,7 +408,7 @@ wan_comm_status_t wan_comm_send_command(wan_comm_handle_t handle,
     }
     
     handle->packets_sent++;
-    ESP_LOGI(TAG, "SPI TX: CF %u bytes (total=%lu)", total_length, handle->packets_sent);
+    ESP_LOGD(TAG, "SPI TX: CF %u bytes (total=%lu)", total_length, handle->packets_sent);
     
     return WAN_COMM_OK;
 }
@@ -462,7 +462,7 @@ wan_comm_status_t wan_comm_send_data(wan_comm_handle_t handle,
     }
     
     handle->packets_sent++;
-    ESP_LOGI(TAG, "SPI TX: DT %u bytes (total=%lu)", total_length, handle->packets_sent);
+    ESP_LOGD(TAG, "SPI TX: DT %u bytes (total=%lu)", total_length, handle->packets_sent);
     
     return WAN_COMM_OK;
 }
@@ -531,7 +531,7 @@ wan_comm_status_t wan_comm_request_data(wan_comm_handle_t handle,
             copy_len = transfer_len;
         }
         memcpy(rx_buffer, handle->rx_buffer, copy_len);
-        ESP_LOGI(TAG, "SPI RX: DQ %u bytes (xfer=%u)", copy_len, transfer_len);
+        ESP_LOGD(TAG, "SPI RX: DQ %u bytes (xfer=%u)", copy_len, transfer_len);
     }
     
     xSemaphoreGive(handle->transfer_mutex);
@@ -687,7 +687,7 @@ static esp_err_t dma_buffer_add_frame(wan_comm_handle_t handle, const uint8_t *f
         handle->dma_tx.used += len;
         handle->dma_tx.frame_count++;
         
-        ESP_LOGI(TAG, "Frame added to DMA buffer: %zu bytes (%zu/%d used, %lu frames)",
+        ESP_LOGD(TAG, "Frame added to DMA buffer: %zu bytes (%zu/%d used, %lu frames)",
                  len, handle->dma_tx.used, WAN_COMM_DMA_BUFFER_SIZE, handle->dma_tx.frame_count);
         
         return ESP_OK;
@@ -724,17 +724,17 @@ static esp_err_t dma_buffer_add_frame(wan_comm_handle_t handle, const uint8_t *f
  */
 static esp_err_t dma_buffer_flush(wan_comm_handle_t handle) {
     if (handle->dma_tx.used == 0) {
-        ESP_LOGI(TAG, "DMA buffer empty, nothing to flush");
+        ESP_LOGD(TAG, "DMA buffer empty, nothing to flush");
         return ESP_OK;
     }
     
-    ESP_LOGI(TAG, "Flushing DMA buffer: %zu bytes, %lu frames",
+    ESP_LOGD(TAG, "Flushing DMA buffer: %zu bytes, %lu frames",
              handle->dma_tx.used, handle->dma_tx.frame_count);
     
     // Debug: Dump DMA buffer content before flush
-    ESP_LOG_BUFFER_HEXDUMP(TAG, handle->dma_tx.buffer, 
-                          handle->dma_tx.used > 64 ? 64 : handle->dma_tx.used, 
-                          ESP_LOG_INFO);
+    // ESP_LOG_BUFFER_HEXDUMP(TAG, handle->dma_tx.buffer, 
+    //                       handle->dma_tx.used > 64 ? 64 : handle->dma_tx.used, 
+    //                       ESP_LOG_INFO);
     
     // Pad to fixed transfer length and 4-byte alignment
     size_t aligned_size = DMA_ALIGN_SIZE(handle->dma_tx.used);
@@ -744,7 +744,7 @@ static esp_err_t dma_buffer_flush(wan_comm_handle_t handle) {
     if (aligned_size > handle->dma_tx.used) {
         size_t padding = aligned_size - handle->dma_tx.used;
         memset(&handle->dma_tx.buffer[handle->dma_tx.used], 0x00, padding);
-        ESP_LOGI(TAG, "Added %zu bytes padding for DMA alignment", padding);
+        ESP_LOGD(TAG, "Added %zu bytes padding for DMA alignment", padding);
     }
     
     // Setup SPI transaction
@@ -759,7 +759,7 @@ static esp_err_t dma_buffer_flush(wan_comm_handle_t handle) {
     
     if (ret == ESP_OK) {
         handle->dma_flushes++;
-        ESP_LOGI(TAG, "DMA buffer flushed successfully (flush #%lu)", handle->dma_flushes);
+        ESP_LOGD(TAG, "DMA buffer flushed successfully (flush #%lu)", handle->dma_flushes);
         
         // Reset buffer
         handle->dma_tx.used = 0;

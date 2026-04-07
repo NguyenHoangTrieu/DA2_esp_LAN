@@ -163,14 +163,26 @@ esp_err_t storage_handler_deinit(void) {
 
   ESP_LOGI(TAG, "Deinitializing storage handler");
 
-  /* Stop and delete timer */
+  /* Stop and delete timer FIRST, before touching any state.
+   * xTimerStop() only posts to the Timer Service queue — it does NOT
+   * synchronously wait for a running callback to finish.  If the callback
+   * is mid-execution and holds g_storage_mutex when vSemaphoreDelete() is
+   * called below, picolibc's _lock_close asserts because the mutex owner
+   * is not NULL.
+   *
+   * Fix: stop with a generous timeout so the Timer Service has time to
+   * process the stop command, then take the mutex (which blocks until any
+   * running callback releases it) before proceeding with teardown. */
   if (g_flush_timer != NULL) {
-    xTimerStop(g_flush_timer, pdMS_TO_TICKS(100));
-    xTimerDelete(g_flush_timer, pdMS_TO_TICKS(100));
+    /* Wait up to 200ms for the Timer Service to process the stop */
+    xTimerStop(g_flush_timer, pdMS_TO_TICKS(200));
+    /* Block up to 200ms more to let any in-progress callback finish */
+    xTimerDelete(g_flush_timer, pdMS_TO_TICKS(200));
     g_flush_timer = NULL;
   }
 
-  /* Take mutex and flush any pending data */
+  /* Take mutex — if the timer callback was running and held the mutex,
+   * this blocks until it is released, guaranteeing callback is done. */
   if (xSemaphoreTake(g_storage_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
     if (g_batch_buffer->write_pos > 0) {
       ESP_LOGI(TAG, "Flushing pending batch buffer: %u bytes",
@@ -180,11 +192,24 @@ esp_err_t storage_handler_deinit(void) {
     xSemaphoreGive(g_storage_mutex);
   }
 
+  /* Close any open retry file before unmounting */
+  if (g_retry_file != NULL) {
+    fclose(g_retry_file);
+    g_retry_file = NULL;
+  }
+
   /* Deinitialize SD card */
   sd_card_deinit();
 
-  /* Delete mutex */
+  /* Acquire mutex one last time to confirm no other task holds it,
+   * then delete it while we still own it — this is the only safe way
+   * to destroy a mutex: the owner calls delete, not a non-owner. */
   if (g_storage_mutex != NULL) {
+    xSemaphoreTake(g_storage_mutex, pdMS_TO_TICKS(200));
+    /* NOTE: vSemaphoreDelete while holding the semaphore is intentional here.
+     * The mutex is being torn down; no other task should be acquiring it
+     * after storage_handler_deinit() is called. Holding it prevents any
+     * last-moment acquire from succeeding before we delete. */
     vSemaphoreDelete(g_storage_mutex);
     g_storage_mutex = NULL;
   }
@@ -199,6 +224,7 @@ esp_err_t storage_handler_deinit(void) {
   ESP_LOGI(TAG, "Storage handler deinitialized");
   return ESP_OK;
 }
+
 
 esp_err_t storage_handler_save(const uint8_t *data, uint16_t length) {
   if (!g_storage_initialized) {
@@ -481,7 +507,10 @@ esp_err_t storage_handler_prepare_retry(void) {
     return ESP_FAIL;
   }
 
-  g_retry_offset = 0;
+  /* Skip the 4-byte big-endian length header that sd_card_save() prepends.
+   * The batch buffer content starts at byte 4 and uses 2-byte per-packet
+   * length prefixes read by get_next_packet. */
+  g_retry_offset = 4;
   ESP_LOGI(TAG, "Opened retry file: %s", g_retry_path);
 
   xSemaphoreGive(g_storage_mutex);

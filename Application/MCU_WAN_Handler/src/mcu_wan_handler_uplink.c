@@ -23,7 +23,7 @@ static const char *TAG = "WAN_UL";
  * than sufficient — the SPI link can only transfer one packet per ~200 ms. */
 #define UPLINK_QUEUE_SIZE 5
 #define MAX_PAYLOAD_SIZE 2048
-#define ACK_TIMEOUT_MS 200
+#define ACK_TIMEOUT_MS 2000  /* STM32 forwards DT to ThingsBoard via MQTT before ACKing; 200ms was too short */
 #define RTC_REQUEST_INTERVAL_MS 1000
 #define MAX_RETRY_COUNT 3
 #define HANDSHAKE_INTERVAL_MS 1000
@@ -71,6 +71,12 @@ static uint32_t g_uplink_fail_count = 0;
 static uint32_t g_sd_backup_count = 0;
 static uint32_t g_sd_retry_success_count = 0;
 
+/* Shared with downlink task: tick when last CF command was dispatched.
+ * Uplink task suppresses SD retry for CF_SD_SUPPRESS_MS after each CF dispatch
+ * to prevent stale SD packets from being returned as the CF RPC response. */
+volatile TickType_t g_last_cf_dispatch_tick = 0;
+#define CF_SD_SUPPRESS_MS 3000
+
 // FORWARD DECLARATIONS
 
 static void uplink_handler_task(void *pvParameters);
@@ -80,8 +86,6 @@ static esp_err_t send_data_to_wan(const uint8_t *data, uint16_t length,
                                   ack_type_t *ack_out);
 static void build_data_packet(const uplink_item_t *item, uint8_t *packet,
                               uint16_t *packet_len);
-static const char *handler_id_to_string(handler_id_t id);
-
 // Downlink
 esp_err_t mcu_wan_handler_start_downlink_task(void);
 void mcu_wan_handler_stop_downlink_task(void);
@@ -295,6 +299,8 @@ static void uplink_handler_task(void *pvParameters) {
             storage_handler_save(packet, packet_len);
             g_uplink_fail_count++;
             g_sd_backup_count++;
+            /* Delay SD retry so batch buffer has time to flush to a real file */
+            last_sd_retry_attempt = xTaskGetTickCount();
           }
         } else {
           ESP_LOGW(TAG, "Internet offline, saving to SD card");
@@ -311,6 +317,16 @@ static void uplink_handler_task(void *pvParameters) {
         // Rate limiting: Only retry every SD_RETRY_DELAY_MS
         if ((now - last_sd_retry_attempt) < pdMS_TO_TICKS(SD_RETRY_DELAY_MS)) {
           // Skip this iteration - wait for delay period
+          goto skip_sd_retry;
+        }
+
+        // Suppress SD retry for CF_SD_SUPPRESS_MS after a CF command was
+        // dispatched to give the BLE stack time to complete the operation and
+        // queue the real uplink response before SD stale data is sent.
+        if (g_last_cf_dispatch_tick != 0 &&
+            (now - g_last_cf_dispatch_tick) < pdMS_TO_TICKS(CF_SD_SUPPRESS_MS)) {
+          ESP_LOGD(TAG, "SD retry suppressed — CF dispatched %lums ago",
+                   (unsigned long)((now - g_last_cf_dispatch_tick) * portTICK_PERIOD_MS));
           goto skip_sd_retry;
         }
         
@@ -386,7 +402,7 @@ skip_sd_retry:
 
       if ((now - last_rtc_request) >= pdMS_TO_TICKS(RTC_REQUEST_INTERVAL_MS)) {
         if (request_rtc_and_status() == ESP_OK) {
-          ESP_LOGI(TAG, "RTC and Internet status updated");
+          ESP_LOGD(TAG, "RTC and Internet status updated");
         }
         last_rtc_request = now;
       }
@@ -512,7 +528,7 @@ static esp_err_t request_rtc_and_status(void) {
     // Update internet status
     g_internet_status = (internet_status_t)response[22];
 
-    ESP_LOGI(TAG, "RTC: %s, Internet: %s", g_rtc_cache.rtc_string,
+    ESP_LOGD(TAG, "RTC: %s, Internet: %s", g_rtc_cache.rtc_string,
              g_internet_status ? "ONLINE" : "OFFLINE");
 
     return ESP_OK;
@@ -560,9 +576,15 @@ static esp_err_t send_data_to_wan(const uint8_t *data, uint16_t length,
           ack_response[1] == ACK_TYPE_RECEIVED_OK) {
 
         *ack_out = (ack_type_t)ack_response[2];
-        ESP_LOGI(TAG, "ACK received: %s",
-                 (*ack_out == ACK_TYPE_INTERNET_OK) ? "INTERNET_OK"
-                                                    : "NO_INTERNET");
+        /* STM32 may return boolean 0x01/0x00 instead of enum 0x12/0x13 —
+         * normalise: any non-zero internet byte = INTERNET_OK */
+        if (*ack_out != ACK_TYPE_INTERNET_OK && *ack_out != ACK_TYPE_NO_INTERNET) {
+          *ack_out = (ack_response[2] != 0) ? ACK_TYPE_INTERNET_OK
+                                            : ACK_TYPE_NO_INTERNET;
+        }
+        ESP_LOGI(TAG, "ACK received: %s (ack=0x%02X internet=0x%02X)",
+                 (*ack_out == ACK_TYPE_INTERNET_OK) ? "INTERNET_OK" : "NO_INTERNET",
+                 ack_response[1], ack_response[2]);
         return ESP_OK;
       }
 
