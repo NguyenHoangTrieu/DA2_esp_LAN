@@ -82,6 +82,7 @@ esp_err_t tca_init_inst(tca6416a_inst_t *inst, uint8_t i2c_addr, int int_gpio) {
     tca_configure_port_inst(inst, TCA_PORT_0, 0xFF);
     tca_configure_port_inst(inst, TCA_PORT_1, 0xFF);
 
+    inst->i2c_addr    = i2c_addr;
     inst->initialized = true;
     ESP_LOGI(TAG, "TCA6416A 0x%02X ready", i2c_addr);
     return ESP_OK;
@@ -164,10 +165,11 @@ esp_err_t tca_set_pin_verified_inst(tca6416a_inst_t *inst, tca_port_t port,
         if (ret != ESP_OK) return ret;
         bool got = (readback & (1u << pin)) != 0;
         if (got == level) {
-            ESP_LOGI(TAG, "P%d_%d = %d VERIFIED (reg=0x%02X)", port, pin, level, readback);
+            ESP_LOGI(TAG, "[0x%02X] P%d_%d = %d VERIFIED (reg=0x%02X)",
+                     inst->i2c_addr, port, pin, level, readback);
         } else {
-            ESP_LOGE(TAG, "P%d_%d VERIFY FAILED: expected %d got %d (reg=0x%02X)",
-                     port, pin, level, (int)got, readback);
+            ESP_LOGE(TAG, "[0x%02X] P%d_%d VERIFY FAILED: expected %d got %d (reg=0x%02X)",
+                     inst->i2c_addr, port, pin, level, (int)got, readback);
             return ESP_ERR_INVALID_RESPONSE;
         }
     } else {
@@ -224,4 +226,36 @@ esp_err_t tca_init(void) {
     }
     ESP_LOGI(TAG, "TCA6416A preparation complete (instances will be initialized by stack_handler)");
     return ESP_OK;
+}
+
+esp_err_t tca_probe_slotdet(uint8_t i2c_addr, bool *slotdet) {
+    if (!slotdet) return ESP_ERR_INVALID_ARG;
+    if (!i2c_dev_support_is_initialized()) return ESP_ERR_INVALID_STATE;
+
+    i2c_master_dev_handle_t handle = NULL;
+    esp_err_t ret = i2c_dev_support_add_device(i2c_addr, TCA6416A_I2C_FREQ_HZ, &handle);
+    if (ret != ESP_OK) return ret;
+
+    /* Probe: read CONFIG_PORT0 — NACK if no device at this address */
+    uint8_t dummy;
+    uint8_t reg = TCA6416A_CONFIG_PORT0;
+    ret = i2c_dev_support_write_read(handle, &reg, 1, &dummy, 1, 100);
+    if (ret != ESP_OK) {
+        i2c_dev_support_remove_device(handle);
+        ESP_LOGD(TAG, "Probe 0x%02X: not found", i2c_addr);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    /* Read INPUT_PORT1 — P17 (bit 7) is IOX_SLOTDET */
+    uint8_t port1_val = 0;
+    reg = TCA6416A_INPUT_PORT1;
+    ret = i2c_dev_support_write_read(handle, &reg, 1, &port1_val, 1, 100);
+    if (ret == ESP_OK) {
+        *slotdet = (port1_val >> 7) & 0x01;
+        ESP_LOGD(TAG, "Probe 0x%02X: PORT1=0x%02X SLOTDET=%d",
+                 i2c_addr, port1_val, (int)*slotdet);
+    }
+
+    i2c_dev_support_remove_device(handle);
+    return ret;
 }

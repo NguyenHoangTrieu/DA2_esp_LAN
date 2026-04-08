@@ -43,14 +43,15 @@ void app_main(void)
 
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    init_led_strip();
-    led_on();
     ESP_ERROR_CHECK(i2c_dev_support_init());
     ESP_ERROR_CHECK(tca_init());
     
     ESP_ERROR_CHECK(stack_handler_init());
     ESP_LOGI(TAG, "Stack handler initialized");
-    
+    stack_handler_gpio_set_direction(0, STACK_GPIO_PIN_04, true);
+    stack_handler_gpio_set_direction(1, STACK_GPIO_PIN_04, true);
+    stack_handler_gpio_write(0, STACK_GPIO_PIN_04, true); // ADAPTER POWER ON
+    stack_handler_gpio_write(1, STACK_GPIO_PIN_04, true); // ADAPTER POWER ON
     config_init();
     config_handler_task_start();
     ESP_LOGI(TAG, "Config handler started");

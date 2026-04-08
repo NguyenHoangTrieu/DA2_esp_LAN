@@ -8,6 +8,9 @@ CONFIG_LWIP_TCP_RECVMBOX_SIZE=16
 CONFIG_LWIP_TCP_RTO_TIME=500
 # Allow mbedTLS to use PSRAM for SSL context allocation (~50KB needed for TLS handshake)
 CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+
+# Allow esp_https_ota to work with plain HTTP URLs (ThingsBoard local HTTP mode).
+CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP=y
 # --- OTA connection stability fixes ---
 # LCP Echo: detect dead PPP link within 15s (5s interval × 3 fails)
 # instead of waiting 388s for TCP RTO chain to expire.

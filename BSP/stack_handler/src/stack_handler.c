@@ -25,10 +25,13 @@ static bool              g_slot_present[STACK_HANDLER_MAX_STACKS];
 static SemaphoreHandle_t g_stack_mutex[STACK_HANDLER_MAX_STACKS];
 static bool              g_initialized = false;
 
-/* Fixed I2C address and INT GPIO per slot */
-static const uint8_t k_i2c_addr[STACK_HANDLER_MAX_STACKS] = {
-    TCA6416A_I2C_ADDR_0,   /* Slot 0 (LAN1): ADDR=GND â†’ 0x20 */
-    TCA6416A_I2C_ADDR_1,   /* Slot 1 (LAN2): ADDR=VCC â†’ 0x21 */
+/* Fixed I2C addresses to scan and INT GPIO per slot.
+ * INT GPIOs are physically wired per slot connector on the LAN MCU board.
+ * I2C addresses are NOT assumed to match slot index — assignment is determined
+ * by reading P17 (SLOTDET) during the probe phase. */
+static const uint8_t k_scan_addrs[] = {
+    TCA6416A_I2C_ADDR_0,   /* 0x20 */
+    TCA6416A_I2C_ADDR_1,   /* 0x21 */
 };
 static const int k_int_gpio[STACK_HANDLER_MAX_STACKS] = {
     TCA6416A_INT_PIN_LAN1, /* Slot 0 INT: GPIO47 */
@@ -80,29 +83,46 @@ esp_err_t stack_handler_init(void) {
         }
     }
 
-    /* Probe each adapter slot */
-    for (int slot = 0; slot < STACK_HANDLER_MAX_STACKS; slot++) {
-        esp_err_t ret = tca_init_inst(&g_tca[slot], k_i2c_addr[slot], k_int_gpio[slot]);
+    /* ---- Phase 1: scan all candidate addresses, assign by P17 (SLOTDET) ---- */
+    uint8_t addr_for_slot[STACK_HANDLER_MAX_STACKS];
+    bool    slot_found[STACK_HANDLER_MAX_STACKS];
+    memset(addr_for_slot, 0xFF, sizeof(addr_for_slot));
+    memset(slot_found,    0,    sizeof(slot_found));
+
+    for (int i = 0; i < (int)(sizeof(k_scan_addrs) / sizeof(k_scan_addrs[0])); i++) {
+        uint8_t addr = k_scan_addrs[i];
+        bool slotdet = false;
+        esp_err_t ret = tca_probe_slotdet(addr, &slotdet);
         if (ret != ESP_OK) {
-            ESP_LOGI(TAG, "Slot %d: no adapter (0x%02X not found)", slot, k_i2c_addr[slot]);
+            ESP_LOGI(TAG, "Scan 0x%02X: not present", addr);
             continue;
         }
+        int slot = slotdet ? 1 : 0;
+        ESP_LOGI(TAG, "Scan 0x%02X: found, SLOTDET=%d → slot %d", addr, (int)slotdet, slot);
+        if (slot_found[slot]) {
+            ESP_LOGE(TAG, "Address collision: two adapters claim slot %d, ignoring 0x%02X", slot, addr);
+            continue;
+        }
+        addr_for_slot[slot] = addr;
+        slot_found[slot] = true;
+    }
 
+    /* ---- Phase 2: full init for each discovered slot ---- */
+    for (int slot = 0; slot < STACK_HANDLER_MAX_STACKS; slot++) {
+        if (!slot_found[slot]) {
+            ESP_LOGI(TAG, "Slot %d: no adapter detected", slot);
+            continue;
+        }
+        esp_err_t ret = tca_init_inst(&g_tca[slot], addr_for_slot[slot], k_int_gpio[slot]);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Slot %d: full init at 0x%02X failed: %s",
+                     slot, addr_for_slot[slot], esp_err_to_name(ret));
+            continue;
+        }
         g_slot_present[slot] = true;
-
-        /* Sanity-check P17 (IOX_SLOTDET) */
-        bool slotdet = false;
-        tca_read_pin_inst(&g_tca[slot], TCA_PORT_1, 7 /* P17 = PORT_1 bit 7 */, &slotdet);
-        int expected = (slot == 1) ? 1 : 0;
-        if ((int)slotdet != expected)
-            ESP_LOGW(TAG, "Slot%d SLOTDET=%d, expected %d (wiring check?)",
-                     slot, (int)slotdet, expected);
-
-        /* Read module ID from P00-P03 */
         read_module_id(slot);
-
-        ESP_LOGI(TAG, "Slot %d: TCA6416A@0x%02X present, module_id=%s SLOTDET=%d",
-                 slot, k_i2c_addr[slot], g_module_id[slot], (int)slotdet);
+        ESP_LOGI(TAG, "Slot %d: TCA6416A@0x%02X ready, module_id=%s",
+                 slot, addr_for_slot[slot], g_module_id[slot]);
     }
 
     g_initialized = true;

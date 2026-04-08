@@ -57,6 +57,7 @@ typedef enum {
 typedef struct {
     i2c_master_dev_handle_t dev_handle;
     int                     int_gpio;
+    uint8_t                 i2c_addr;     /**< I2C address (0x20 or 0x21) for logging */
     bool                    initialized;
 } tca6416a_inst_t;
 
@@ -118,6 +119,26 @@ esp_err_t tca_read_output_register_inst(tca6416a_inst_t *inst, tca_port_t port, 
 
 /** @brief Write output register. */
 esp_err_t tca_write_output_register_inst(tca6416a_inst_t *inst, tca_port_t port, uint8_t value);
+
+/**
+ * @brief Probe an I2C address and read P17 (IOX_SLOTDET) without full initialisation.
+ *
+ * Does NOT configure any GPIO or register an ISR.  Used during boot to discover
+ * which adapter is plugged into which physical slot before committing to a full
+ * tca_init_inst() call with the correct INT GPIO.
+ *
+ * Internally:
+ *   1. Temporarily adds the device to the I2C bus.
+ *   2. Reads CONFIG_PORT0 to confirm the device is present (NACK = not found).
+ *   3. Reads INPUT_PORT1 to obtain P17 (bit 7 = SLOTDET).
+ *   4. Removes the device handle.
+ *
+ * @param i2c_addr  Address to probe (TCA6416A_I2C_ADDR_0 or TCA6416A_I2C_ADDR_1).
+ * @param slotdet   Output: P17 value — 0 = LAN1 (slot 0), 1 = LAN2 (slot 1).
+ *                  Only valid when ESP_OK is returned.
+ * @return ESP_OK if a TCA6416A is present; ESP_ERR_NOT_FOUND otherwise.
+ */
+esp_err_t tca_probe_slotdet(uint8_t i2c_addr, bool *slotdet);
 
 #ifdef __cplusplus
 }

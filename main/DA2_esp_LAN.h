@@ -15,7 +15,6 @@
 #include "driver/gpio.h"
 #include "driver/uart.h"
 
-#include "rbg_handler.h"
 #include "ble_handler.h"
 #include "ble_native_handler.h"
 #include "ble_gatt_handler.h"

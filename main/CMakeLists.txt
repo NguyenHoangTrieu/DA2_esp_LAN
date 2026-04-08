@@ -1,6 +1,5 @@
 file(GLOB I2C_DEVICES "../BSP/i2c_dev_support/src/*.c")
 idf_component_register(SRCS "DA2_esp_LAN.c"
-                            "../rbg_led_ws_handler/rbg_handler.c"
                             "../Application/FOTA_LAN/src/fota_lan_handler.c"
                             "../Application/MCU_WAN_Handler/src/mcu_wan_handler_uplink.c"
                             "../Application/MCU_WAN_Handler/src/mcu_wan_handler_downlink.c"
@@ -94,6 +93,5 @@ idf_component_register(SRCS "DA2_esp_LAN.c"
                                 "../Application/BLE_Handler/include"                                "../Application/LoRa_Handler/include"
                                 "../Application/Zigbee_Handler/include"
                                 "../Application/Module_Monitor_Task/include"
-                                "../rbg_led_ws_handler"
                     EMBED_TXTFILES ${project_dir}/server_certs/ca_cert.pem)
 

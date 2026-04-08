@@ -309,7 +309,7 @@ static void config_handler_task(void *arg) {
             ESP_OK) {
           ESP_LOGI(TAG, "Starting FOTA process...");
           // Start FOTA handler task
-          led_show_blue();
+          
           mcu_wan_handler_stop();
           lan_ppp_connect();
           fota_lan_handler_task_start();
