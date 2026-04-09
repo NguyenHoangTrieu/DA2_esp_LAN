@@ -5,8 +5,6 @@
  */
 #pragma once
 
-#include "esp_netif.h"
-
 #ifdef __cplusplus
 extern "C" {
 #endif
