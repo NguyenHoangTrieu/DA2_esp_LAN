@@ -18,6 +18,8 @@ TaskHandle_t main_task_handle = NULL;
 #define PPP_UART_PORT                  UART_NUM_0
 #define PPP_UART_TX_PIN                GPIO_NUM_43
 #define PPP_UART_RX_PIN                GPIO_NUM_44
+#define PPP_UART_RTS_PIN               GPIO_NUM_9   /* Flow control: request-to-send */
+#define PPP_UART_CTS_PIN               GPIO_NUM_14  /* Flow control: clear-to-send */
 #define PPP_UART_BAUDRATE              921600
 #define PPP_UART_QUEUE_SIZE            40
 #define PPP_UART_RX_BUFFER_SIZE        (32*1024)
@@ -115,9 +117,13 @@ void lan_ppp_connect(void) {
   config.uart.rx_buffer_size = PPP_UART_RX_BUFFER_SIZE;
   config.uart.queue_size = PPP_UART_QUEUE_SIZE;
   
-  /* Increase eppp_link task priority above LwIP (Priority 18) 
-   * to prevent UART FIFO overflow during heavy payload (OTA TLS recv). */
-  config.task.priority = 19;
+  /* Run eppp_link task at priority 17 — BELOW LwIP tcpip thread (priority 18).
+   * Previous priority 19 caused socket() to hang: eppp_link preempted LwIP
+   * continuously, flooding the tcpip mailbox so LwIP could never drain it.
+   * Any socket() call then blocked indefinitely waiting for LwIP to respond.
+   * Hardware flow control (RTS/CTS) now handles UART FIFO overflow instead,
+   * so the high priority is no longer needed. */
+  config.task.priority = 17;
 
   esp_netif_t *eppp_netif = eppp_connect(&config);
     if (eppp_netif == NULL) {
@@ -131,6 +137,18 @@ void lan_ppp_connect(void) {
    * the ISR long enough to overflow.  Threshold=16 fires every 0.17ms,
    * well within any realistic ISR latency budget. */
   uart_set_rx_full_threshold(PPP_UART_PORT, 16);
+
+  /* Assign RTS/CTS GPIO pins before enabling hardware flow control.
+   * eppp_connect() installs the UART driver without RTS/CTS pins, so we
+   * must call uart_set_pin() to wire the UART_RTS/CTS signals to GPIOs.
+   * Without this, uart_set_hw_flow_ctrl() enables the logic in the UART
+   * controller but RTS/CTS signals are not connected to any physical pin. */
+  uart_set_pin(PPP_UART_PORT, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE,
+               PPP_UART_RTS_PIN, PPP_UART_CTS_PIN);
+  uart_set_hw_flow_ctrl(PPP_UART_PORT, UART_HW_FLOWCTRL_CTS_RTS, 16);
+
+  ESP_LOGI(TAG, "PPP UART configured: port=%d, baud=%d, flow_control=RTS_CTS(GPIO%d/GPIO%d)",
+           PPP_UART_PORT, PPP_UART_BAUDRATE, PPP_UART_RTS_PIN, PPP_UART_CTS_PIN);
   // Get IP info
   esp_netif_ip_info_t ip_info;
   if (esp_netif_get_ip_info(eppp_netif, &ip_info) == ESP_OK) {

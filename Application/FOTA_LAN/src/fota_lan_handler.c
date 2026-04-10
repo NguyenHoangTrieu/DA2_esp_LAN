@@ -9,8 +9,10 @@
 #include "esp_heap_caps.h"
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
+#include <arpa/inet.h>
 #include <errno.h>
 #include <string.h>
+#include <sys/param.h>
 
 
 static const char *TAG = "lan_advanced_ota";
@@ -323,34 +325,58 @@ static void ble_disable_sync(void) {
 /* Verify PPP routing can reach the configured ThingsBoard server before
  * spending the full OTA download timeout on a failed connection. */
 static bool internet_reachable(void) {
+  ESP_LOGI(TAG, "[OTA-CHECK] Starting connectivity check to %s:%d",
+           FOTA_CONFIG_LAN_TB_HOST, FOTA_CONFIG_LAN_TB_PORT);
+  
   char port_str[8];
   snprintf(port_str, sizeof(port_str), "%d", FOTA_CONFIG_LAN_TB_PORT);
 
-  struct addrinfo hints = {.ai_family = AF_UNSPEC, .ai_socktype = SOCK_STREAM};
-  struct addrinfo *res = NULL;
-  if (getaddrinfo(FOTA_CONFIG_LAN_TB_HOST, port_str, &hints, &res) != 0 || !res) {
-    ESP_LOGW(TAG, "[OTA-CHECK] DNS failed for %s", FOTA_CONFIG_LAN_TB_HOST);
-    return false;
+  struct sockaddr_in server_addr = {0};
+  server_addr.sin_family = AF_INET;
+  server_addr.sin_port = htons(FOTA_CONFIG_LAN_TB_PORT);
+
+  /* Check if host is a dotted-decimal IP address first.
+   * If inet_aton() succeeds, skip DNS entirely (DNS might be slow or broken). */
+  if (inet_aton(FOTA_CONFIG_LAN_TB_HOST, &server_addr.sin_addr) == 1) {
+    ESP_LOGI(TAG, "[OTA-CHECK] Host is IP address, skipping DNS");
+  } else {
+    /* Not an IP address, try DNS resolution with timeout protection */
+    ESP_LOGI(TAG, "[OTA-CHECK] Resolving hostname %s via DNS...", FOTA_CONFIG_LAN_TB_HOST);
+    
+    struct addrinfo hints = {.ai_family = AF_INET, .ai_socktype = SOCK_STREAM};
+    struct addrinfo *res = NULL;
+    
+    int gai_err = getaddrinfo(FOTA_CONFIG_LAN_TB_HOST, port_str, &hints, &res);
+    if (gai_err != 0 || !res) {
+      ESP_LOGW(TAG, "[OTA-CHECK] DNS failed: %d", gai_err);
+      return false;
+    }
+    
+    /* Copy resolved address */
+    struct sockaddr_in *addr_in = (struct sockaddr_in *)res->ai_addr;
+    server_addr.sin_addr = addr_in->sin_addr;
+    freeaddrinfo(res);
   }
 
-  int sock = socket(res->ai_family, SOCK_STREAM, 0);
+  int sock = socket(AF_INET, SOCK_STREAM, 0);
   if (sock < 0) {
     ESP_LOGE(TAG, "[OTA-CHECK] socket() failed: errno=%d", errno);
-    freeaddrinfo(res);
     return false;
   }
+  ESP_LOGI(TAG, "[OTA-CHECK] socket created (fd=%d), setting timeouts...", sock);
 
   int timeout_ms = FOTA_CONFIG_LAN_CONNECTIVITY_CHECK_TIMEOUT_MS;
   struct timeval tv = {.tv_sec = timeout_ms / 1000,
                        .tv_usec = (timeout_ms % 1000) * 1000};
   setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
   setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+  ESP_LOGI(TAG, "[OTA-CHECK] timeouts set to %dms, attempting connect...", timeout_ms);
 
   uint32_t t0 = esp_log_timestamp();
-  int r = connect(sock, res->ai_addr, res->ai_addrlen);
+  int r = connect(sock, (struct sockaddr *)&server_addr, sizeof(server_addr));
   uint32_t ms = esp_log_timestamp() - t0;
+  ESP_LOGI(TAG, "[OTA-CHECK] connect() returned %d after %lums", r, (unsigned long)ms);
   close(sock);
-  freeaddrinfo(res);
 
   if (r == 0) {
     ESP_LOGI(TAG, "[OTA-CHECK] %s:%d reachable (%lums)",
@@ -366,29 +392,31 @@ static bool internet_reachable(void) {
 
 
 /* ------------------------------------------------------------------ */
-/*  OTA download via esp_http_client (ThingsBoard)                      */
+/*  OTA download via esp_http_client (ThingsBoard) — PSRAM-first        */
+/*                                                                      */
+/*  PHASE 1 — DOWNLOAD TO PSRAM:                                        */
+/*    Open HTTP and stream all bytes to a PSRAM buffer.  Zero flash     */
+/*    operations in this phase → eppp_link/LwIP run uninterrupted at   */
+/*    full TCP bandwidth.                                               */
+/*  PHASE 2 — FLASH FROM PSRAM:                                         */
+/*    Close HTTP first, then call esp_ota_begin()+write().  Flash erase */
+/*    (~27s) disables the cache and starves the eppp_link task, but     */
+/*    the download is already complete so PPP disruption is harmless.   */
+/*                                                                      */
+/*  Previous attempts at streaming download+flash simultaneously all   */
+/*  failed because esp_ota_begin/write disables the instruction cache   */
+/*  during sector erases, preventing eppp_link from draining the UART, */
+/*  which causes UART FIFO overflow and TCP stall within seconds.       */
+/*  The PSRAM approach was tried before but failed due to a separate    */
+/*  bug (eppp_link priority 19 > LwIP 18 starved the tcpip mailbox,    */
+/*  causing socket() to block indefinitely).  That is now fixed.       */
 /* ------------------------------------------------------------------ */
 static esp_err_t manual_ota_download(void) {
   ESP_LOGI(TAG, "[OTA] Downloading firmware from: %s",
            FOTA_CONFIG_LAN_FIRMWARE_UPGRADE_URL);
 
   esp_err_t ret = ESP_FAIL;
-  const esp_partition_t *update = esp_ota_get_next_update_partition(NULL);
-  if (!update) {
-    ESP_LOGE(TAG, "[OTA] No next OTA partition available");
-    return ESP_FAIL;
-  }
-
-  /* Allocate download buffer from PSRAM first, fall back to internal */
-  char *buf = (char *)heap_caps_malloc(OTA_DL_BUF_SIZE,
-                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (!buf) {
-    buf = (char *)malloc(OTA_DL_BUF_SIZE);
-    if (!buf) {
-      ESP_LOGE(TAG, "[OTA] OOM: download buffer");
-      return ESP_ERR_NO_MEM;
-    }
-  }
+  uint8_t *fw_buf = NULL;
 
   esp_http_client_config_t http_cfg = {
       .url            = FOTA_CONFIG_LAN_FIRMWARE_UPGRADE_URL,
@@ -407,14 +435,13 @@ static esp_err_t manual_ota_download(void) {
   esp_http_client_handle_t client = esp_http_client_init(&http_cfg);
   if (!client) {
     ESP_LOGE(TAG, "[OTA] esp_http_client_init failed");
-    free(buf);
     return ESP_FAIL;
   }
 
-  esp_err_t err = esp_http_client_open(client, 0); /* 0 = GET, no body */
+  esp_err_t err = esp_http_client_open(client, 0);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "[OTA] HTTP open failed: %s", esp_err_to_name(err));
-    goto cleanup;
+    goto cleanup_http;
   }
 
   int64_t content_len = esp_http_client_fetch_headers(client);
@@ -422,80 +449,111 @@ static esp_err_t manual_ota_download(void) {
   ESP_LOGI(TAG, "[OTA] HTTP %d, Content-Length: %lld", http_status, content_len);
 
   if (http_status != 200) {
-    ESP_LOGE(TAG, "[OTA] HTTP error %d (expected 200)", http_status);
-    goto cleanup;
+    ESP_LOGE(TAG, "[OTA] HTTP error %d", http_status);
+    goto cleanup_http;
+  }
+  if (content_len <= 0 || content_len > (4 * 1024 * 1024)) {
+    ESP_LOGE(TAG, "[OTA] Invalid content_len: %lld", content_len);
+    goto cleanup_http;
   }
 
-  esp_ota_handle_t ota_handle = 0;
-  bool ota_started = false;
-  err = esp_ota_begin(update, OTA_SIZE_UNKNOWN, &ota_handle);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "[OTA] esp_ota_begin: %s", esp_err_to_name(err));
-    goto cleanup;
+  fw_buf = (uint8_t *)heap_caps_malloc((size_t)content_len,
+                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!fw_buf) {
+    ESP_LOGE(TAG, "[OTA] PSRAM alloc failed for %lld bytes", content_len);
+    goto cleanup_http;
   }
-  ota_started = true;
+  ESP_LOGI(TAG, "[OTA] PSRAM buf allocated (%lld B). Downloading (no flash ops)...",
+           content_len);
 
+  /* ---- Phase 1: stream to PSRAM, zero flash operations ---- */
   int total = 0;
   uint32_t t0 = esp_log_timestamp();
-  while (true) {
-    int len = esp_http_client_read(client, buf, OTA_DL_BUF_SIZE);
-    if (len == 0) {
-      break; /* EOF */
-    }
+  while (total < (int)content_len) {
+    int want = MIN(OTA_DL_BUF_SIZE, (int)content_len - total);
+    int len = esp_http_client_read(client, (char *)(fw_buf + total), want);
+    if (len == 0) break;
     if (len < 0) {
-      ESP_LOGE(TAG, "[OTA] Read error: %d", len);
-      goto cleanup_ota;
-    }
-    err = esp_ota_write(ota_handle, (const void *)buf, len);
-    if (err != ESP_OK) {
-      ESP_LOGE(TAG, "[OTA] esp_ota_write: %s", esp_err_to_name(err));
-      goto cleanup_ota;
+      ESP_LOGE(TAG, "[OTA] Read error: %d (got %d/%lld)", len, total, content_len);
+      goto cleanup_http;
     }
     total += len;
     if (total % (64 * 1024) < OTA_DL_BUF_SIZE) {
-      ESP_LOGI(TAG, "[OTA] Progress: %d bytes downloaded", total);
+      ESP_LOGI(TAG, "[OTA] Download: %d / %lld B (%.1f%%)",
+               total, content_len, 100.0f * total / content_len);
+    }
+    taskYIELD(); /* let eppp_link/LwIP run between reads */
+  }
+  {
+    uint32_t dl_ms = esp_log_timestamp() - t0;
+    ESP_LOGI(TAG, "[OTA] Download done: %d B in %lums (%ld B/s)",
+             total, (unsigned long)dl_ms,
+             dl_ms ? (long)((int64_t)total * 1000 / dl_ms) : 0);
+  }
+  if (total != (int)content_len) {
+    ESP_LOGE(TAG, "[OTA] Incomplete: got %d, expected %lld", total, content_len);
+    goto cleanup_http;
+  }
+
+  /* Close HTTP before touching flash */
+  esp_http_client_close(client);
+  esp_http_client_cleanup(client);
+  client = NULL;
+
+  /* ---- Phase 2: erase + flash from PSRAM (network idle, disruption harmless) ---- */
+  const esp_partition_t *update = esp_ota_get_next_update_partition(NULL);
+  if (!update) {
+    ESP_LOGE(TAG, "[OTA] No OTA partition available");
+    goto cleanup_buf;
+  }
+
+  esp_ota_handle_t ota_handle = 0;
+  ESP_LOGI(TAG, "[OTA] HTTP closed. Erasing OTA partition (PPP disruption harmless now)...");
+  err = esp_ota_begin(update, (size_t)total, &ota_handle);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "[OTA] esp_ota_begin: %s", esp_err_to_name(err));
+    goto cleanup_buf;
+  }
+  ESP_LOGI(TAG, "[OTA] Writing %d bytes from PSRAM to flash...", total);
+
+  for (int offset = 0; offset < total; offset += OTA_DL_BUF_SIZE) {
+    int chunk = MIN(OTA_DL_BUF_SIZE, total - offset);
+    err = esp_ota_write(ota_handle, fw_buf + offset, chunk);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "[OTA] esp_ota_write @%d: %s", offset, esp_err_to_name(err));
+      esp_ota_abort(ota_handle);
+      goto cleanup_buf;
+    }
+    if (offset % (256 * 1024) < OTA_DL_BUF_SIZE) {
+      ESP_LOGI(TAG, "[OTA] Flash: %d / %d B", offset + chunk, total);
     }
   }
 
-  {
-    uint32_t dl_ms = esp_log_timestamp() - t0;
-    ESP_LOGI(TAG, "[OTA] Downloaded %d bytes in %lums (%ld B/s)", total,
-             (unsigned long)dl_ms,
-             dl_ms > 0 ? (long)(total * 1000L / dl_ms) : 0);
-  }
-
-  if (total == 0) {
-    ESP_LOGE(TAG, "[OTA] Zero bytes received");
-    goto cleanup_ota;
-  }
-
   err = esp_ota_end(ota_handle);
-  ota_started = false;
   if (err != ESP_OK) {
-    if (err == ESP_ERR_OTA_VALIDATE_FAILED)
-      ESP_LOGE(TAG, "[OTA] Image validation failed (corrupted firmware)");
-    else
-      ESP_LOGE(TAG, "[OTA] esp_ota_end: %s", esp_err_to_name(err));
-    goto cleanup;
+    ESP_LOGE(TAG, "[OTA] esp_ota_end: %s", esp_err_to_name(err));
+    goto cleanup_buf;
   }
 
   err = esp_ota_set_boot_partition(update);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "[OTA] set_boot_partition: %s", esp_err_to_name(err));
-    goto cleanup;
+    goto cleanup_buf;
   }
 
   ESP_LOGI(TAG, "[OTA] Flash complete! Rebooting into new firmware...");
   ret = ESP_OK;
-  goto cleanup;
 
-cleanup_ota:
-  if (ota_started)
-    esp_ota_abort(ota_handle);
-cleanup:
-  free(buf);
-  esp_http_client_close(client);
-  esp_http_client_cleanup(client);
+cleanup_buf:
+  free(fw_buf);
+  return ret;
+
+cleanup_http:
+  free(fw_buf);
+  if (client) {
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+  }
   return ret;
 }
 
@@ -882,9 +940,10 @@ void fota_lan_handler_task_start(void) {
            "Heap before OTA task: total=%d, internal=%d, internal_largest=%d",
            esp_get_free_heap_size(), internal_free, internal_largest);
 
-  const UBaseType_t ota_prio = 8; /* above WAN_DL(7) and WAN_UL(5) */
+  const UBaseType_t ota_prio = 5; /* must be <= PPP UART handler priority
+                                    * to avoid UART_FIFO_OVF during flash writes */
   BaseType_t ret = xTaskCreate(&advanced_ota_task, "advanced_ota_task",
-                               12 * 1024, NULL, ota_prio, NULL);
+                               32 * 1024, NULL, ota_prio, NULL);
   if (ret != pdPASS) {
     ESP_LOGW(TAG, "Internal RAM stack failed (largest=%d), retrying in PSRAM",
              internal_largest);
