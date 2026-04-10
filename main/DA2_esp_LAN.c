@@ -5,25 +5,10 @@
 #include "DA2_esp_LAN.h"
 #include "esp_bt.h"
 #include "esp_bt_main.h"
-#include "driver/uart.h"
 
 static const char *TAG = "MAIN APP";
 
 TaskHandle_t main_task_handle = NULL;
-
-// Transport Selection
-#define PPP_USE_UART_TRANSPORT         1
-
-// UART Configuration
-#define PPP_UART_PORT                  UART_NUM_0
-#define PPP_UART_TX_PIN                GPIO_NUM_43
-#define PPP_UART_RX_PIN                GPIO_NUM_44
-#define PPP_UART_BAUDRATE              921600
-#define PPP_UART_QUEUE_SIZE            40
-#define PPP_UART_RX_BUFFER_SIZE        (32*1024)
-
-// // Global DNS Server (8.8.8.8)
-// #define PPP_GLOBAL_DNS                 0x08080808
 
 /**
  * @brief Main application entry point
@@ -102,50 +87,4 @@ void app_main(void)
     while (1) {
       vTaskDelay(pdMS_TO_TICKS(1000));
     }
-}
-
-void lan_ppp_connect(void) {
-  // Initialize networking
-  ESP_ERROR_CHECK(esp_netif_init());
-  eppp_config_t config = EPPP_DEFAULT_CLIENT_CONFIG();
-  config.transport = EPPP_TRANSPORT_UART;
-  config.uart.port = PPP_UART_PORT;
-  config.uart.tx_io = PPP_UART_TX_PIN;
-  config.uart.rx_io = PPP_UART_RX_PIN;
-  config.uart.baud = PPP_UART_BAUDRATE;
-  config.uart.rx_buffer_size = PPP_UART_RX_BUFFER_SIZE;
-  config.uart.queue_size = PPP_UART_QUEUE_SIZE;
-  
-  /* Increase eppp_link task priority above LwIP (Priority 18) 
-   * to prevent UART FIFO overflow during heavy payload (OTA TLS recv). */
-  config.task.priority = 19;
-
-  esp_netif_t *eppp_netif = eppp_connect(&config);
-    if (eppp_netif == NULL) {
-        ESP_LOGE(TAG, "PPP connect failed");
-        return;
-    }
-  /* Lower UART RX FIFO full threshold from default 120 → 16 bytes.
-   * At 921600 baud, default threshold fires ISR every 1.30ms; a flash page
-   * program holds interrupts ~0.1ms so this is normally fine, but bursts
-   * from multiple high-priority tasks (BLE + LwIP) can cumulatively delay
-   * the ISR long enough to overflow.  Threshold=16 fires every 0.17ms,
-   * well within any realistic ISR latency budget. */
-  uart_set_rx_full_threshold(PPP_UART_PORT, 16);
-  // Get IP info
-  esp_netif_ip_info_t ip_info;
-  if (esp_netif_get_ip_info(eppp_netif, &ip_info) == ESP_OK) {
-    ESP_LOGI(TAG, "IP:      " IPSTR, IP2STR(&ip_info.ip));
-    ESP_LOGI(TAG, "Netmask: " IPSTR, IP2STR(&ip_info.netmask));
-    ESP_LOGI(TAG, "Gateway: " IPSTR, IP2STR(&ip_info.gw));
-  }
-
-  // Setup DNS
-  esp_netif_dns_info_t dns;
-  dns.ip.u_addr.ip4.addr = esp_netif_htonl(PPP_GLOBAL_DNS);
-  dns.ip.type = ESP_IPADDR_TYPE_V4;
-  ESP_ERROR_CHECK(esp_netif_set_dns_info(eppp_netif, ESP_NETIF_DNS_MAIN, &dns));
-  ESP_LOGI(TAG, "DNS:     " IPSTR, IP2STR(&dns.ip.u_addr.ip4));
-
-  vTaskDelay(1000);
 }

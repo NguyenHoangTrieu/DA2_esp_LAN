@@ -1,22 +1,150 @@
 /*
  * Advanced OTA Update Handler for ESP32
- * Direct TLS + raw HTTP/1.0 GET — bypasses esp_http_client broken path.
+ * Downloads firmware from ThingsBoard via the WAN MCU's FOTA WiFi AP.
+ *
+ * Flow:
+ *   1. BLE disabled (frees RF resources for WiFi).
+ *   2. Connect WiFi STA to WAN MCU's "DA2-FOTA" AP.
+ *   3. WAN MCU NATs traffic to internet → download from ThingsBoard.
+ *   4. Flash firmware from PSRAM buffer (no PPP disruption possible).
+ *   5. WiFi disconnected, device reboots into new firmware.
  */
 #include "fota_lan_handler.h"
+#include "config_handler.h"
 #include "esp_bt.h"
 #include "esp_bt_main.h"
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
+#include "esp_wifi.h"
+#include "freertos/event_groups.h"
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
+#include <arpa/inet.h>
 #include <errno.h>
 #include <string.h>
+#include <fcntl.h>
+#include <sys/param.h>
 
 
 static const char *TAG = "lan_advanced_ota";
 
 /* Download buffer for esp_http_client streaming */
 #define OTA_DL_BUF_SIZE 4096
+
+/* ------------------------------------------------------------------ */
+/*  FOTA WiFi AP connect / disconnect                                   */
+/* ------------------------------------------------------------------ */
+static EventGroupHandle_t s_wifi_eg     = NULL;
+static esp_netif_t       *s_wifi_netif  = NULL;
+#define WIFI_CONNECTED_BIT  BIT0
+#define WIFI_FAIL_BIT       BIT1
+
+static void fota_wifi_event_handler(void *arg, esp_event_base_t base,
+                                    int32_t id, void *data)
+{
+    if (base == WIFI_EVENT) {
+        if (id == WIFI_EVENT_STA_START) {
+            esp_wifi_connect();
+        } else if (id == WIFI_EVENT_STA_DISCONNECTED) {
+            ESP_LOGW(TAG, "[WiFi] Disconnected from FOTA AP");
+            xEventGroupSetBits(s_wifi_eg, WIFI_FAIL_BIT);
+        }
+    } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t *e = (ip_event_got_ip_t *)data;
+        ESP_LOGI(TAG, "[WiFi] FOTA AP connected, IP=" IPSTR,
+                 IP2STR(&e->ip_info.ip));
+        xEventGroupSetBits(s_wifi_eg, WIFI_CONNECTED_BIT);
+    }
+}
+
+/* fota_wifi_start() — MUST be called from a task whose stack is in
+ * internal RAM (not PSRAM).  esp_wifi_init() reads NVS calibration data
+ * via spi_flash, which calls spi_flash_disable_interrupts_caches_and_other_cpu().
+ * That function asserts if the current task stack is in PSRAM because
+ * the stack becomes inaccessible when the flash cache is disabled.
+ *
+ * Call this from fota_lan_handler_task_start() (runs on the config_handler
+ * task stack, which is always in internal RAM).  The OTA task then only
+ * calls fota_wifi_wait_connected() which is a plain event-group wait. */
+static esp_err_t fota_wifi_start(void)
+{
+    s_wifi_eg = xEventGroupCreate();
+    if (!s_wifi_eg) return ESP_ERR_NO_MEM;
+
+    /* Initialise the network stack (must be called once before any netif).
+     * Returns ESP_ERR_INVALID_STATE if already initialised — ignore that. */
+    esp_err_t ni = esp_netif_init();
+    if (ni != ESP_OK && ni != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "[WiFi] esp_netif_init failed: %s", esp_err_to_name(ni));
+        return ni;
+    }
+
+    /* netif must be created before esp_wifi_init — esp_wifi_init reads NVS
+     * (flash) so this entire function must run on an internal-RAM stack. */
+    s_wifi_netif = esp_netif_create_default_wifi_sta();
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
+                                fota_wifi_event_handler, NULL);
+    esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                                fota_wifi_event_handler, NULL);
+
+    wifi_config_t wcfg = {
+        .sta = {
+            .ssid     = FOTA_CONFIG_LAN_WIFI_AP_SSID,
+            .password = FOTA_CONFIG_LAN_WIFI_AP_PASS,
+            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
+        },
+    };
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wcfg));
+    /* esp_wifi_start() fires WIFI_EVENT_STA_START in the esp_event_loop
+     * task (internal RAM stack) → our handler calls esp_wifi_connect(). */
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    ESP_LOGI(TAG, "[WiFi] WiFi started, FOTA AP association in progress...");
+    return ESP_OK;
+}
+
+/* fota_wifi_wait_connected() — waits for the IP event set by the event
+ * handler.  Safe to call from a PSRAM-stacked task (no flash ops here). */
+static esp_err_t fota_wifi_wait_connected(void)
+{
+    if (!s_wifi_eg) {
+        ESP_LOGE(TAG, "[WiFi] Event group not created — fota_wifi_start() not called");
+        return ESP_FAIL;
+    }
+    EventBits_t bits = xEventGroupWaitBits(s_wifi_eg,
+                                           WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+                                           pdFALSE, pdFALSE,
+                                           pdMS_TO_TICKS(FOTA_CONFIG_LAN_WIFI_CONNECT_TIMEOUT_MS));
+    if (bits & WIFI_CONNECTED_BIT) {
+        ESP_LOGI(TAG, "[WiFi] Connected to FOTA AP \"%s\"",
+                 FOTA_CONFIG_LAN_WIFI_AP_SSID);
+        return ESP_OK;
+    }
+    ESP_LOGE(TAG, "[WiFi] Failed to connect to FOTA AP (timeout or rejected)");
+    return ESP_FAIL;
+}
+
+static void fota_wifi_disconnect(void)
+{
+    esp_event_handler_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, fota_wifi_event_handler);
+    esp_event_handler_unregister(IP_EVENT,   IP_EVENT_STA_GOT_IP, fota_wifi_event_handler);
+    esp_wifi_stop();
+    esp_wifi_deinit();
+    if (s_wifi_netif) {
+        esp_netif_destroy(s_wifi_netif);
+        s_wifi_netif = NULL;
+    }
+    if (s_wifi_eg) {
+        vEventGroupDelete(s_wifi_eg);
+        s_wifi_eg = NULL;
+    }
+    ESP_LOGI(TAG, "[WiFi] Disconnected from FOTA AP");
+}
 
 
 /* ------------------------------------------------------------------ */
@@ -112,6 +240,29 @@ extern const uint8_t server_cert_pem_start[] asm("_binary_ca_cert_pem_start");
 extern const uint8_t server_cert_pem_end[] asm("_binary_ca_cert_pem_end");
 
 static bool ota_task_close = false;
+
+/* -------------------------------------------------------------------
+ * Runtime firmware download URL
+ * Default = FOTA_CONFIG_LAN_FIRMWARE_URL from fota_lan_config.h.
+ * Overridden at runtime by fota_lan_handler_set_url() when the WAN MCU
+ * sends "CFML:CFFW:<url>" via web config or Python app.
+ * ------------------------------------------------------------------- */
+static char s_fota_url[FOTA_CONFIG_LAN_FIRMWARE_URL_MAX_LEN] =
+    FOTA_CONFIG_LAN_FIRMWARE_URL;
+
+void fota_lan_handler_set_url(const char *url)
+{
+    if (!url || url[0] == '\0') return;
+    strncpy(s_fota_url, url, sizeof(s_fota_url) - 1);
+    s_fota_url[sizeof(s_fota_url) - 1] = '\0';
+    ESP_LOGI("lan_advanced_ota", "[OTA] Firmware URL updated: %s", s_fota_url);
+    config_save_fota_lan_url_to_nvs();
+}
+
+const char *fota_lan_handler_get_url(void)
+{
+    return s_fota_url;
+}
 
 /* ------------------------------------------------------------------ */
 /*  NVS resumption helpers                                              */
@@ -318,103 +469,159 @@ static void ble_disable_sync(void) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  ThingsBoard server connectivity pre-check                           */
+/*  Server connectivity pre-check: parse host:port from runtime URL    */
 /* ------------------------------------------------------------------ */
-/* Verify PPP routing can reach the configured ThingsBoard server before
- * spending the full OTA download timeout on a failed connection. */
 static bool internet_reachable(void) {
-  char port_str[8];
-  snprintf(port_str, sizeof(port_str), "%d", FOTA_CONFIG_LAN_TB_PORT);
+  const char *url = fota_lan_handler_get_url();
 
-  struct addrinfo hints = {.ai_family = AF_UNSPEC, .ai_socktype = SOCK_STREAM};
-  struct addrinfo *res = NULL;
-  if (getaddrinfo(FOTA_CONFIG_LAN_TB_HOST, port_str, &hints, &res) != 0 || !res) {
-    ESP_LOGW(TAG, "[OTA-CHECK] DNS failed for %s", FOTA_CONFIG_LAN_TB_HOST);
+  /* ── Parse host and port from the URL ─────────────────────────── */
+  const char *after_scheme = strstr(url, "://");
+  if (!after_scheme) {
+    ESP_LOGW(TAG, "[OTA-CHECK] Malformed URL: %s", url);
     return false;
   }
+  after_scheme += 3;
 
-  int sock = socket(res->ai_family, SOCK_STREAM, 0);
+  char host[128] = {0};
+  char port_str[8] = "80";
+  const char *slash = strchr(after_scheme, '/');
+  const char *colon = strchr(after_scheme, ':');
+  if (colon && (!slash || colon < slash)) {
+    int hlen = (int)(colon - after_scheme);
+    if (hlen >= (int)sizeof(host)) hlen = (int)sizeof(host) - 1;
+    memcpy(host, after_scheme, hlen);
+    int plen = slash ? (int)(slash - colon - 1) : (int)strlen(colon + 1);
+    if (plen > 0 && plen < (int)sizeof(port_str))
+      memcpy(port_str, colon + 1, plen);
+  } else {
+    int hlen = slash ? (int)(slash - after_scheme) : (int)strlen(after_scheme);
+    if (hlen >= (int)sizeof(host)) hlen = (int)sizeof(host) - 1;
+    memcpy(host, after_scheme, hlen);
+    if (strncmp(url, "https", 5) == 0) strcpy(port_str, "443");
+  }
+
+  int port_num = atoi(port_str);
+  ESP_LOGI(TAG, "[OTA-CHECK] Starting connectivity check to %s:%d", host, port_num);
+
+  struct sockaddr_in server_addr = {0};
+  server_addr.sin_family = AF_INET;
+  server_addr.sin_port = htons((uint16_t)port_num);
+
+  if (inet_aton(host, &server_addr.sin_addr) == 1) {
+    ESP_LOGI(TAG, "[OTA-CHECK] Host is IP address, skipping DNS");
+  } else {
+    ESP_LOGI(TAG, "[OTA-CHECK] Resolving hostname %s via DNS...", host);
+    struct addrinfo hints = {.ai_family = AF_INET, .ai_socktype = SOCK_STREAM};
+    struct addrinfo *res = NULL;
+    int gai_err = getaddrinfo(host, port_str, &hints, &res);
+    if (gai_err != 0 || !res) {
+      ESP_LOGW(TAG, "[OTA-CHECK] DNS failed: %d", gai_err);
+      return false;
+    }
+    struct sockaddr_in *addr_in = (struct sockaddr_in *)res->ai_addr;
+    server_addr.sin_addr = addr_in->sin_addr;
+    freeaddrinfo(res);
+  }
+
+  int sock = socket(AF_INET, SOCK_STREAM, 0);
   if (sock < 0) {
     ESP_LOGE(TAG, "[OTA-CHECK] socket() failed: errno=%d", errno);
-    freeaddrinfo(res);
     return false;
   }
+  ESP_LOGI(TAG, "[OTA-CHECK] socket created (fd=%d), setting timeouts...", sock);
 
   int timeout_ms = FOTA_CONFIG_LAN_CONNECTIVITY_CHECK_TIMEOUT_MS;
-  struct timeval tv = {.tv_sec = timeout_ms / 1000,
-                       .tv_usec = (timeout_ms % 1000) * 1000};
-  setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-  setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+  ESP_LOGI(TAG, "[OTA-CHECK] timeout=%dms, attempting connect...", timeout_ms);
+
+  int flags = fcntl(sock, F_GETFL, 0);
+  fcntl(sock, F_SETFL, flags | O_NONBLOCK);
 
   uint32_t t0 = esp_log_timestamp();
-  int r = connect(sock, res->ai_addr, res->ai_addrlen);
+  int r = connect(sock, (struct sockaddr *)&server_addr, sizeof(server_addr));
+  if (r < 0 && errno == EINPROGRESS) {
+    struct timeval tv = {.tv_sec  = timeout_ms / 1000,
+                         .tv_usec = (timeout_ms % 1000) * 1000};
+    fd_set wfds;
+    FD_ZERO(&wfds);
+    FD_SET(sock, &wfds);
+    int sel = select(sock + 1, NULL, &wfds, NULL, &tv);
+    if (sel > 0) {
+      int so_err = 0;
+      socklen_t slen = sizeof(so_err);
+      getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_err, &slen);
+      r = (so_err == 0) ? 0 : -1;
+      if (so_err) errno = so_err;
+    } else {
+      r = -1;
+      errno = (sel == 0) ? ETIMEDOUT : errno;
+    }
+  }
   uint32_t ms = esp_log_timestamp() - t0;
+  ESP_LOGI(TAG, "[OTA-CHECK] connect() returned %d after %lums (errno=%d)",
+           r, (unsigned long)ms, (r < 0) ? errno : 0);
   close(sock);
-  freeaddrinfo(res);
 
   if (r == 0) {
-    ESP_LOGI(TAG, "[OTA-CHECK] %s:%d reachable (%lums)",
-             FOTA_CONFIG_LAN_TB_HOST, FOTA_CONFIG_LAN_TB_PORT,
-             (unsigned long)ms);
+    ESP_LOGI(TAG, "[OTA-CHECK] %s:%d reachable (%lums)", host, port_num, (unsigned long)ms);
     return true;
   }
   ESP_LOGW(TAG, "[OTA-CHECK] %s:%d unreachable (%lums) errno=%d",
-           FOTA_CONFIG_LAN_TB_HOST, FOTA_CONFIG_LAN_TB_PORT,
-           (unsigned long)ms, errno);
+           host, port_num, (unsigned long)ms, errno);
   return false;
 }
 
 
 /* ------------------------------------------------------------------ */
-/*  OTA download via esp_http_client (ThingsBoard)                      */
+/*  OTA download via esp_http_client (ThingsBoard) — PSRAM-first        */
+/*                                                                      */
+/*  PHASE 1 — DOWNLOAD TO PSRAM:                                        */
+/*    Open HTTP and stream all bytes to a PSRAM buffer.  Zero flash     */
+/*    operations in this phase → eppp_link/LwIP run uninterrupted at   */
+/*    full TCP bandwidth.                                               */
+/*  PHASE 2 — FLASH FROM PSRAM:                                         */
+/*    Close HTTP first, then call esp_ota_begin()+write().  Flash erase */
+/*    (~27s) disables the cache and starves the eppp_link task, but     */
+/*    the download is already complete so PPP disruption is harmless.   */
+/*                                                                      */
+/*  Previous attempts at streaming download+flash simultaneously all   */
+/*  failed because esp_ota_begin/write disables the instruction cache   */
+/*  during sector erases, preventing eppp_link from draining the UART, */
+/*  which causes UART FIFO overflow and TCP stall within seconds.       */
+/*  The PSRAM approach was tried before but failed due to a separate    */
+/*  bug (eppp_link priority 19 > LwIP 18 starved the tcpip mailbox,    */
+/*  causing socket() to block indefinitely).  That is now fixed.       */
 /* ------------------------------------------------------------------ */
 static esp_err_t manual_ota_download(void) {
-  ESP_LOGI(TAG, "[OTA] Downloading firmware from: %s",
-           FOTA_CONFIG_LAN_FIRMWARE_UPGRADE_URL);
+  const char *fw_url = fota_lan_handler_get_url();
+  ESP_LOGI(TAG, "[OTA] Downloading firmware from: %s", fw_url);
 
   esp_err_t ret = ESP_FAIL;
-  const esp_partition_t *update = esp_ota_get_next_update_partition(NULL);
-  if (!update) {
-    ESP_LOGE(TAG, "[OTA] No next OTA partition available");
-    return ESP_FAIL;
-  }
+  uint8_t *fw_buf = NULL;
 
-  /* Allocate download buffer from PSRAM first, fall back to internal */
-  char *buf = (char *)heap_caps_malloc(OTA_DL_BUF_SIZE,
-                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (!buf) {
-    buf = (char *)malloc(OTA_DL_BUF_SIZE);
-    if (!buf) {
-      ESP_LOGE(TAG, "[OTA] OOM: download buffer");
-      return ESP_ERR_NO_MEM;
-    }
-  }
+  bool use_https = (strncmp(fw_url, "https://", 8) == 0);
 
   esp_http_client_config_t http_cfg = {
-      .url            = FOTA_CONFIG_LAN_FIRMWARE_UPGRADE_URL,
+      .url            = fw_url,
       .timeout_ms     = FOTA_CONFIG_LAN_OTA_RECV_TIMEOUT,
       .buffer_size    = OTA_DL_BUF_SIZE,
       .buffer_size_tx = 512,
       .keep_alive_enable = false,
-#if FOTA_CONFIG_LAN_TB_USE_HTTPS && FOTA_CONFIG_LAN_USE_CERT_BUNDLE
+#if FOTA_CONFIG_LAN_USE_CERT_BUNDLE
       .crt_bundle_attach = esp_crt_bundle_attach,
 #endif
-#if FOTA_CONFIG_LAN_TB_USE_HTTPS && FOTA_CONFIG_LAN_TB_SKIP_CERT_VERIFY
-      .skip_cert_common_name_check = true,
-#endif
   };
+  (void)use_https;  /* used in future for per-URL TLS selection */
 
   esp_http_client_handle_t client = esp_http_client_init(&http_cfg);
   if (!client) {
     ESP_LOGE(TAG, "[OTA] esp_http_client_init failed");
-    free(buf);
     return ESP_FAIL;
   }
 
-  esp_err_t err = esp_http_client_open(client, 0); /* 0 = GET, no body */
+  esp_err_t err = esp_http_client_open(client, 0);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "[OTA] HTTP open failed: %s", esp_err_to_name(err));
-    goto cleanup;
+    goto cleanup_http;
   }
 
   int64_t content_len = esp_http_client_fetch_headers(client);
@@ -422,80 +629,111 @@ static esp_err_t manual_ota_download(void) {
   ESP_LOGI(TAG, "[OTA] HTTP %d, Content-Length: %lld", http_status, content_len);
 
   if (http_status != 200) {
-    ESP_LOGE(TAG, "[OTA] HTTP error %d (expected 200)", http_status);
-    goto cleanup;
+    ESP_LOGE(TAG, "[OTA] HTTP error %d", http_status);
+    goto cleanup_http;
+  }
+  if (content_len <= 0 || content_len > (4 * 1024 * 1024)) {
+    ESP_LOGE(TAG, "[OTA] Invalid content_len: %lld", content_len);
+    goto cleanup_http;
   }
 
-  esp_ota_handle_t ota_handle = 0;
-  bool ota_started = false;
-  err = esp_ota_begin(update, OTA_SIZE_UNKNOWN, &ota_handle);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "[OTA] esp_ota_begin: %s", esp_err_to_name(err));
-    goto cleanup;
+  fw_buf = (uint8_t *)heap_caps_malloc((size_t)content_len,
+                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!fw_buf) {
+    ESP_LOGE(TAG, "[OTA] PSRAM alloc failed for %lld bytes", content_len);
+    goto cleanup_http;
   }
-  ota_started = true;
+  ESP_LOGI(TAG, "[OTA] PSRAM buf allocated (%lld B). Downloading (no flash ops)...",
+           content_len);
 
+  /* ---- Phase 1: stream to PSRAM, zero flash operations ---- */
   int total = 0;
   uint32_t t0 = esp_log_timestamp();
-  while (true) {
-    int len = esp_http_client_read(client, buf, OTA_DL_BUF_SIZE);
-    if (len == 0) {
-      break; /* EOF */
-    }
+  while (total < (int)content_len) {
+    int want = MIN(OTA_DL_BUF_SIZE, (int)content_len - total);
+    int len = esp_http_client_read(client, (char *)(fw_buf + total), want);
+    if (len == 0) break;
     if (len < 0) {
-      ESP_LOGE(TAG, "[OTA] Read error: %d", len);
-      goto cleanup_ota;
-    }
-    err = esp_ota_write(ota_handle, (const void *)buf, len);
-    if (err != ESP_OK) {
-      ESP_LOGE(TAG, "[OTA] esp_ota_write: %s", esp_err_to_name(err));
-      goto cleanup_ota;
+      ESP_LOGE(TAG, "[OTA] Read error: %d (got %d/%lld)", len, total, content_len);
+      goto cleanup_http;
     }
     total += len;
     if (total % (64 * 1024) < OTA_DL_BUF_SIZE) {
-      ESP_LOGI(TAG, "[OTA] Progress: %d bytes downloaded", total);
+      ESP_LOGI(TAG, "[OTA] Download: %d / %lld B (%.1f%%)",
+               total, content_len, 100.0f * total / content_len);
+    }
+    taskYIELD(); /* yield to LwIP between reads */
+  }
+  {
+    uint32_t dl_ms = esp_log_timestamp() - t0;
+    ESP_LOGI(TAG, "[OTA] Download done: %d B in %lums (%ld B/s)",
+             total, (unsigned long)dl_ms,
+             dl_ms ? (long)((int64_t)total * 1000 / dl_ms) : 0);
+  }
+  if (total != (int)content_len) {
+    ESP_LOGE(TAG, "[OTA] Incomplete: got %d, expected %lld", total, content_len);
+    goto cleanup_http;
+  }
+
+  /* Close HTTP before touching flash */
+  esp_http_client_close(client);
+  esp_http_client_cleanup(client);
+  client = NULL;
+
+  /* ---- Phase 2: erase + flash from PSRAM (network idle, disruption harmless) ---- */
+  const esp_partition_t *update = esp_ota_get_next_update_partition(NULL);
+  if (!update) {
+    ESP_LOGE(TAG, "[OTA] No OTA partition available");
+    goto cleanup_buf;
+  }
+
+  esp_ota_handle_t ota_handle = 0;
+  ESP_LOGI(TAG, "[OTA] HTTP closed. Erasing OTA partition (PPP disruption harmless now)...");
+  err = esp_ota_begin(update, (size_t)total, &ota_handle);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "[OTA] esp_ota_begin: %s", esp_err_to_name(err));
+    goto cleanup_buf;
+  }
+  ESP_LOGI(TAG, "[OTA] Writing %d bytes from PSRAM to flash...", total);
+
+  for (int offset = 0; offset < total; offset += OTA_DL_BUF_SIZE) {
+    int chunk = MIN(OTA_DL_BUF_SIZE, total - offset);
+    err = esp_ota_write(ota_handle, fw_buf + offset, chunk);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "[OTA] esp_ota_write @%d: %s", offset, esp_err_to_name(err));
+      esp_ota_abort(ota_handle);
+      goto cleanup_buf;
+    }
+    if (offset % (256 * 1024) < OTA_DL_BUF_SIZE) {
+      ESP_LOGI(TAG, "[OTA] Flash: %d / %d B", offset + chunk, total);
     }
   }
 
-  {
-    uint32_t dl_ms = esp_log_timestamp() - t0;
-    ESP_LOGI(TAG, "[OTA] Downloaded %d bytes in %lums (%ld B/s)", total,
-             (unsigned long)dl_ms,
-             dl_ms > 0 ? (long)(total * 1000L / dl_ms) : 0);
-  }
-
-  if (total == 0) {
-    ESP_LOGE(TAG, "[OTA] Zero bytes received");
-    goto cleanup_ota;
-  }
-
   err = esp_ota_end(ota_handle);
-  ota_started = false;
   if (err != ESP_OK) {
-    if (err == ESP_ERR_OTA_VALIDATE_FAILED)
-      ESP_LOGE(TAG, "[OTA] Image validation failed (corrupted firmware)");
-    else
-      ESP_LOGE(TAG, "[OTA] esp_ota_end: %s", esp_err_to_name(err));
-    goto cleanup;
+    ESP_LOGE(TAG, "[OTA] esp_ota_end: %s", esp_err_to_name(err));
+    goto cleanup_buf;
   }
 
   err = esp_ota_set_boot_partition(update);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "[OTA] set_boot_partition: %s", esp_err_to_name(err));
-    goto cleanup;
+    goto cleanup_buf;
   }
 
   ESP_LOGI(TAG, "[OTA] Flash complete! Rebooting into new firmware...");
   ret = ESP_OK;
-  goto cleanup;
 
-cleanup_ota:
-  if (ota_started)
-    esp_ota_abort(ota_handle);
-cleanup:
-  free(buf);
-  esp_http_client_close(client);
-  esp_http_client_cleanup(client);
+cleanup_buf:
+  free(fw_buf);
+  return ret;
+
+cleanup_http:
+  free(fw_buf);
+  if (client) {
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+  }
   return ret;
 }
 
@@ -504,12 +742,25 @@ cleanup:
 /*  OTA task                                                            */
 /* ------------------------------------------------------------------ */
 void advanced_ota_task(void *pvParameter) {
-  ESP_LOGI(TAG, "Starting Advanced OTA (ThingsBoard HTTP) - V3.0.0");
-  ESP_LOGI(TAG, "[OTA] Target: %s", FOTA_CONFIG_LAN_FIRMWARE_UPGRADE_URL);
+  ESP_LOGI(TAG, "Starting Advanced OTA (ThingsBoard via FOTA WiFi AP) - V4.0.0");
+  ESP_LOGI(TAG, "[OTA] Target: %s", fota_lan_handler_get_url());
 
-  /* Disable BLE before downloading to free internal heap for
-   * esp_http_client and OTA flash write buffers. */
+  /* BLE must be off before using WiFi — they share the RF radio.
+   * fota_wifi_start() was already called by fota_lan_handler_task_start()
+   * (on an internal-RAM stack) before this task was created, so WiFi init
+   * and association are already in progress.  We just wait for the IP. */
   ble_disable_sync();
+
+  /* Wait for WiFi association + DHCP lease (started in task_start). */
+  ESP_LOGI(TAG, "[OTA] Waiting for WiFi connection to FOTA AP \"%s\"...",
+           FOTA_CONFIG_LAN_WIFI_AP_SSID);
+  if (fota_wifi_wait_connected() != ESP_OK) {
+    ESP_LOGE(TAG, "[OTA] Cannot reach FOTA AP — aborting");
+    fota_wifi_disconnect();
+    esp_restart();
+    vTaskDelete(NULL);
+    return;
+  }
 
   const int max_retries = 5;
   esp_err_t err = ESP_FAIL;
@@ -519,11 +770,10 @@ void advanced_ota_task(void *pvParameter) {
     ESP_LOGI(TAG, "OTA attempt %d/%d (t=%lums)", attempt, max_retries,
              (unsigned long)t0);
 
-    /* Verify PPP routing can reach the ThingsBoard server before
-     * spending the full OTA timeout on a failed connection. */
+    /* Quick reachability check against the ThingsBoard host. */
     if (!internet_reachable()) {
-      ESP_LOGW(TAG, "[OTA] ThingsBoard not reachable, waiting 30s...");
-      vTaskDelay(pdMS_TO_TICKS(30000));
+      ESP_LOGW(TAG, "[OTA] ThingsBoard not reachable, waiting 10s...");
+      vTaskDelay(pdMS_TO_TICKS(10000));
       ESP_LOGE(TAG, "OTA attempt %d skipped (no route to ThingsBoard)", attempt);
       continue;
     }
@@ -549,323 +799,11 @@ void advanced_ota_task(void *pvParameter) {
   }
 
   ESP_LOGE(TAG, "OTA failed after %d attempts, rebooting", max_retries);
+  fota_wifi_disconnect();
   esp_restart();
   vTaskDelete(NULL);
 }
 
-#if 0 /* orphaned old code — pending removal */
-  int hdr_len = 0;
-  bool done = false;
-  uint8_t tail[3] = {0};
-
-  while (hdr_len < hdr_out_size - 1) {
-    int want = hdr_out_size - 1 - hdr_len;
-    if (want > HDR_CHUNK_SIZE)
-      want = HDR_CHUNK_SIZE;
-
-    int rd = esp_tls_conn_read(tls, (unsigned char *)hdr_out + hdr_len, want);
-    if (rd == ESP_TLS_ERR_SSL_WANT_READ || rd == ESP_TLS_ERR_SSL_WANT_WRITE) {
-      /* SO_RCVTIMEO fired with no data yet — check deadline then retry */
-      if (esp_log_timestamp() >= deadline_ms) {
-        hdr_out[hdr_len] = '\0';
-        ESP_LOGE(TAG,
-                 "[OTA-TLS] header read deadline exceeded (%lums), "
-                 "read_so_far=%d bytes:[%.80s]",
-                 (unsigned long)deadline_ms, hdr_len, hdr_out);
-        return ESP_FAIL;
-      }
-      vTaskDelay(pdMS_TO_TICKS(100));
-      continue;
-    }
-    if (rd <= 0) {
-      int ec = 0, mf = 0;
-      esp_tls_error_handle_t eh = NULL;
-      esp_tls_get_error_handle(tls, &eh);
-      if (eh)
-        esp_tls_get_and_clear_last_error(eh, &ec, &mf);
-      hdr_out[hdr_len] = '\0';
-      ESP_LOGE(
-          TAG,
-          "[OTA-TLS] header read failed: rd=%d esp=0x%x mbed=0x%x errno=%d(%s) "
-          "read_so_far=%d bytes:[%.80s]",
-          rd, ec, mf, errno, strerror(errno), hdr_len, hdr_out);
-      return ESP_FAIL;
-    }
-
-    for (int i = 0; i < rd && !done; i++) {
-      int abs_pos = hdr_len + i;
-      uint8_t w[4];
-      for (int j = 0; j < 4; j++) {
-        int p = abs_pos - 3 + j;
-        if (p < 0)
-          w[j] = tail[3 + p];
-        else if (p < hdr_len)
-          w[j] = (uint8_t)hdr_out[p];
-        else
-          w[j] = (uint8_t)hdr_out[hdr_len + (p - hdr_len)];
-      }
-      if (w[0] == '\r' && w[1] == '\n' && w[2] == '\r' && w[3] == '\n') {
-        hdr_len += (i + 1);
-        hdr_out[hdr_len] = '\0';
-        done = true;
-      }
-    }
-
-    if (!done) {
-      hdr_len += rd;
-      int ts = hdr_len - 3;
-      if (ts < 0)
-        ts = 0;
-      for (int j = 0; j < 3; j++) {
-        int s = ts + j;
-        tail[j] = (s < hdr_len) ? (uint8_t)hdr_out[s] : 0;
-      }
-    } else {
-      break;
-    }
-  }
-
-  if (!done) {
-    ESP_LOGE(TAG, "[OTA-TLS] header buffer overflow (%d bytes, no CRLFCRLF)",
-             hdr_len);
-    return ESP_FAIL;
-  }
-
-  *hdr_len_out = hdr_len;
-  return ESP_OK;
-}
-
-
-  /* ---- HTTP/1.1 GET + Connection: close ----
-   * curl/8.11.0 User-Agent: GitHub/Fastly whitelist curl by default.
-   *   ESP32-OTA/x.x triggered Fastly's bot detection → silent hold
-   *   (server keeps connection open but never sends HTTP response).
-   * Accept-Encoding: identity: disables compression (simpler for ESP32)
-   *   and changes the CDN's cache key, which may route to a different
-   *   backend that is not holding the connection.
-   * Cache-Control: no-cache: prevents Fastly from serving a stale
-   *   "hold" response from its cache.
-   */
-  {
-    char req[512];
-    int req_len = snprintf(req, sizeof(req),
-                           "GET %s HTTP/1.1\r\n"
-                           "Host: %s\r\n"
-                           "Connection: close\r\n"
-                           "Accept: */*\r\n"
-                           "Accept-Encoding: identity\r\n"
-                           "Cache-Control: no-cache\r\n"
-                           "User-Agent: curl/8.11.0\r\n"
-                           "\r\n",
-                           path, host);
-
-    int written = 0;
-    uint32_t tw = esp_log_timestamp();
-    while (written < req_len) {
-      int w = esp_tls_conn_write(tls, req + written, req_len - written);
-      if (w < 0) {
-        ESP_LOGE(TAG, "[OTA-TLS] write failed: %d errno=%d", w, errno);
-        goto cleanup;
-      }
-      if (w == 0) {
-        ESP_LOGE(TAG, "[OTA-TLS] write=0, peer closed");
-        goto cleanup;
-      }
-      written += w;
-    }
-    ESP_LOGI(TAG, "[OTA-TLS] HTTP/1.1 GET sent (%d bytes) in %lums", req_len,
-             (unsigned long)(esp_log_timestamp() - tw));
-  }
-
-  /* ---- HTTP response headers ---- */
-  int content_length = -1;
-  {
-    char *hdr = malloc(HDR_BUF_SIZE);
-    if (!hdr) {
-      ret = ESP_ERR_NO_MEM;
-      goto cleanup;
-    }
-
-    int hdr_len = 0;
-    /* 60s hard deadline for receiving the HTTP response header.
-     * Normal CDN response arrives in < 5s over PPP. If LCP Echo
-     * has already torn down the link (15s), this 60s is a last resort. */
-    uint32_t hdr_deadline_ms = esp_log_timestamp() + 60000;
-    if (read_http_headers(tls, hdr, HDR_BUF_SIZE, &hdr_len,
-                          hdr_deadline_ms) != ESP_OK) {
-      free(hdr);
-      goto cleanup;
-    }
-
-    ESP_LOGI(TAG, "[OTA-TLS] Response header (%d bytes):\n%.300s", hdr_len,
-             hdr);
-
-    if (strstr(hdr, " 200") == NULL) {
-      ESP_LOGE(TAG, "[OTA-TLS] HTTP not 200");
-      free(hdr);
-      goto cleanup;
-    }
-
-    const char *cl = strstr(hdr, "Content-Length:");
-    if (!cl)
-      cl = strstr(hdr, "content-length:");
-    if (cl)
-      content_length = atoi(cl + 15);
-    ESP_LOGI(TAG, "[OTA-TLS] HTTP 200 OK, Content-Length=%d", content_length);
-    free(hdr);
-  }
-
-  /*
-   * HTTP/1.1 + Connection: close: server closes TCP after sending body.
-   * If Content-Length is missing, read until EOF (rd==0).
-   * If Content-Length is present, use it for progress logging and ota_begin
-   * size hint.
-   */
-  {
-    const esp_partition_t *update = esp_ota_get_next_update_partition(NULL);
-    if (!update) {
-      ESP_LOGE(TAG, "[OTA-TLS] No OTA partition");
-      goto cleanup;
-    }
-    ESP_LOGI(TAG, "[OTA-TLS] Writing to <%s> @ 0x%lx", update->label,
-             (unsigned long)update->address);
-
-    size_t ota_size =
-        (content_length > 0) ? (size_t)content_length : OTA_SIZE_UNKNOWN;
-    ret = esp_ota_begin(update, ota_size, &ota_handle);
-    if (ret != ESP_OK) {
-      ESP_LOGE(TAG, "[OTA-TLS] esp_ota_begin: %s", esp_err_to_name(ret));
-      goto cleanup;
-    }
-    ota_started = true;
-
-    buf = malloc(OTA_DL_BUF_SIZE);
-    if (!buf) {
-      ret = ESP_ERR_NO_MEM;
-      goto cleanup;
-    }
-
-    int total = 0;
-    t0 = esp_log_timestamp();
-    /* Per-chunk deadline: reset on every successful read chunk.
-     * 60s without a new chunk → link is dead, abort. */
-    uint32_t body_deadline_ms = esp_log_timestamp() + 60000;
-    while (1) {
-      int rd = esp_tls_conn_read(tls, buf, OTA_DL_BUF_SIZE);
-      if (rd == ESP_TLS_ERR_SSL_WANT_READ || rd == ESP_TLS_ERR_SSL_WANT_WRITE) {
-        /* SO_RCVTIMEO fired with no data yet — check deadline then retry */
-        if (esp_log_timestamp() >= body_deadline_ms) {
-          ESP_LOGE(TAG,
-                   "[OTA-TLS] body read deadline exceeded (60s, no new chunk), "
-                   "total=%d bytes", total);
-          ret = ESP_FAIL;
-          goto cleanup;
-        }
-        vTaskDelay(pdMS_TO_TICKS(100));
-        continue;
-      }
-      if (rd < 0) {
-        int ec = 0, mf = 0;
-        esp_tls_error_handle_t eh = NULL;
-        esp_tls_get_error_handle(tls, &eh);
-        if (eh)
-          esp_tls_get_and_clear_last_error(eh, &ec, &mf);
-        ESP_LOGE(TAG,
-                 "[OTA-TLS] body read error %d at %d bytes esp=0x%x mbed=0x%x "
-                 "errno=%d(%s)",
-                 rd, total, ec, mf, errno, strerror(errno));
-        ret = ESP_FAIL;
-        goto cleanup;
-      }
-      if (rd == 0) {
-        /* EOF — server closed connection after body (Connection: close) */
-        ESP_LOGI(TAG, "[OTA-TLS] EOF at %d bytes (Content-Length=%d)", total,
-                 content_length);
-        break;
-      }
-
-      ret = esp_ota_write(ota_handle, buf, rd);
-      if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "[OTA-TLS] esp_ota_write: %s", esp_err_to_name(ret));
-        goto cleanup;
-      }
-
-      total += rd;
-      /* Reset per-chunk deadline — data is flowing normally */
-      body_deadline_ms = esp_log_timestamp() + 60000;
-      if ((total / (64 * 1024)) != ((total - rd) / (64 * 1024))) {
-        int pct = (content_length > 0) ? (total * 100 / content_length) : -1;
-        ESP_LOGI(TAG, "[OTA-TLS] %d/%d bytes (%d%%)", total, content_length,
-                 pct);
-      }
-    }
-
-    uint32_t dl_ms = esp_log_timestamp() - t0;
-    ESP_LOGI(TAG, "[OTA-TLS] Download done: %d bytes in %lums (%ld B/s)", total,
-             (unsigned long)dl_ms,
-             dl_ms > 0 ? (long)(total * 1000L / dl_ms) : 0);
-
-    if (total == 0) {
-      ESP_LOGE(TAG, "[OTA-TLS] Zero bytes received");
-      ret = ESP_FAIL;
-      goto cleanup;
-    }
-
-    ret = esp_ota_end(ota_handle);
-    ota_started = false;
-    if (ret != ESP_OK) {
-      if (ret == ESP_ERR_OTA_VALIDATE_FAILED)
-        ESP_LOGE(TAG, "[OTA-TLS] Image validation failed (corrupted)");
-      else
-        ESP_LOGE(TAG, "[OTA-TLS] esp_ota_end: %s", esp_err_to_name(ret));
-      goto cleanup;
-    }
-
-    ret = esp_ota_set_boot_partition(update);
-    if (ret != ESP_OK) {
-      ESP_LOGE(TAG, "[OTA-TLS] set_boot_partition: %s", esp_err_to_name(ret));
-      goto cleanup;
-    }
-
-    ESP_LOGI(TAG, "[OTA-TLS] OTA successful! Rebooting...");
-    ret = ESP_OK;
-  }
-
-cleanup:
-  free(buf);
-  if (ota_started)
-    esp_ota_abort(ota_handle);
-
-
-  for (int attempt = 1; attempt <= max_retries; attempt++) {
-    uint32_t t0 = esp_log_timestamp();
-    ESP_LOGI(TAG, "OTA attempt %d/%d (t=%lums)", attempt, max_retries,
-             (unsigned long)t0);
-
-    /* ---- Connectivity pre-check ----
-     * Verify PPP → internet routing is working before spending 60s on a
-     * TLS attempt that Fastly might silently ignore.  Uses plain TCP (no
-     * TLS) so it does NOT trigger Fastly's per-IP TLS rate limiter. */
-    if (!internet_reachable()) {
-      ESP_LOGW(TAG, "[OTA] Internet routing not ready, waiting 30s...");
-      vTaskDelay(pdMS_TO_TICKS(30000));
-      /* Count as a failed attempt so we eventually reboot instead of
-       * looping forever if the PPP link itself is broken. */
-      ESP_LOGE(TAG, "OTA attempt %d skipped (no internet)", attempt);
-      if (attempt < max_retries) {
-        uint32_t delay_ms = 30000;
-        ESP_LOGW(TAG, "Retrying in %lums ...", (unsigned long)delay_ms);
-        vTaskDelay(pdMS_TO_TICKS(delay_ms));
-      }
-      continue;
-    }
-
-    /* Alternate between CDN hosts on each attempt.
-     * Primary:  raw.githubusercontent.com  (Fastly, sometimes rate-limits)
-     * Fallback: objects.githubusercontent.com (different Fastly PoP/pool)
-     * Odd attempts → primary, even attempts → fallback. */
-
-#endif /* orphaned old code */
 
 /* ------------------------------------------------------------------ */
 /*  Public API                                                          */
@@ -882,21 +820,31 @@ void fota_lan_handler_task_start(void) {
            "Heap before OTA task: total=%d, internal=%d, internal_largest=%d",
            esp_get_free_heap_size(), internal_free, internal_largest);
 
-  const UBaseType_t ota_prio = 8; /* above WAN_DL(7) and WAN_UL(5) */
-  BaseType_t ret = xTaskCreate(&advanced_ota_task, "advanced_ota_task",
-                               12 * 1024, NULL, ota_prio, NULL);
-  if (ret != pdPASS) {
-    ESP_LOGW(TAG, "Internal RAM stack failed (largest=%d), retrying in PSRAM",
-             internal_largest);
-    ret = xTaskCreateWithCaps(&advanced_ota_task, "advanced_ota_task",
-                              32 * 1024, NULL, ota_prio, NULL,
-                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (ret != pdPASS) {
-      ESP_LOGE(TAG, "Failed to create OTA task");
-      return;
-    }
+  /* Start WiFi on THIS stack (config_handler task, internal RAM) before
+   * creating the OTA task.  esp_wifi_init() reads NVS via spi_flash and
+   * calls spi_flash_disable_interrupts_caches_and_other_cpu() internally.
+   * That function asserts if the calling task stack is in PSRAM.
+   * The OTA task only calls fota_wifi_wait_connected() which is safe. */
+  ESP_LOGI(TAG, "[OTA] Starting WiFi (internal-RAM context)...");
+  if (fota_wifi_start() != ESP_OK) {
+    ESP_LOGE(TAG, "[OTA] WiFi start failed — aborting FOTA");
+    return;
   }
-  ESP_LOGI(TAG, "OTA task created successfully");
+
+  /* 20KB stack fits comfortably in internal RAM (typical largest free block
+   * at FOTA trigger time is ~28-32KB).  Avoid PSRAM stack entirely — any
+   * task whose stack is in PSRAM will crash if it (or code it calls)
+   * disables the flash cache (e.g. via NVS, OTA write, WiFi init). */
+  const UBaseType_t ota_prio = 5;
+  BaseType_t ret = xTaskCreate(&advanced_ota_task, "advanced_ota_task",
+                               20 * 1024, NULL, ota_prio, NULL);
+  if (ret != pdPASS) {
+    ESP_LOGE(TAG, "Failed to create OTA task (internal largest=%d) — aborting",
+             internal_largest);
+    fota_wifi_disconnect();
+    return;
+  }
+  ESP_LOGI(TAG, "OTA task created (20KB internal-RAM stack)");
 }
 
 void fota_lan_handler_task_stop(void) { ota_task_close = true; }

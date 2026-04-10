@@ -9,7 +9,6 @@
 #include "nvs_flash.h"
 #include "esp_event.h"
 #include "esp_netif.h"
-#include "eppp_link.h"
 #include "esp_log.h"
 #include "esp_check.h"
 #include "driver/gpio.h"
@@ -25,7 +24,5 @@
 #include "i2c_dev_support.h"
 #include "tca_handler.h"
 #include "stack_handler.h"
-
-void lan_ppp_connect(void);
 
 #endif /* MAIN_DA2_ESP_LAN_H */
