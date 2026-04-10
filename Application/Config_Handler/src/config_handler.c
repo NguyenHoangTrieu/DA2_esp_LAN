@@ -308,10 +308,9 @@ static void config_handler_task(void *arg) {
         if (config_parse_fota(cmd->raw_data, cmd->data_len, &fota_cfg) ==
             ESP_OK) {
           ESP_LOGI(TAG, "Starting FOTA process...");
-          // Start FOTA handler task
+          // Start FOTA handler task — WiFi AP connect happens inside the task
           led_show_blue();
           mcu_wan_handler_stop();
-          lan_ppp_connect();
           fota_lan_handler_task_start();
         } else {
           ESP_LOGE(TAG, "Failed to parse FOTA command");

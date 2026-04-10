@@ -1,12 +1,21 @@
 /*
  * Advanced OTA Update Handler for ESP32
- * Direct TLS + raw HTTP/1.0 GET — bypasses esp_http_client broken path.
+ * Downloads firmware from ThingsBoard via the WAN MCU's FOTA WiFi AP.
+ *
+ * Flow:
+ *   1. BLE disabled (frees RF resources for WiFi).
+ *   2. Connect WiFi STA to WAN MCU's "DA2-FOTA" AP.
+ *   3. WAN MCU NATs traffic to internet → download from ThingsBoard.
+ *   4. Flash firmware from PSRAM buffer (no PPP disruption possible).
+ *   5. WiFi disconnected, device reboots into new firmware.
  */
 #include "fota_lan_handler.h"
 #include "esp_bt.h"
 #include "esp_bt_main.h"
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
+#include "esp_wifi.h"
+#include "freertos/event_groups.h"
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
 #include <arpa/inet.h>
@@ -19,6 +28,98 @@ static const char *TAG = "lan_advanced_ota";
 
 /* Download buffer for esp_http_client streaming */
 #define OTA_DL_BUF_SIZE 4096
+
+/* ------------------------------------------------------------------ */
+/*  FOTA WiFi AP connect / disconnect                                   */
+/* ------------------------------------------------------------------ */
+static EventGroupHandle_t s_wifi_eg     = NULL;
+static esp_netif_t       *s_wifi_netif  = NULL;
+#define WIFI_CONNECTED_BIT  BIT0
+#define WIFI_FAIL_BIT       BIT1
+
+static void fota_wifi_event_handler(void *arg, esp_event_base_t base,
+                                    int32_t id, void *data)
+{
+    if (base == WIFI_EVENT) {
+        if (id == WIFI_EVENT_STA_START) {
+            esp_wifi_connect();
+        } else if (id == WIFI_EVENT_STA_DISCONNECTED) {
+            ESP_LOGW(TAG, "[WiFi] Disconnected from FOTA AP");
+            xEventGroupSetBits(s_wifi_eg, WIFI_FAIL_BIT);
+        }
+    } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t *e = (ip_event_got_ip_t *)data;
+        ESP_LOGI(TAG, "[WiFi] FOTA AP connected, IP=" IPSTR,
+                 IP2STR(&e->ip_info.ip));
+        xEventGroupSetBits(s_wifi_eg, WIFI_CONNECTED_BIT);
+    }
+}
+
+static esp_err_t fota_wifi_connect(void)
+{
+    s_wifi_eg = xEventGroupCreate();
+    if (!s_wifi_eg) return ESP_ERR_NO_MEM;
+
+    /* Initialise the network stack (must be called once before any netif).
+     * Returns ESP_ERR_INVALID_STATE if already initialised — ignore that. */
+    esp_err_t ni = esp_netif_init();
+    if (ni != ESP_OK && ni != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "[WiFi] esp_netif_init failed: %s", esp_err_to_name(ni));
+        return ni;
+    }
+
+    /* netif must be created before esp_wifi_init */
+    s_wifi_netif = esp_netif_create_default_wifi_sta();
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
+                                fota_wifi_event_handler, NULL);
+    esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                                fota_wifi_event_handler, NULL);
+
+    wifi_config_t wcfg = {
+        .sta = {
+            .ssid     = FOTA_CONFIG_LAN_WIFI_AP_SSID,
+            .password = FOTA_CONFIG_LAN_WIFI_AP_PASS,
+            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
+        },
+    };
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wcfg));
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    EventBits_t bits = xEventGroupWaitBits(s_wifi_eg,
+                                           WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+                                           pdFALSE, pdFALSE,
+                                           pdMS_TO_TICKS(FOTA_CONFIG_LAN_WIFI_CONNECT_TIMEOUT_MS));
+    if (bits & WIFI_CONNECTED_BIT) {
+        ESP_LOGI(TAG, "[WiFi] Connected to FOTA AP \"%s\"",
+                 FOTA_CONFIG_LAN_WIFI_AP_SSID);
+        return ESP_OK;
+    }
+
+    ESP_LOGE(TAG, "[WiFi] Failed to connect to FOTA AP (timeout or rejected)");
+    return ESP_FAIL;
+}
+
+static void fota_wifi_disconnect(void)
+{
+    esp_event_handler_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, fota_wifi_event_handler);
+    esp_event_handler_unregister(IP_EVENT,   IP_EVENT_STA_GOT_IP, fota_wifi_event_handler);
+    esp_wifi_stop();
+    esp_wifi_deinit();
+    if (s_wifi_netif) {
+        esp_netif_destroy(s_wifi_netif);
+        s_wifi_netif = NULL;
+    }
+    if (s_wifi_eg) {
+        vEventGroupDelete(s_wifi_eg);
+        s_wifi_eg = NULL;
+    }
+    ESP_LOGI(TAG, "[WiFi] Disconnected from FOTA AP");
+}
 
 
 /* ------------------------------------------------------------------ */
@@ -322,7 +423,7 @@ static void ble_disable_sync(void) {
 /* ------------------------------------------------------------------ */
 /*  ThingsBoard server connectivity pre-check                           */
 /* ------------------------------------------------------------------ */
-/* Verify PPP routing can reach the configured ThingsBoard server before
+/* Verify WiFi AP routing can reach the configured ThingsBoard server before
  * spending the full OTA download timeout on a failed connection. */
 static bool internet_reachable(void) {
   ESP_LOGI(TAG, "[OTA-CHECK] Starting connectivity check to %s:%d",
@@ -482,7 +583,7 @@ static esp_err_t manual_ota_download(void) {
       ESP_LOGI(TAG, "[OTA] Download: %d / %lld B (%.1f%%)",
                total, content_len, 100.0f * total / content_len);
     }
-    taskYIELD(); /* let eppp_link/LwIP run between reads */
+    taskYIELD(); /* yield to LwIP between reads */
   }
   {
     uint32_t dl_ms = esp_log_timestamp() - t0;
@@ -562,12 +663,25 @@ cleanup_http:
 /*  OTA task                                                            */
 /* ------------------------------------------------------------------ */
 void advanced_ota_task(void *pvParameter) {
-  ESP_LOGI(TAG, "Starting Advanced OTA (ThingsBoard HTTP) - V3.0.0");
+  ESP_LOGI(TAG, "Starting Advanced OTA (ThingsBoard via FOTA WiFi AP) - V4.0.0");
   ESP_LOGI(TAG, "[OTA] Target: %s", FOTA_CONFIG_LAN_FIRMWARE_UPGRADE_URL);
 
-  /* Disable BLE before downloading to free internal heap for
-   * esp_http_client and OTA flash write buffers. */
+  /* Disable BLE before WiFi init — both share the RF radio on ESP32-S3.
+   * BLE must be off before esp_wifi_init() to avoid RF contention. */
   ble_disable_sync();
+
+  /* Connect WiFi to the WAN MCU's FOTA AP.
+   * The WAN MCU starts "DA2-FOTA" and enables NAPT to internet
+   * before sending the FOTA trigger SPI frame, so the AP should
+   * already be up by the time we reach here. */
+  ESP_LOGI(TAG, "[OTA] Connecting WiFi to FOTA AP \"%s\"...",
+           FOTA_CONFIG_LAN_WIFI_AP_SSID);
+  if (fota_wifi_connect() != ESP_OK) {
+    ESP_LOGE(TAG, "[OTA] Cannot reach FOTA AP — aborting");
+    esp_restart();
+    vTaskDelete(NULL);
+    return;
+  }
 
   const int max_retries = 5;
   esp_err_t err = ESP_FAIL;
@@ -577,11 +691,10 @@ void advanced_ota_task(void *pvParameter) {
     ESP_LOGI(TAG, "OTA attempt %d/%d (t=%lums)", attempt, max_retries,
              (unsigned long)t0);
 
-    /* Verify PPP routing can reach the ThingsBoard server before
-     * spending the full OTA timeout on a failed connection. */
+    /* Quick reachability check against the ThingsBoard host. */
     if (!internet_reachable()) {
-      ESP_LOGW(TAG, "[OTA] ThingsBoard not reachable, waiting 30s...");
-      vTaskDelay(pdMS_TO_TICKS(30000));
+      ESP_LOGW(TAG, "[OTA] ThingsBoard not reachable, waiting 10s...");
+      vTaskDelay(pdMS_TO_TICKS(10000));
       ESP_LOGE(TAG, "OTA attempt %d skipped (no route to ThingsBoard)", attempt);
       continue;
     }
@@ -607,6 +720,7 @@ void advanced_ota_task(void *pvParameter) {
   }
 
   ESP_LOGE(TAG, "OTA failed after %d attempts, rebooting", max_retries);
+  fota_wifi_disconnect();
   esp_restart();
   vTaskDelete(NULL);
 }

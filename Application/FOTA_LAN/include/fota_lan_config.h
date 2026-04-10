@@ -87,6 +87,14 @@
 /* Enable WiFi connection */
 #define FOTA_CONFIG_LAN_CONNECT_WIFI 1
 
+/* -----------------------------------------------------------------------
+ * FOTA WiFi AP credentials (must match DA2_esp/Application/FOTA/include/fota_ap.h)
+ * The WAN MCU broadcasts this AP specifically for LAN MCU firmware updates.
+ * ----------------------------------------------------------------------- */
+#define FOTA_CONFIG_LAN_WIFI_AP_SSID   "DA2-FOTA"
+#define FOTA_CONFIG_LAN_WIFI_AP_PASS   "da2fota1"
+#define FOTA_CONFIG_LAN_WIFI_CONNECT_TIMEOUT_MS  30000
+
 /* Enable Ethernet connection */
 #define FOTA_CONFIG_LAN_CONNECT_ETHERNET 0
 
@@ -119,8 +127,5 @@
 
 /* Enable dynamic buffer support in mbedTLS */
 #define MBEDTLS_DYNAMIC_BUFFER 1
-
-// Global DNS Server (8.8.8.8)
-#define PPP_GLOBAL_DNS                 0x08080808
 
 #endif /* CONFIG_H */
