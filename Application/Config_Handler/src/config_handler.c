@@ -324,7 +324,6 @@ static void config_handler_task(void *arg) {
           /* Apply the URL parsed from the command (may be default or overridden). */
           fota_lan_handler_set_url(fota_cfg.url);
           // Start FOTA handler task — WiFi AP connect happens inside the task
-          led_show_blue();
           mcu_wan_handler_stop();
           fota_lan_handler_task_start();
         } else {
