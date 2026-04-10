@@ -4,6 +4,7 @@
  */
 
 #include "config_handler.h"
+#include "fota_lan_handler.h"
 #include "config_global.h"
 #include "config_ble_mode.h"
 #include "esp_log.h"
@@ -22,6 +23,7 @@ static const char *TAG = "CONFIG_NVS";
 #define NVS_KEY_RS485_BAUD "rs485_baud"
 #define NVS_KEY_STACK_1_ID "stack1_id"
 #define NVS_KEY_STACK_2_ID "stack2_id"
+#define NVS_KEY_FOTA_LAN_URL "fota_lan_url"  /* LAN MCU firmware OTA URL */
 
 /* Module JSON Config NVS Keys */
 #define NVS_NAMESPACE_MODULE_CONFIG "mod_config"
@@ -41,6 +43,41 @@ static esp_err_t nvs_open_handle(nvs_handle_t *handle) {
   esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, handle);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Error opening NVS handle: %s", esp_err_to_name(err));
+  }
+  return err;
+}
+
+/**
+ * @brief Save LAN MCU firmware OTA URL to NVS.
+ */
+esp_err_t config_save_fota_lan_url_to_nvs(void) {
+  nvs_handle_t handle;
+  esp_err_t err = nvs_open_handle(&handle);
+  if (err != ESP_OK) return err;
+  err = nvs_set_str(handle, NVS_KEY_FOTA_LAN_URL, fota_lan_handler_get_url());
+  if (err == ESP_OK) err = nvs_commit(handle);
+  nvs_close(handle);
+  if (err == ESP_OK)
+    ESP_LOGI(TAG, "FOTA LAN URL saved: %s", fota_lan_handler_get_url());
+  return err;
+}
+
+/**
+ * @brief Load LAN MCU firmware OTA URL from NVS (call at startup).
+ */
+static esp_err_t load_fota_lan_url_from_nvs(void) {
+  nvs_handle_t handle;
+  esp_err_t err = nvs_open_handle(&handle);
+  if (err != ESP_OK) return err;
+  char buf[FOTA_CONFIG_LAN_FIRMWARE_URL_MAX_LEN];
+  size_t len = sizeof(buf);
+  err = nvs_get_str(handle, NVS_KEY_FOTA_LAN_URL, buf, &len);
+  nvs_close(handle);
+  if (err == ESP_OK && len > 1) {
+    fota_lan_handler_set_url(buf);
+    ESP_LOGI(TAG, "FOTA LAN URL loaded: %s", buf);
+  } else if (err == ESP_ERR_NVS_NOT_FOUND) {
+    err = ESP_OK; /* use default from fota_lan_config.h */
   }
   return err;
 }
@@ -371,6 +408,12 @@ static esp_err_t config_loadall_configs_from_nvs(void) {
   err = config_load_global_vars_from_nvs();
   if (err != ESP_OK && err != ESP_ERR_NOT_FOUND) {
     ESP_LOGW(TAG, "Failed to load global config variables");
+  }
+
+  // Load FOTA LAN URL
+  err = load_fota_lan_url_from_nvs();
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Failed to load FOTA LAN URL");
   }
 
   ESP_LOGI(TAG, "Configuration loading complete");

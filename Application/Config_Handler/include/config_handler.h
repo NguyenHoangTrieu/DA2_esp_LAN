@@ -33,7 +33,8 @@ typedef enum {
  * @brief Command type codes for LAN MCU
  */
 typedef enum {
-  CONFIG_UPDATE_FIRMWARE = 0,  // "CFFW" - Firmware update command
+  CONFIG_UPDATE_FIRMWARE = 0,  // "CFFW" - Firmware update command (set URL + trigger)
+  CONFIG_SET_FIRMWARE_URL = 17, // "CFFU" - Set firmware URL only (no trigger, saved to NVS)
   CONFIG_UPDATE_LORA = 1,      // "CFLR" - reserved placeholder (use LORA_JSON/CMD below)
   CONFIG_UPDATE_CAN = 2,       // "CFCB" or "CFCM" - CAN config command
   CONFIG_UPDATE_SCAN = 3,      // "CFSC" - Config query command1
@@ -141,6 +142,7 @@ esp_err_t config_load_global_vars_from_nvs(void);
  * @brief Save RS485 baud rate to NVS
  */
 esp_err_t config_save_rs485_baud(uint32_t baud_rate);
+esp_err_t config_save_fota_lan_url_to_nvs(void);
 
 /* ===== BLE Config NVS Functions ===== */
 

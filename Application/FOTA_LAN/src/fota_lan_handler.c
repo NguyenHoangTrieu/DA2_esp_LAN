@@ -10,6 +10,7 @@
  *   5. WiFi disconnected, device reboots into new firmware.
  */
 #include "fota_lan_handler.h"
+#include "config_handler.h"
 #include "esp_bt.h"
 #include "esp_bt_main.h"
 #include "esp_crt_bundle.h"
@@ -240,6 +241,29 @@ extern const uint8_t server_cert_pem_end[] asm("_binary_ca_cert_pem_end");
 
 static bool ota_task_close = false;
 
+/* -------------------------------------------------------------------
+ * Runtime firmware download URL
+ * Default = FOTA_CONFIG_LAN_FIRMWARE_URL from fota_lan_config.h.
+ * Overridden at runtime by fota_lan_handler_set_url() when the WAN MCU
+ * sends "CFML:CFFW:<url>" via web config or Python app.
+ * ------------------------------------------------------------------- */
+static char s_fota_url[FOTA_CONFIG_LAN_FIRMWARE_URL_MAX_LEN] =
+    FOTA_CONFIG_LAN_FIRMWARE_URL;
+
+void fota_lan_handler_set_url(const char *url)
+{
+    if (!url || url[0] == '\0') return;
+    strncpy(s_fota_url, url, sizeof(s_fota_url) - 1);
+    s_fota_url[sizeof(s_fota_url) - 1] = '\0';
+    ESP_LOGI("lan_advanced_ota", "[OTA] Firmware URL updated: %s", s_fota_url);
+    config_save_fota_lan_url_to_nvs();
+}
+
+const char *fota_lan_handler_get_url(void)
+{
+    return s_fota_url;
+}
+
 /* ------------------------------------------------------------------ */
 /*  NVS resumption helpers                                              */
 /* ------------------------------------------------------------------ */
@@ -445,39 +469,55 @@ static void ble_disable_sync(void) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  ThingsBoard server connectivity pre-check                           */
+/*  Server connectivity pre-check: parse host:port from runtime URL    */
 /* ------------------------------------------------------------------ */
-/* Verify WiFi AP routing can reach the configured ThingsBoard server before
- * spending the full OTA download timeout on a failed connection. */
 static bool internet_reachable(void) {
-  ESP_LOGI(TAG, "[OTA-CHECK] Starting connectivity check to %s:%d",
-           FOTA_CONFIG_LAN_TB_HOST, FOTA_CONFIG_LAN_TB_PORT);
-  
-  char port_str[8];
-  snprintf(port_str, sizeof(port_str), "%d", FOTA_CONFIG_LAN_TB_PORT);
+  const char *url = fota_lan_handler_get_url();
+
+  /* ── Parse host and port from the URL ─────────────────────────── */
+  const char *after_scheme = strstr(url, "://");
+  if (!after_scheme) {
+    ESP_LOGW(TAG, "[OTA-CHECK] Malformed URL: %s", url);
+    return false;
+  }
+  after_scheme += 3;
+
+  char host[128] = {0};
+  char port_str[8] = "80";
+  const char *slash = strchr(after_scheme, '/');
+  const char *colon = strchr(after_scheme, ':');
+  if (colon && (!slash || colon < slash)) {
+    int hlen = (int)(colon - after_scheme);
+    if (hlen >= (int)sizeof(host)) hlen = (int)sizeof(host) - 1;
+    memcpy(host, after_scheme, hlen);
+    int plen = slash ? (int)(slash - colon - 1) : (int)strlen(colon + 1);
+    if (plen > 0 && plen < (int)sizeof(port_str))
+      memcpy(port_str, colon + 1, plen);
+  } else {
+    int hlen = slash ? (int)(slash - after_scheme) : (int)strlen(after_scheme);
+    if (hlen >= (int)sizeof(host)) hlen = (int)sizeof(host) - 1;
+    memcpy(host, after_scheme, hlen);
+    if (strncmp(url, "https", 5) == 0) strcpy(port_str, "443");
+  }
+
+  int port_num = atoi(port_str);
+  ESP_LOGI(TAG, "[OTA-CHECK] Starting connectivity check to %s:%d", host, port_num);
 
   struct sockaddr_in server_addr = {0};
   server_addr.sin_family = AF_INET;
-  server_addr.sin_port = htons(FOTA_CONFIG_LAN_TB_PORT);
+  server_addr.sin_port = htons((uint16_t)port_num);
 
-  /* Check if host is a dotted-decimal IP address first.
-   * If inet_aton() succeeds, skip DNS entirely (DNS might be slow or broken). */
-  if (inet_aton(FOTA_CONFIG_LAN_TB_HOST, &server_addr.sin_addr) == 1) {
+  if (inet_aton(host, &server_addr.sin_addr) == 1) {
     ESP_LOGI(TAG, "[OTA-CHECK] Host is IP address, skipping DNS");
   } else {
-    /* Not an IP address, try DNS resolution with timeout protection */
-    ESP_LOGI(TAG, "[OTA-CHECK] Resolving hostname %s via DNS...", FOTA_CONFIG_LAN_TB_HOST);
-    
+    ESP_LOGI(TAG, "[OTA-CHECK] Resolving hostname %s via DNS...", host);
     struct addrinfo hints = {.ai_family = AF_INET, .ai_socktype = SOCK_STREAM};
     struct addrinfo *res = NULL;
-    
-    int gai_err = getaddrinfo(FOTA_CONFIG_LAN_TB_HOST, port_str, &hints, &res);
+    int gai_err = getaddrinfo(host, port_str, &hints, &res);
     if (gai_err != 0 || !res) {
       ESP_LOGW(TAG, "[OTA-CHECK] DNS failed: %d", gai_err);
       return false;
     }
-    
-    /* Copy resolved address */
     struct sockaddr_in *addr_in = (struct sockaddr_in *)res->ai_addr;
     server_addr.sin_addr = addr_in->sin_addr;
     freeaddrinfo(res);
@@ -493,10 +533,6 @@ static bool internet_reachable(void) {
   int timeout_ms = FOTA_CONFIG_LAN_CONNECTIVITY_CHECK_TIMEOUT_MS;
   ESP_LOGI(TAG, "[OTA-CHECK] timeout=%dms, attempting connect...", timeout_ms);
 
-  /* SO_SNDTIMEO does NOT interrupt connect() in lwIP — it only applies to
-   * send().  A blocking connect() waits for all TCP SYN retransmits to
-   * exhaust (~18 s), not the configured 5 s.  Use a non-blocking socket
-   * with select() instead to get a reliable per-attempt timeout. */
   int flags = fcntl(sock, F_GETFL, 0);
   fcntl(sock, F_SETFL, flags | O_NONBLOCK);
 
@@ -510,7 +546,6 @@ static bool internet_reachable(void) {
     FD_SET(sock, &wfds);
     int sel = select(sock + 1, NULL, &wfds, NULL, &tv);
     if (sel > 0) {
-      /* Socket is writable — check if the connection actually succeeded. */
       int so_err = 0;
       socklen_t slen = sizeof(so_err);
       getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_err, &slen);
@@ -518,7 +553,7 @@ static bool internet_reachable(void) {
       if (so_err) errno = so_err;
     } else {
       r = -1;
-      errno = (sel == 0) ? ETIMEDOUT : errno;  /* 0 = timeout, <0 = error */
+      errno = (sel == 0) ? ETIMEDOUT : errno;
     }
   }
   uint32_t ms = esp_log_timestamp() - t0;
@@ -527,14 +562,11 @@ static bool internet_reachable(void) {
   close(sock);
 
   if (r == 0) {
-    ESP_LOGI(TAG, "[OTA-CHECK] %s:%d reachable (%lums)",
-             FOTA_CONFIG_LAN_TB_HOST, FOTA_CONFIG_LAN_TB_PORT,
-             (unsigned long)ms);
+    ESP_LOGI(TAG, "[OTA-CHECK] %s:%d reachable (%lums)", host, port_num, (unsigned long)ms);
     return true;
   }
   ESP_LOGW(TAG, "[OTA-CHECK] %s:%d unreachable (%lums) errno=%d",
-           FOTA_CONFIG_LAN_TB_HOST, FOTA_CONFIG_LAN_TB_PORT,
-           (unsigned long)ms, errno);
+           host, port_num, (unsigned long)ms, errno);
   return false;
 }
 
@@ -560,25 +592,25 @@ static bool internet_reachable(void) {
 /*  causing socket() to block indefinitely).  That is now fixed.       */
 /* ------------------------------------------------------------------ */
 static esp_err_t manual_ota_download(void) {
-  ESP_LOGI(TAG, "[OTA] Downloading firmware from: %s",
-           FOTA_CONFIG_LAN_FIRMWARE_UPGRADE_URL);
+  const char *fw_url = fota_lan_handler_get_url();
+  ESP_LOGI(TAG, "[OTA] Downloading firmware from: %s", fw_url);
 
   esp_err_t ret = ESP_FAIL;
   uint8_t *fw_buf = NULL;
 
+  bool use_https = (strncmp(fw_url, "https://", 8) == 0);
+
   esp_http_client_config_t http_cfg = {
-      .url            = FOTA_CONFIG_LAN_FIRMWARE_UPGRADE_URL,
+      .url            = fw_url,
       .timeout_ms     = FOTA_CONFIG_LAN_OTA_RECV_TIMEOUT,
       .buffer_size    = OTA_DL_BUF_SIZE,
       .buffer_size_tx = 512,
       .keep_alive_enable = false,
-#if FOTA_CONFIG_LAN_TB_USE_HTTPS && FOTA_CONFIG_LAN_USE_CERT_BUNDLE
+#if FOTA_CONFIG_LAN_USE_CERT_BUNDLE
       .crt_bundle_attach = esp_crt_bundle_attach,
 #endif
-#if FOTA_CONFIG_LAN_TB_USE_HTTPS && FOTA_CONFIG_LAN_TB_SKIP_CERT_VERIFY
-      .skip_cert_common_name_check = true,
-#endif
   };
+  (void)use_https;  /* used in future for per-URL TLS selection */
 
   esp_http_client_handle_t client = esp_http_client_init(&http_cfg);
   if (!client) {
@@ -711,7 +743,7 @@ cleanup_http:
 /* ------------------------------------------------------------------ */
 void advanced_ota_task(void *pvParameter) {
   ESP_LOGI(TAG, "Starting Advanced OTA (ThingsBoard via FOTA WiFi AP) - V4.0.0");
-  ESP_LOGI(TAG, "[OTA] Target: %s", FOTA_CONFIG_LAN_FIRMWARE_UPGRADE_URL);
+  ESP_LOGI(TAG, "[OTA] Target: %s", fota_lan_handler_get_url());
 
   /* BLE must be off before using WiFi — they share the RF radio.
    * fota_wifi_start() was already called by fota_lan_handler_task_start()

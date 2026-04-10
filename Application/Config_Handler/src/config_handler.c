@@ -52,6 +52,8 @@ config_type_t config_parse_type(const char *cmd, uint16_t len) {
   // Check first 2 characters after "CF"
   if (cmd[2] == 'F' && cmd[3] == 'W') {
     return CONFIG_UPDATE_FIRMWARE;
+  } else if (cmd[2] == 'F' && cmd[3] == 'U') {
+    return CONFIG_SET_FIRMWARE_URL;
   } else if (cmd[2] == 'R' && cmd[3] == 'S') {
     // RS485 commands - check subcommand
     if (len >= 10 && strncmp(cmd + 5, "JSON:", 5) == 0) {
@@ -115,7 +117,7 @@ static esp_err_t config_parse_fota(const char *data, uint16_t len,
 
   // Initialize with defaults
   memset(cfg, 0, sizeof(fota_lan_command_t));
-  strncpy(cfg->url, FOTA_CONFIG_LAN_FIRMWARE_UPGRADE_URL, sizeof(cfg->url) - 1);
+  strncpy(cfg->url, fota_lan_handler_get_url(), sizeof(cfg->url) - 1);
   cfg->force_update = false;
 
   // Check if just "FW" command (use defaults)
@@ -302,12 +304,25 @@ static void config_handler_task(void *arg) {
 
       // Route based on command type
       switch (cmd->type) {
+      case CONFIG_SET_FIRMWARE_URL: {
+        /* CFFU:<url> — save LAN firmware URL to NVS only, no OTA trigger */
+        if (cmd->data_len > 5 && cmd->raw_data[4] == ':') {
+          const char *url = cmd->raw_data + 5;
+          if (url[0] != '\0') {
+            fota_lan_handler_set_url(url); /* set_url saves to NVS internally */
+            ESP_LOGI(TAG, "LAN firmware URL saved: %s", url);
+          }
+        }
+        break;
+      }
       case CONFIG_UPDATE_FIRMWARE: {
         fota_lan_command_t fota_cfg;
 
         if (config_parse_fota(cmd->raw_data, cmd->data_len, &fota_cfg) ==
             ESP_OK) {
           ESP_LOGI(TAG, "Starting FOTA process...");
+          /* Apply the URL parsed from the command (may be default or overridden). */
+          fota_lan_handler_set_url(fota_cfg.url);
           // Start FOTA handler task — WiFi AP connect happens inside the task
           led_show_blue();
           mcu_wan_handler_stop();
