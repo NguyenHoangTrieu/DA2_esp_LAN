@@ -20,7 +20,7 @@
 
 /* Full firmware download URL — override via web config or Python app at runtime */
 #define FOTA_CONFIG_LAN_FIRMWARE_URL \
-    "http://192.168.1.100:8080/api/v1/12gxik542xvkuknt5931/firmware?title=DA2_esp_LAN&version=1.1.2"
+    "https://github.com/NguyenHoangTrieu/DA2_esp_release/releases/download/V0.0.1/DA2_esp_LAN.bin"
 
 /* Maximum URL length stored at runtime */
 #define FOTA_CONFIG_LAN_FIRMWARE_URL_MAX_LEN  256

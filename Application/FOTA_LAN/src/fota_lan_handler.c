@@ -19,9 +19,11 @@
 #include "freertos/event_groups.h"
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
+#include "lwip/dns.h"
 #include <arpa/inet.h>
 #include <errno.h>
 #include <string.h>
+#include <strings.h>
 #include <fcntl.h>
 #include <sys/param.h>
 
@@ -123,6 +125,14 @@ static esp_err_t fota_wifi_wait_connected(void)
     if (bits & WIFI_CONNECTED_BIT) {
         ESP_LOGI(TAG, "[WiFi] Connected to FOTA AP \"%s\"",
                  FOTA_CONFIG_LAN_WIFI_AP_SSID);
+        /* Override DNS with a public server — the FOTA AP (192.168.4.1) has
+         * no DNS proxy; NAPT will forward UDP/53 to 8.8.8.8 over the WAN
+         * MCU's internet connection.  Must be set AFTER IP is assigned. */
+        ip_addr_t dns_primary   = IPADDR4_INIT_BYTES(8, 8, 8, 8);
+        ip_addr_t dns_secondary = IPADDR4_INIT_BYTES(8, 8, 4, 4);
+        dns_setserver(0, &dns_primary);
+        dns_setserver(1, &dns_secondary);
+        ESP_LOGI(TAG, "[WiFi] DNS overridden to 8.8.8.8 / 8.8.4.4");
         return ESP_OK;
     }
     ESP_LOGE(TAG, "[WiFi] Failed to connect to FOTA AP (timeout or rejected)");
@@ -591,6 +601,21 @@ static bool internet_reachable(void) {
 /*  bug (eppp_link priority 19 > LwIP 18 starved the tcpip mailbox,    */
 /*  causing socket() to block indefinitely).  That is now fixed.       */
 /* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ */
+/*  Event handler to capture redirect Location header                   */
+/* ------------------------------------------------------------------ */
+static char s_lan_location_header[2048];
+static esp_err_t lan_ota_http_event_handler(esp_http_client_event_t *evt)
+{
+    if (evt->event_id == HTTP_EVENT_ON_HEADER) {
+        if (strcasecmp(evt->header_key, "Location") == 0) {
+            strlcpy(s_lan_location_header, evt->header_value,
+                    sizeof(s_lan_location_header));
+        }
+    }
+    return ESP_OK;
+}
+
 static esp_err_t manual_ota_download(void) {
   const char *fw_url = fota_lan_handler_get_url();
   ESP_LOGI(TAG, "[OTA] Downloading firmware from: %s", fw_url);
@@ -598,19 +623,51 @@ static esp_err_t manual_ota_download(void) {
   esp_err_t ret = ESP_FAIL;
   uint8_t *fw_buf = NULL;
 
-  bool use_https = (strncmp(fw_url, "https://", 8) == 0);
+  /* Resolve redirects first (GitHub → CDN) */
+  static char s_final_url[2048];
+  strlcpy(s_final_url, fw_url, sizeof(s_final_url));
+
+  for (int redir = 0; redir < 5; redir++) {
+    s_lan_location_header[0] = '\0';
+    bool cur_https = (strncmp(s_final_url, "https://", 8) == 0);
+    esp_http_client_config_t probe_cfg = {
+        .url               = s_final_url,
+        .timeout_ms        = 10000,
+        .buffer_size       = 2048,
+        .buffer_size_tx    = 512,
+        .keep_alive_enable = false,
+        .event_handler     = lan_ota_http_event_handler,
+        .crt_bundle_attach = cur_https ? esp_crt_bundle_attach : NULL,
+    };
+    esp_http_client_handle_t probe = esp_http_client_init(&probe_cfg);
+    if (!probe) { ESP_LOGE(TAG, "[OTA] probe init failed"); return ESP_FAIL; }
+    esp_http_client_open(probe, 0);
+    esp_http_client_fetch_headers(probe);
+    int pstatus = esp_http_client_get_status_code(probe);
+    esp_http_client_cleanup(probe);
+    if (pstatus == 301 || pstatus == 302 || pstatus == 307 || pstatus == 308) {
+      if (s_lan_location_header[0] == '\0') {
+        ESP_LOGE(TAG, "[OTA] Redirect %d: no Location header", redir + 1);
+        return ESP_FAIL;
+      }
+      ESP_LOGI(TAG, "[OTA] Redirect %d (%d) → %s", redir + 1, pstatus, s_lan_location_header);
+      strlcpy(s_final_url, s_lan_location_header, sizeof(s_final_url));
+    } else {
+      break;
+    }
+  }
+
+  ESP_LOGI(TAG, "[OTA] Final URL: %s", s_final_url);
+  bool use_https = (strncmp(s_final_url, "https://", 8) == 0);
 
   esp_http_client_config_t http_cfg = {
-      .url            = fw_url,
-      .timeout_ms     = FOTA_CONFIG_LAN_OTA_RECV_TIMEOUT,
-      .buffer_size    = OTA_DL_BUF_SIZE,
-      .buffer_size_tx = 512,
+      .url               = s_final_url,
+      .timeout_ms        = FOTA_CONFIG_LAN_OTA_RECV_TIMEOUT,
+      .buffer_size       = OTA_DL_BUF_SIZE,
+      .buffer_size_tx    = 2048,
       .keep_alive_enable = false,
-#if FOTA_CONFIG_LAN_USE_CERT_BUNDLE
-      .crt_bundle_attach = esp_crt_bundle_attach,
-#endif
+      .crt_bundle_attach = use_https ? esp_crt_bundle_attach : NULL,
   };
-  (void)use_https;  /* used in future for per-URL TLS selection */
 
   esp_http_client_handle_t client = esp_http_client_init(&http_cfg);
   if (!client) {
