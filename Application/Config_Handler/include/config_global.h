@@ -18,23 +18,24 @@ extern "C" {
 
 /* ===== Constants ===== */
 #define MAX_JSON_CONFIG_SIZE 2048
-#define MODULE_ID_NONE "000"
+#define MODULE_ID_NONE "none"
 
 /* ===== Global Configuration Variables ===== */
 
 /**
  * @brief Stack 1 module ID
- * "000" = No module
- * "002" = BLE STM32WB module
- * Add more IDs as needed for other module types
+ * "none" = TCA not accessible (no adapter or I2C failure)
+ * "000"  = Zigbee E18
+ * "009"  = RS485
+ * "015"  = LoRa WIO E5
  */
-extern char g_stack_1_id[4];
+extern char g_stack_1_id[5];
 
 /**
  * @brief Stack 2 module ID
- * "000" = No module detected
+ * "none" = TCA not accessible (no adapter or I2C failure)
  */
-extern char g_stack_2_id[4];
+extern char g_stack_2_id[5];
 
 /**
  * @brief RS485 baudrate configuration

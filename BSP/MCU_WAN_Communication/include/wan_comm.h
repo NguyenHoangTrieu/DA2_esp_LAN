@@ -15,13 +15,13 @@ extern "C" {
 #define WAN_COMM_SPI_CLOCK_HZ         40000000  // 40 MHz default
 #define WAN_COMM_DEFAULT_TX_BUFFER    16384     // 16KB per design (legacy)
 #define WAN_COMM_DEFAULT_RX_BUFFER    16384     // 16KB per design
-#define WAN_COMM_DMA_BUFFER_SIZE      8192      // 4KB DMA limit
+#define WAN_COMM_DMA_BUFFER_SIZE      16384     // 16KB – large enough for max config JSON
 #define WAN_COMM_TRANS_QUEUE_SIZE     7
 #define WAN_COMM_ACK_TIMEOUT_MS       200
 #define WAN_COMM_DQ_RETRY_MS          50
 #define WAN_COMM_DQ_RETRY_COUNT       10
 #define WAN_COMM_TIMEOUT_MS           1000
-#define WAN_COMM_MAX_TRANSFER_SIZE    8192
+#define WAN_COMM_MAX_TRANSFER_SIZE    16384
 #define WAN_COMM_FIXED_XFER_LEN       1024      // Fixed transfer length (bytes)
 #define WAN_COMM_DMA_DESCRIPTOR_SIZE  4092      // ESP32 max per descriptor
 #define WAN_COMM_MAX_DMA_DESCRIPTORS  8

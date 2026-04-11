@@ -20,7 +20,7 @@ static const char *TAG = "STACK_HANDLER";
 /* ===== Per-slot state ===== */
 
 static tca6416a_inst_t   g_tca[STACK_HANDLER_MAX_STACKS];
-static char              g_module_id[STACK_HANDLER_MAX_STACKS][4]; /* "000"-"015" */
+static char              g_module_id[STACK_HANDLER_MAX_STACKS][5]; /* "000"-"015" or "none" if TCA not found */
 static bool              g_slot_present[STACK_HANDLER_MAX_STACKS];
 static SemaphoreHandle_t g_stack_mutex[STACK_HANDLER_MAX_STACKS];
 static bool              g_initialized = false;
@@ -54,7 +54,7 @@ static void read_module_id(uint8_t slot) {
     uint8_t port0_val = 0;
     esp_err_t ret = tca_read_port_inst(&g_tca[slot], TCA_PORT_0, &port0_val);
     if (ret != ESP_OK) {
-        snprintf(g_module_id[slot], sizeof(g_module_id[slot]), "000");
+        snprintf(g_module_id[slot], sizeof(g_module_id[slot]), "none");
         return;
     }
     uint8_t id = port0_val & 0x0F; /* bits 0-3 = P00-P03 */
@@ -72,7 +72,7 @@ esp_err_t stack_handler_init(void) {
     memset(g_tca,          0, sizeof(g_tca));
     memset(g_slot_present, 0, sizeof(g_slot_present));
     for (int i = 0; i < STACK_HANDLER_MAX_STACKS; i++)
-        snprintf(g_module_id[i], sizeof(g_module_id[i]), "000");
+        snprintf(g_module_id[i], sizeof(g_module_id[i]), "none");
 
     for (int slot = 0; slot < STACK_HANDLER_MAX_STACKS; slot++) {
         g_stack_mutex[slot] = xSemaphoreCreateMutex();
@@ -237,6 +237,6 @@ esp_err_t stack_handler_unlock(uint8_t stack_id) {
 }
 
 const char* stack_handler_get_module_id(uint8_t stack_id) {
-    if (!is_valid_stack_id(stack_id)) return "000";
+    if (!is_valid_stack_id(stack_id)) return "none";
     return g_module_id[stack_id];
 }

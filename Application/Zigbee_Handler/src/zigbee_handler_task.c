@@ -18,6 +18,7 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -25,9 +26,9 @@
 static const char *TAG = "ZIGBEE_TASK";
 
 /* ===== Configuration ===== */
-#define ZIGBEE_UPLINK_STACK_SIZE    (16 * 1024)
-#define ZIGBEE_DOWNLINK_STACK_SIZE  (16 * 1024)
-#define ZIGBEE_LISTENER_STACK_SIZE  (8  * 1024)
+#define ZIGBEE_UPLINK_STACK_SIZE    (24 * 1024)   // PSRAM stack
+#define ZIGBEE_DOWNLINK_STACK_SIZE  (24 * 1024)   // PSRAM stack
+#define ZIGBEE_LISTENER_STACK_SIZE  (8  * 1024)   // PSRAM stack
 #define ZIGBEE_UPLINK_PRIO          5
 #define ZIGBEE_DOWNLINK_PRIO        6
 #define ZIGBEE_LISTENER_PRIO        4
@@ -46,6 +47,12 @@ static struct {
     TaskHandle_t uplink_handle[ZIGBEE_MAX_STACKS];
     TaskHandle_t downlink_handle[ZIGBEE_MAX_STACKS];
     TaskHandle_t listener_handle[ZIGBEE_MAX_STACKS];
+    StackType_t  *uplink_stack[ZIGBEE_MAX_STACKS];    // PSRAM stack buffers
+    StackType_t  *downlink_stack[ZIGBEE_MAX_STACKS];
+    StackType_t  *listener_stack[ZIGBEE_MAX_STACKS];
+    StaticTask_t *uplink_tcb[ZIGBEE_MAX_STACKS];      // internal SRAM TCBs
+    StaticTask_t *downlink_tcb[ZIGBEE_MAX_STACKS];
+    StaticTask_t *listener_tcb[ZIGBEE_MAX_STACKS];
     QueueHandle_t uplink_queue[ZIGBEE_MAX_STACKS];
     QueueHandle_t command_queue[ZIGBEE_MAX_STACKS];
 } g_zb_task = {0};
@@ -286,33 +293,94 @@ esp_err_t zigbee_handler_task_start(uint8_t stack_id) {
     g_zb_task.running[stack_id] = true;
 
     char name[16];
+
+    /* ---- Uplink task (PSRAM stack) ---- */
+    g_zb_task.uplink_stack[stack_id] = heap_caps_malloc(ZIGBEE_UPLINK_STACK_SIZE,
+                                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    g_zb_task.uplink_tcb[stack_id]   = heap_caps_malloc(sizeof(StaticTask_t),
+                                                         MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!g_zb_task.uplink_stack[stack_id] || !g_zb_task.uplink_tcb[stack_id]) {
+        ESP_LOGE(TAG, "[Stack %d] Failed to alloc uplink stack/TCB", stack_id);
+        heap_caps_free(g_zb_task.uplink_stack[stack_id]); g_zb_task.uplink_stack[stack_id] = NULL;
+        heap_caps_free(g_zb_task.uplink_tcb[stack_id]);   g_zb_task.uplink_tcb[stack_id]   = NULL;
+        g_zb_task.running[stack_id] = false;
+        free(ul_ctx); free(dl_ctx);
+        return ESP_ERR_NO_MEM;
+    }
     snprintf(name, sizeof(name), "zb_ul_s%d", stack_id);
-    if (xTaskCreate(zigbee_uplink_task, name, ZIGBEE_UPLINK_STACK_SIZE, ul_ctx,
-                    ZIGBEE_UPLINK_PRIO, &g_zb_task.uplink_handle[stack_id]) != pdPASS) {
+    g_zb_task.uplink_handle[stack_id] = xTaskCreateStaticPinnedToCore(
+        zigbee_uplink_task, name, ZIGBEE_UPLINK_STACK_SIZE / sizeof(StackType_t),
+        ul_ctx, ZIGBEE_UPLINK_PRIO,
+        g_zb_task.uplink_stack[stack_id], g_zb_task.uplink_tcb[stack_id], tskNO_AFFINITY);
+    if (!g_zb_task.uplink_handle[stack_id]) {
         ESP_LOGE(TAG, "[Stack %d] Failed to create uplink task", stack_id);
+        heap_caps_free(g_zb_task.uplink_stack[stack_id]); g_zb_task.uplink_stack[stack_id] = NULL;
+        heap_caps_free(g_zb_task.uplink_tcb[stack_id]);   g_zb_task.uplink_tcb[stack_id]   = NULL;
         g_zb_task.running[stack_id] = false;
         free(ul_ctx); free(dl_ctx);
         return ESP_FAIL;
     }
+
+    /* ---- Downlink task (PSRAM stack) ---- */
+    g_zb_task.downlink_stack[stack_id] = heap_caps_malloc(ZIGBEE_DOWNLINK_STACK_SIZE,
+                                                           MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    g_zb_task.downlink_tcb[stack_id]   = heap_caps_malloc(sizeof(StaticTask_t),
+                                                           MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!g_zb_task.downlink_stack[stack_id] || !g_zb_task.downlink_tcb[stack_id]) {
+        ESP_LOGE(TAG, "[Stack %d] Failed to alloc downlink stack/TCB", stack_id);
+        vTaskDelete(g_zb_task.uplink_handle[stack_id]);
+        g_zb_task.uplink_handle[stack_id] = NULL;
+        heap_caps_free(g_zb_task.uplink_stack[stack_id]);   g_zb_task.uplink_stack[stack_id]   = NULL;
+        heap_caps_free(g_zb_task.uplink_tcb[stack_id]);     g_zb_task.uplink_tcb[stack_id]     = NULL;
+        heap_caps_free(g_zb_task.downlink_stack[stack_id]); g_zb_task.downlink_stack[stack_id] = NULL;
+        heap_caps_free(g_zb_task.downlink_tcb[stack_id]);   g_zb_task.downlink_tcb[stack_id]   = NULL;
+        g_zb_task.running[stack_id] = false;
+        free(dl_ctx);
+        return ESP_ERR_NO_MEM;
+    }
     snprintf(name, sizeof(name), "zb_dl_s%d", stack_id);
-    if (xTaskCreate(zigbee_downlink_task, name, ZIGBEE_DOWNLINK_STACK_SIZE, dl_ctx,
-                    ZIGBEE_DOWNLINK_PRIO, &g_zb_task.downlink_handle[stack_id]) != pdPASS) {
+    g_zb_task.downlink_handle[stack_id] = xTaskCreateStaticPinnedToCore(
+        zigbee_downlink_task, name, ZIGBEE_DOWNLINK_STACK_SIZE / sizeof(StackType_t),
+        dl_ctx, ZIGBEE_DOWNLINK_PRIO,
+        g_zb_task.downlink_stack[stack_id], g_zb_task.downlink_tcb[stack_id], tskNO_AFFINITY);
+    if (!g_zb_task.downlink_handle[stack_id]) {
         ESP_LOGE(TAG, "[Stack %d] Failed to create downlink task", stack_id);
         vTaskDelete(g_zb_task.uplink_handle[stack_id]);
         g_zb_task.uplink_handle[stack_id] = NULL;
+        heap_caps_free(g_zb_task.uplink_stack[stack_id]);   g_zb_task.uplink_stack[stack_id]   = NULL;
+        heap_caps_free(g_zb_task.uplink_tcb[stack_id]);     g_zb_task.uplink_tcb[stack_id]     = NULL;
+        heap_caps_free(g_zb_task.downlink_stack[stack_id]); g_zb_task.downlink_stack[stack_id] = NULL;
+        heap_caps_free(g_zb_task.downlink_tcb[stack_id]);   g_zb_task.downlink_tcb[stack_id]   = NULL;
         g_zb_task.running[stack_id] = false;
         free(dl_ctx);
         return ESP_FAIL;
     }
 
+    /* ---- Listener task (PSRAM stack, non-fatal) ---- */
     zb_task_ctx_t *ls_ctx = malloc(sizeof(zb_task_ctx_t));
     if (ls_ctx) {
         ls_ctx->stack_id = stack_id;
-        snprintf(name, sizeof(name), "zb_ls_s%d", stack_id);
-        if (xTaskCreate(zigbee_listener_task, name, ZIGBEE_LISTENER_STACK_SIZE, ls_ctx,
-                        ZIGBEE_LISTENER_PRIO, &g_zb_task.listener_handle[stack_id]) != pdPASS) {
-            ESP_LOGW(TAG, "[Stack %d] Listener task creation failed (non-fatal)", stack_id);
+        g_zb_task.listener_stack[stack_id] = heap_caps_malloc(ZIGBEE_LISTENER_STACK_SIZE,
+                                                               MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        g_zb_task.listener_tcb[stack_id]   = heap_caps_malloc(sizeof(StaticTask_t),
+                                                               MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (!g_zb_task.listener_stack[stack_id] || !g_zb_task.listener_tcb[stack_id]) {
+            ESP_LOGW(TAG, "[Stack %d] Failed to alloc listener stack/TCB (non-fatal)", stack_id);
+            heap_caps_free(g_zb_task.listener_stack[stack_id]); g_zb_task.listener_stack[stack_id] = NULL;
+            heap_caps_free(g_zb_task.listener_tcb[stack_id]);   g_zb_task.listener_tcb[stack_id]   = NULL;
             free(ls_ctx);
+        } else {
+            snprintf(name, sizeof(name), "zb_ls_s%d", stack_id);
+            g_zb_task.listener_handle[stack_id] = xTaskCreateStaticPinnedToCore(
+                zigbee_listener_task, name, ZIGBEE_LISTENER_STACK_SIZE / sizeof(StackType_t),
+                ls_ctx, ZIGBEE_LISTENER_PRIO,
+                g_zb_task.listener_stack[stack_id], g_zb_task.listener_tcb[stack_id], tskNO_AFFINITY);
+            if (!g_zb_task.listener_handle[stack_id]) {
+                ESP_LOGW(TAG, "[Stack %d] Listener task creation failed (non-fatal)", stack_id);
+                heap_caps_free(g_zb_task.listener_stack[stack_id]); g_zb_task.listener_stack[stack_id] = NULL;
+                heap_caps_free(g_zb_task.listener_tcb[stack_id]);   g_zb_task.listener_tcb[stack_id]   = NULL;
+                free(ls_ctx);
+            }
         }
     }
 
@@ -330,14 +398,20 @@ esp_err_t zigbee_handler_task_stop(uint8_t stack_id) {
     if (g_zb_task.uplink_handle[stack_id]) {
         vTaskDelete(g_zb_task.uplink_handle[stack_id]);
         g_zb_task.uplink_handle[stack_id] = NULL;
+        heap_caps_free(g_zb_task.uplink_stack[stack_id]); g_zb_task.uplink_stack[stack_id] = NULL;
+        heap_caps_free(g_zb_task.uplink_tcb[stack_id]);   g_zb_task.uplink_tcb[stack_id]   = NULL;
     }
     if (g_zb_task.downlink_handle[stack_id]) {
         vTaskDelete(g_zb_task.downlink_handle[stack_id]);
         g_zb_task.downlink_handle[stack_id] = NULL;
+        heap_caps_free(g_zb_task.downlink_stack[stack_id]); g_zb_task.downlink_stack[stack_id] = NULL;
+        heap_caps_free(g_zb_task.downlink_tcb[stack_id]);   g_zb_task.downlink_tcb[stack_id]   = NULL;
     }
     if (g_zb_task.listener_handle[stack_id]) {
         vTaskDelete(g_zb_task.listener_handle[stack_id]);
         g_zb_task.listener_handle[stack_id] = NULL;
+        heap_caps_free(g_zb_task.listener_stack[stack_id]); g_zb_task.listener_stack[stack_id] = NULL;
+        heap_caps_free(g_zb_task.listener_tcb[stack_id]);   g_zb_task.listener_tcb[stack_id]   = NULL;
     }
 
     ESP_LOGI(TAG, "[Stack %d] Zigbee tasks stopped", stack_id);

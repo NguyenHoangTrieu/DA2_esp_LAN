@@ -58,8 +58,26 @@ typedef enum {
     LORA_FUNC_READ_RECV,
     /* -- Port (25) ----------------------------------------------------------- */
     LORA_FUNC_SET_PORT,
+    /* -- ABP extended (26) --------------------------------------------------- */
+    LORA_FUNC_GET_DEVADDR,
+    /* -- MAC extended (27-30) ------------------------------------------------ */
+    LORA_FUNC_SET_RETRY,
+    LORA_FUNC_SET_REPT,
+    LORA_FUNC_SET_RXWIN2,
+    LORA_FUNC_SET_DELAY,
+    /* -- Data plane extended (31-32) ----------------------------------------- */
+    LORA_FUNC_SEND_HEX,
+    LORA_FUNC_SEND_CONFIRMED_HEX,
+    /* -- Utility (33-34) ----------------------------------------------------- */
+    LORA_FUNC_CHECK_PAYLOAD_LEN,
+    LORA_FUNC_GET_VDD,
+    /* -- Power management (35-38) -------------------------------------------- */
+    LORA_FUNC_LOWPOWER,
+    LORA_FUNC_LOWPOWER_AUTO_ON,
+    LORA_FUNC_LOWPOWER_AUTO_OFF,
+    LORA_FUNC_WAKEUP_NOTIFY,
 
-    LORA_FUNC_COUNT    = 28,     ///< Capacity (26 defined + 2 reserved)
+    LORA_FUNC_COUNT    = 40,     ///< Capacity (39 defined + 1 reserved)
     LORA_FUNC_INVALID  = 0xFF
 } lora_function_id_t;
 
@@ -90,7 +108,7 @@ typedef struct {
     char     module_name[32];               ///< e.g. "RAK3172"
     char     comm_port_type[16];            ///< "uart" / "spi" / "i2c" / "usb"
     uint32_t baudrate;                      ///< UART baud rate
-    lora_function_config_t functions[LORA_FUNC_COUNT]; ///< All 28 slots (25 + 3 reserved)
+    lora_function_config_t functions[LORA_FUNC_COUNT]; ///< All 40 slots (39 defined + 1 reserved)
 } lora_module_config_t;
 
 /**

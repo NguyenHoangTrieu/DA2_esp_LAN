@@ -40,12 +40,12 @@ typedef struct {
 
 // ===== Default Configuration Macro =====
 #define SD_CARD_CONFIG_DEFAULT()                                               \
-  {.gpio_clk = GPIO_NUM_7,                                                     \
-   .gpio_cmd = GPIO_NUM_6,                                                     \
-   .gpio_d0 = GPIO_NUM_8,                                                      \
-   .gpio_d1 = GPIO_NUM_3,                                                      \
-   .gpio_d2 = GPIO_NUM_4,                                                      \
-   .gpio_d3 = GPIO_NUM_5,                                                      \
+  {.gpio_clk = GPIO_NUM_6,                                                     \
+   .gpio_cmd = GPIO_NUM_7,                                                     \
+   .gpio_d0 = GPIO_NUM_5,                                                      \
+   .gpio_d1 = GPIO_NUM_4,                                                      \
+   .gpio_d2 = GPIO_NUM_16,                                                      \
+   .gpio_d3 = GPIO_NUM_15,                                                      \
    .format_if_failed = false,                                                  \
    .max_files = 10,                                                            \
    .bus_width_4 = false}

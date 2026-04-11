@@ -11,8 +11,8 @@
 static const char *TAG = "config_global";
 
 /* ===== Global Configuration Variables ===== */
-char g_stack_1_id[4] = MODULE_ID_NONE;
-char g_stack_2_id[4] = MODULE_ID_NONE;
+char g_stack_1_id[5] = MODULE_ID_NONE;
+char g_stack_2_id[5] = MODULE_ID_NONE;
 uint32_t g_rs485_baudrate = 115200; // Default baudrate
 
 char *g_stack_1_json_config = NULL;
@@ -52,17 +52,17 @@ const char* config_get_stack_2_json(uint16_t *len) {
 /* ===== Setter Functions ===== */
 
 void config_set_stack_1_id(const char *module_id) {
-    if (module_id && strlen(module_id) <= 3) {
+    if (module_id && strlen(module_id) <= 4) {
         strncpy(g_stack_1_id, module_id, sizeof(g_stack_1_id) - 1);
-        g_stack_1_id[3] = '\0';
+        g_stack_1_id[4] = '\0';
         ESP_LOGI(TAG, "Stack 1 ID set to: %s", g_stack_1_id);
     }
 }
 
 void config_set_stack_2_id(const char *module_id) {
-    if (module_id && strlen(module_id) <= 3) {
+    if (module_id && strlen(module_id) <= 4) {
         strncpy(g_stack_2_id, module_id, sizeof(g_stack_2_id) - 1);
-        g_stack_2_id[3] = '\0';
+        g_stack_2_id[4] = '\0';
         ESP_LOGI(TAG, "Stack 2 ID set to: %s", g_stack_2_id);
     }
 }

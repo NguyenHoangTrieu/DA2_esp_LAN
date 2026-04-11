@@ -351,8 +351,8 @@ static void send_ack_to_wan(ack_type_t ack_type) {
  * NOTE: Caller must hold g_qspi_mutex
  * 
  * New simplified format for Module Base Setting architecture (BLE trial):
- * - g_stack_1_id: "002" (BLE module) or "000" (no module)
- * - g_stack_2_id: "000" (no module) 
+ * - g_stack_1_id: "000"=Zigbee E18, "009"=RS485, "015"=LoRa WIO E5, "none"=TCA not found
+ * - g_stack_2_id: same values as stack_1_id
  * - rs485_baudrate: If using RS485 module
  * - stack1_json: JSON config for stack 1 (if configured)
  * - stack2_json: JSON config for stack 2 (if configured)

@@ -12,15 +12,16 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include <string.h>
 #include <stdlib.h>
 
 static const char *TAG = "BLE_TASK";
 
 /* ===== Configuration ===== */
-#define BLE_UPLINK_TASK_STACK_SIZE   (16 * 1024)
-#define BLE_DOWNLINK_TASK_STACK_SIZE (16 * 1024)
-#define BLE_LISTENER_TASK_STACK_SIZE (8  * 1024)
+#define BLE_UPLINK_TASK_STACK_SIZE   (24 * 1024)   // PSRAM stack
+#define BLE_DOWNLINK_TASK_STACK_SIZE (24 * 1024)   // PSRAM stack
+#define BLE_LISTENER_TASK_STACK_SIZE (8  * 1024)   // PSRAM stack
 #define BLE_UPLINK_TASK_PRIORITY     5
 #define BLE_DOWNLINK_TASK_PRIORITY   6
 #define BLE_LISTENER_TASK_PRIORITY   4      // Lower than command tasks
@@ -39,6 +40,12 @@ static struct {
     TaskHandle_t uplink_task_handle[BLE_MAX_STACKS];
     TaskHandle_t downlink_task_handle[BLE_MAX_STACKS];
     TaskHandle_t listener_task_handle[BLE_MAX_STACKS]; // Background bus listener
+    StackType_t  *uplink_stack[BLE_MAX_STACKS];    // PSRAM stack buffers
+    StackType_t  *downlink_stack[BLE_MAX_STACKS];
+    StackType_t  *listener_stack[BLE_MAX_STACKS];
+    StaticTask_t *uplink_tcb[BLE_MAX_STACKS];      // internal SRAM TCBs
+    StaticTask_t *downlink_tcb[BLE_MAX_STACKS];
+    StaticTask_t *listener_tcb[BLE_MAX_STACKS];
     QueueHandle_t uplink_queue[BLE_MAX_STACKS];
     QueueHandle_t downlink_queue[BLE_MAX_STACKS];
     QueueHandle_t command_queue[BLE_MAX_STACKS];
@@ -390,37 +397,66 @@ esp_err_t ble_handler_task_start(uint8_t stack_id) {
 
     // Create tasks
     g_ble_task.running[stack_id] = true;
-    
-    char task_name[16];
-    snprintf(task_name, sizeof(task_name), "ble_ul_s%d", stack_id);
-    
-    BaseType_t ret = xTaskCreate(ble_uplink_task,
-                                 task_name,
-                                 BLE_UPLINK_TASK_STACK_SIZE,
-                                 uplink_ctx,
-                                 BLE_UPLINK_TASK_PRIORITY,
-                                 &g_ble_task.uplink_task_handle[stack_id]);
 
-    if (ret != pdPASS) {
-        ESP_LOGE(TAG, "[Stack %d] Failed to create BLE uplink task", stack_id);
+    char task_name[16];
+
+    /* ---- Uplink task (PSRAM stack) ---- */
+    g_ble_task.uplink_stack[stack_id] = heap_caps_malloc(BLE_UPLINK_TASK_STACK_SIZE,
+                                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    g_ble_task.uplink_tcb[stack_id]   = heap_caps_malloc(sizeof(StaticTask_t),
+                                                          MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!g_ble_task.uplink_stack[stack_id] || !g_ble_task.uplink_tcb[stack_id]) {
+        ESP_LOGE(TAG, "[Stack %d] Failed to alloc uplink stack/TCB", stack_id);
+        heap_caps_free(g_ble_task.uplink_stack[stack_id]); g_ble_task.uplink_stack[stack_id] = NULL;
+        heap_caps_free(g_ble_task.uplink_tcb[stack_id]);   g_ble_task.uplink_tcb[stack_id]   = NULL;
         g_ble_task.running[stack_id] = false;
-        free(uplink_ctx);
-        free(downlink_ctx);
+        free(uplink_ctx); free(downlink_ctx);
+        return ESP_ERR_NO_MEM;
+    }
+    snprintf(task_name, sizeof(task_name), "ble_ul_s%d", stack_id);
+    g_ble_task.uplink_task_handle[stack_id] = xTaskCreateStaticPinnedToCore(
+        ble_uplink_task, task_name, BLE_UPLINK_TASK_STACK_SIZE / sizeof(StackType_t),
+        uplink_ctx, BLE_UPLINK_TASK_PRIORITY,
+        g_ble_task.uplink_stack[stack_id], g_ble_task.uplink_tcb[stack_id], tskNO_AFFINITY);
+    if (!g_ble_task.uplink_task_handle[stack_id]) {
+        ESP_LOGE(TAG, "[Stack %d] Failed to create BLE uplink task", stack_id);
+        heap_caps_free(g_ble_task.uplink_stack[stack_id]); g_ble_task.uplink_stack[stack_id] = NULL;
+        heap_caps_free(g_ble_task.uplink_tcb[stack_id]);   g_ble_task.uplink_tcb[stack_id]   = NULL;
+        g_ble_task.running[stack_id] = false;
+        free(uplink_ctx); free(downlink_ctx);
         return ESP_FAIL;
     }
 
+    /* ---- Downlink task (PSRAM stack) ---- */
+    g_ble_task.downlink_stack[stack_id] = heap_caps_malloc(BLE_DOWNLINK_TASK_STACK_SIZE,
+                                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    g_ble_task.downlink_tcb[stack_id]   = heap_caps_malloc(sizeof(StaticTask_t),
+                                                            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!g_ble_task.downlink_stack[stack_id] || !g_ble_task.downlink_tcb[stack_id]) {
+        ESP_LOGE(TAG, "[Stack %d] Failed to alloc downlink stack/TCB", stack_id);
+        vTaskDelete(g_ble_task.uplink_task_handle[stack_id]);
+        g_ble_task.uplink_task_handle[stack_id] = NULL;
+        heap_caps_free(g_ble_task.uplink_stack[stack_id]);   g_ble_task.uplink_stack[stack_id]   = NULL;
+        heap_caps_free(g_ble_task.uplink_tcb[stack_id]);     g_ble_task.uplink_tcb[stack_id]     = NULL;
+        heap_caps_free(g_ble_task.downlink_stack[stack_id]); g_ble_task.downlink_stack[stack_id] = NULL;
+        heap_caps_free(g_ble_task.downlink_tcb[stack_id]);   g_ble_task.downlink_tcb[stack_id]   = NULL;
+        g_ble_task.running[stack_id] = false;
+        free(downlink_ctx);
+        return ESP_ERR_NO_MEM;
+    }
     snprintf(task_name, sizeof(task_name), "ble_dl_s%d", stack_id);
-    ret = xTaskCreate(ble_downlink_task,
-                      task_name,
-                      BLE_DOWNLINK_TASK_STACK_SIZE,
-                      downlink_ctx,
-                      BLE_DOWNLINK_TASK_PRIORITY,
-                      &g_ble_task.downlink_task_handle[stack_id]);
-
-    if (ret != pdPASS) {
+    g_ble_task.downlink_task_handle[stack_id] = xTaskCreateStaticPinnedToCore(
+        ble_downlink_task, task_name, BLE_DOWNLINK_TASK_STACK_SIZE / sizeof(StackType_t),
+        downlink_ctx, BLE_DOWNLINK_TASK_PRIORITY,
+        g_ble_task.downlink_stack[stack_id], g_ble_task.downlink_tcb[stack_id], tskNO_AFFINITY);
+    if (!g_ble_task.downlink_task_handle[stack_id]) {
         ESP_LOGE(TAG, "[Stack %d] Failed to create BLE downlink task", stack_id);
         vTaskDelete(g_ble_task.uplink_task_handle[stack_id]);
         g_ble_task.uplink_task_handle[stack_id] = NULL;
+        heap_caps_free(g_ble_task.uplink_stack[stack_id]);   g_ble_task.uplink_stack[stack_id]   = NULL;
+        heap_caps_free(g_ble_task.uplink_tcb[stack_id]);     g_ble_task.uplink_tcb[stack_id]     = NULL;
+        heap_caps_free(g_ble_task.downlink_stack[stack_id]); g_ble_task.downlink_stack[stack_id] = NULL;
+        heap_caps_free(g_ble_task.downlink_tcb[stack_id]);   g_ble_task.downlink_tcb[stack_id]   = NULL;
         g_ble_task.running[stack_id] = false;
         free(downlink_ctx);
         return ESP_FAIL;
@@ -433,17 +469,27 @@ esp_err_t ble_handler_task_start(uint8_t stack_id) {
         // Non-fatal: uplink/downlink still work, just no background listen
     } else {
         listener_ctx->stack_id = stack_id;
-        snprintf(task_name, sizeof(task_name), "ble_ls_s%d", stack_id);
-        ret = xTaskCreate(ble_listener_task,
-                          task_name,
-                          BLE_LISTENER_TASK_STACK_SIZE,
-                          listener_ctx,
-                          BLE_LISTENER_TASK_PRIORITY,
-                          &g_ble_task.listener_task_handle[stack_id]);
-        if (ret != pdPASS) {
-            ESP_LOGW(TAG, "[Stack %d] Failed to create BLE listener task (non-fatal)", stack_id);
-            g_ble_task.listener_task_handle[stack_id] = NULL;
+        g_ble_task.listener_stack[stack_id] = heap_caps_malloc(BLE_LISTENER_TASK_STACK_SIZE,
+                                                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        g_ble_task.listener_tcb[stack_id]   = heap_caps_malloc(sizeof(StaticTask_t),
+                                                                MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (!g_ble_task.listener_stack[stack_id] || !g_ble_task.listener_tcb[stack_id]) {
+            ESP_LOGW(TAG, "[Stack %d] Failed to alloc listener stack/TCB (non-fatal)", stack_id);
+            heap_caps_free(g_ble_task.listener_stack[stack_id]); g_ble_task.listener_stack[stack_id] = NULL;
+            heap_caps_free(g_ble_task.listener_tcb[stack_id]);   g_ble_task.listener_tcb[stack_id]   = NULL;
             free(listener_ctx);
+        } else {
+            snprintf(task_name, sizeof(task_name), "ble_ls_s%d", stack_id);
+            g_ble_task.listener_task_handle[stack_id] = xTaskCreateStaticPinnedToCore(
+                ble_listener_task, task_name, BLE_LISTENER_TASK_STACK_SIZE / sizeof(StackType_t),
+                listener_ctx, BLE_LISTENER_TASK_PRIORITY,
+                g_ble_task.listener_stack[stack_id], g_ble_task.listener_tcb[stack_id], tskNO_AFFINITY);
+            if (!g_ble_task.listener_task_handle[stack_id]) {
+                ESP_LOGW(TAG, "[Stack %d] Failed to create BLE listener task (non-fatal)", stack_id);
+                heap_caps_free(g_ble_task.listener_stack[stack_id]); g_ble_task.listener_stack[stack_id] = NULL;
+                heap_caps_free(g_ble_task.listener_tcb[stack_id]);   g_ble_task.listener_tcb[stack_id]   = NULL;
+                free(listener_ctx);
+            }
         }
     }
 
@@ -467,16 +513,22 @@ esp_err_t ble_handler_task_stop(uint8_t stack_id) {
     if (g_ble_task.uplink_task_handle[stack_id]) {
         vTaskDelete(g_ble_task.uplink_task_handle[stack_id]);
         g_ble_task.uplink_task_handle[stack_id] = NULL;
+        heap_caps_free(g_ble_task.uplink_stack[stack_id]); g_ble_task.uplink_stack[stack_id] = NULL;
+        heap_caps_free(g_ble_task.uplink_tcb[stack_id]);   g_ble_task.uplink_tcb[stack_id]   = NULL;
     }
 
     if (g_ble_task.downlink_task_handle[stack_id]) {
         vTaskDelete(g_ble_task.downlink_task_handle[stack_id]);
         g_ble_task.downlink_task_handle[stack_id] = NULL;
+        heap_caps_free(g_ble_task.downlink_stack[stack_id]); g_ble_task.downlink_stack[stack_id] = NULL;
+        heap_caps_free(g_ble_task.downlink_tcb[stack_id]);   g_ble_task.downlink_tcb[stack_id]   = NULL;
     }
 
     if (g_ble_task.listener_task_handle[stack_id]) {
         vTaskDelete(g_ble_task.listener_task_handle[stack_id]);
         g_ble_task.listener_task_handle[stack_id] = NULL;
+        heap_caps_free(g_ble_task.listener_stack[stack_id]); g_ble_task.listener_stack[stack_id] = NULL;
+        heap_caps_free(g_ble_task.listener_tcb[stack_id]);   g_ble_task.listener_tcb[stack_id]   = NULL;
     }
 
     // Cleanup queues

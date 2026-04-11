@@ -179,6 +179,15 @@ esp_err_t module_monitor_task_start(void) {
             } else {
               ESP_LOGI(TAG, "LoRa handler config loaded after NVS restore (Stack %d)", i);
             }
+          } else if (info->module_type == MODULE_TYPE_ZIGBEE) {
+            esp_err_t cfg_ret = zigbee_handler_task_load_config(i,
+                                                                info->json_config_str,
+                                                                info->json_config_len);
+            if (cfg_ret != ESP_OK) {
+              ESP_LOGE(TAG, "Failed to load Zigbee config for Stack %d after NVS restore", i);
+            } else {
+              ESP_LOGI(TAG, "Zigbee handler config loaded after NVS restore (Stack %d)", i);
+            }
           }
         } else {
           ESP_LOGW(TAG, "Handler start failed for Stack %d: %s", i,
@@ -533,13 +542,25 @@ static void module_monitor_task_impl(void *pvParameters) {
         config_save_module_json_to_nvs(msg.stack_id, msg.json_str,
                                        msg.json_len);
 
-        // Start handler task if not already running
+        // Start handler task if not already running.
+        // Read is_running under mutex for a race-free snapshot.
         module_info_t *info = &g_monitor_state.module_info[msg.stack_id];
-        bool handler_already_running = info->is_running;
+        bool handler_already_running = false;
+        if (xSemaphoreTake(g_monitor_state.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+          handler_already_running = g_monitor_state.module_info[msg.stack_id].is_running;
+          xSemaphoreGive(g_monitor_state.mutex);
+        }
 
         if (!handler_already_running) {
           ret = module_monitor_start_handler(msg.stack_id);
-          if (ret != ESP_OK) {
+          if (ret == ESP_ERR_INVALID_STATE) {
+            // module_monitor_start_handler found is_running==true inside the
+            // mutex — the handler was started between our snapshot and the call.
+            // Treat this as "already running" and fall through to config reload.
+            handler_already_running = true;
+            ESP_LOGW(TAG, "Stack %d handler started between check and call — treating as running",
+                     msg.stack_id);
+          } else if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to start handler for Stack %d", msg.stack_id);
             if (info->module_type == MODULE_TYPE_ZIGBEE) {
               uint8_t error_resp[] = "CFZB:JSON:FAIL:START";

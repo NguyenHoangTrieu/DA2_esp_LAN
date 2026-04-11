@@ -17,15 +17,16 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include <string.h>
 #include <stdlib.h>
 
 static const char *TAG = "LORA_TASK";
 
 /* ===== Configuration ===== */
-#define LORA_UPLINK_TASK_STACK_SIZE    (16 * 1024)
-#define LORA_DOWNLINK_TASK_STACK_SIZE  (16 * 1024)
-#define LORA_LISTENER_TASK_STACK_SIZE  (8  * 1024)
+#define LORA_UPLINK_TASK_STACK_SIZE    (24 * 1024)   // PSRAM stack
+#define LORA_DOWNLINK_TASK_STACK_SIZE  (24 * 1024)   // PSRAM stack
+#define LORA_LISTENER_TASK_STACK_SIZE  (8  * 1024)   // PSRAM stack
 #define LORA_UPLINK_TASK_PRIORITY      5
 #define LORA_DOWNLINK_TASK_PRIORITY    6
 #define LORA_LISTENER_TASK_PRIORITY    4   // Lower than command tasks
@@ -44,6 +45,12 @@ static struct {
     TaskHandle_t  uplink_task_handle[LORA_MAX_STACKS];
     TaskHandle_t  downlink_task_handle[LORA_MAX_STACKS];
     TaskHandle_t  listener_task_handle[LORA_MAX_STACKS]; // Background bus listener
+    StackType_t  *uplink_stack[LORA_MAX_STACKS];    // PSRAM stack buffers
+    StackType_t  *downlink_stack[LORA_MAX_STACKS];
+    StackType_t  *listener_stack[LORA_MAX_STACKS];
+    StaticTask_t *uplink_tcb[LORA_MAX_STACKS];      // internal SRAM TCBs
+    StaticTask_t *downlink_tcb[LORA_MAX_STACKS];
+    StaticTask_t *listener_tcb[LORA_MAX_STACKS];
     QueueHandle_t uplink_queue[LORA_MAX_STACKS];
     QueueHandle_t downlink_queue[LORA_MAX_STACKS];
     QueueHandle_t command_queue[LORA_MAX_STACKS];
@@ -358,54 +365,96 @@ esp_err_t lora_handler_task_start(uint8_t stack_id) {
     g_lora_task.running[stack_id] = true;
 
     char task_name[16];
-    snprintf(task_name, sizeof(task_name), "lora_ul_s%d", stack_id);
-    BaseType_t ret = xTaskCreate(lora_uplink_task,
-                                  task_name,
-                                  LORA_UPLINK_TASK_STACK_SIZE,
-                                  uplink_ctx,
-                                  LORA_UPLINK_TASK_PRIORITY,
-                                  &g_lora_task.uplink_task_handle[stack_id]);
-    if (ret != pdPASS) {
-        ESP_LOGE(TAG, "[Stack %d] Failed to create uplink task", stack_id);
+
+    /* ---- Uplink task (PSRAM stack) ---- */
+    g_lora_task.uplink_stack[stack_id] = heap_caps_malloc(LORA_UPLINK_TASK_STACK_SIZE,
+                                                           MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    g_lora_task.uplink_tcb[stack_id]   = heap_caps_malloc(sizeof(StaticTask_t),
+                                                           MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!g_lora_task.uplink_stack[stack_id] || !g_lora_task.uplink_tcb[stack_id]) {
+        ESP_LOGE(TAG, "[Stack %d] Failed to alloc uplink stack/TCB", stack_id);
+        heap_caps_free(g_lora_task.uplink_stack[stack_id]); g_lora_task.uplink_stack[stack_id] = NULL;
+        heap_caps_free(g_lora_task.uplink_tcb[stack_id]);   g_lora_task.uplink_tcb[stack_id]   = NULL;
         g_lora_task.running[stack_id] = false;
-        free(uplink_ctx);
-        free(downlink_ctx);
+        free(uplink_ctx); free(downlink_ctx);
+        return ESP_ERR_NO_MEM;
+    }
+    snprintf(task_name, sizeof(task_name), "lora_ul_s%d", stack_id);
+    g_lora_task.uplink_task_handle[stack_id] = xTaskCreateStaticPinnedToCore(
+        lora_uplink_task, task_name, LORA_UPLINK_TASK_STACK_SIZE / sizeof(StackType_t),
+        uplink_ctx, LORA_UPLINK_TASK_PRIORITY,
+        g_lora_task.uplink_stack[stack_id], g_lora_task.uplink_tcb[stack_id], tskNO_AFFINITY);
+    if (!g_lora_task.uplink_task_handle[stack_id]) {
+        ESP_LOGE(TAG, "[Stack %d] Failed to create uplink task", stack_id);
+        heap_caps_free(g_lora_task.uplink_stack[stack_id]); g_lora_task.uplink_stack[stack_id] = NULL;
+        heap_caps_free(g_lora_task.uplink_tcb[stack_id]);   g_lora_task.uplink_tcb[stack_id]   = NULL;
+        g_lora_task.running[stack_id] = false;
+        free(uplink_ctx); free(downlink_ctx);
         return ESP_FAIL;
     }
 
+    /* ---- Downlink task (PSRAM stack) ---- */
+    g_lora_task.downlink_stack[stack_id] = heap_caps_malloc(LORA_DOWNLINK_TASK_STACK_SIZE,
+                                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    g_lora_task.downlink_tcb[stack_id]   = heap_caps_malloc(sizeof(StaticTask_t),
+                                                             MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!g_lora_task.downlink_stack[stack_id] || !g_lora_task.downlink_tcb[stack_id]) {
+        ESP_LOGE(TAG, "[Stack %d] Failed to alloc downlink stack/TCB", stack_id);
+        vTaskDelete(g_lora_task.uplink_task_handle[stack_id]);
+        g_lora_task.uplink_task_handle[stack_id] = NULL;
+        heap_caps_free(g_lora_task.uplink_stack[stack_id]);   g_lora_task.uplink_stack[stack_id]   = NULL;
+        heap_caps_free(g_lora_task.uplink_tcb[stack_id]);     g_lora_task.uplink_tcb[stack_id]     = NULL;
+        heap_caps_free(g_lora_task.downlink_stack[stack_id]); g_lora_task.downlink_stack[stack_id] = NULL;
+        heap_caps_free(g_lora_task.downlink_tcb[stack_id]);   g_lora_task.downlink_tcb[stack_id]   = NULL;
+        g_lora_task.running[stack_id] = false;
+        free(downlink_ctx);
+        return ESP_ERR_NO_MEM;
+    }
     snprintf(task_name, sizeof(task_name), "lora_dl_s%d", stack_id);
-    ret = xTaskCreate(lora_downlink_task,
-                      task_name,
-                      LORA_DOWNLINK_TASK_STACK_SIZE,
-                      downlink_ctx,
-                      LORA_DOWNLINK_TASK_PRIORITY,
-                      &g_lora_task.downlink_task_handle[stack_id]);
-    if (ret != pdPASS) {
+    g_lora_task.downlink_task_handle[stack_id] = xTaskCreateStaticPinnedToCore(
+        lora_downlink_task, task_name, LORA_DOWNLINK_TASK_STACK_SIZE / sizeof(StackType_t),
+        downlink_ctx, LORA_DOWNLINK_TASK_PRIORITY,
+        g_lora_task.downlink_stack[stack_id], g_lora_task.downlink_tcb[stack_id], tskNO_AFFINITY);
+    if (!g_lora_task.downlink_task_handle[stack_id]) {
         ESP_LOGE(TAG, "[Stack %d] Failed to create downlink task", stack_id);
         vTaskDelete(g_lora_task.uplink_task_handle[stack_id]);
         g_lora_task.uplink_task_handle[stack_id] = NULL;
+        heap_caps_free(g_lora_task.uplink_stack[stack_id]);   g_lora_task.uplink_stack[stack_id]   = NULL;
+        heap_caps_free(g_lora_task.uplink_tcb[stack_id]);     g_lora_task.uplink_tcb[stack_id]     = NULL;
+        heap_caps_free(g_lora_task.downlink_stack[stack_id]); g_lora_task.downlink_stack[stack_id] = NULL;
+        heap_caps_free(g_lora_task.downlink_tcb[stack_id]);   g_lora_task.downlink_tcb[stack_id]   = NULL;
         g_lora_task.running[stack_id] = false;
         free(downlink_ctx);
         return ESP_FAIL;
     }
 
-    /* Start background listener task (non-fatal if creation fails) */
+    /* ---- Listener task (PSRAM stack, non-fatal) ---- */
     lora_task_context_t *listener_ctx = (lora_task_context_t *)malloc(sizeof(lora_task_context_t));
     if (!listener_ctx) {
         ESP_LOGW(TAG, "[Stack %d] Failed to alloc listener ctx (non-fatal)", stack_id);
     } else {
         listener_ctx->stack_id = stack_id;
-        snprintf(task_name, sizeof(task_name), "lora_ls_s%d", stack_id);
-        ret = xTaskCreate(lora_listener_task,
-                          task_name,
-                          LORA_LISTENER_TASK_STACK_SIZE,
-                          listener_ctx,
-                          LORA_LISTENER_TASK_PRIORITY,
-                          &g_lora_task.listener_task_handle[stack_id]);
-        if (ret != pdPASS) {
-            ESP_LOGW(TAG, "[Stack %d] Failed to create listener task (non-fatal)", stack_id);
-            g_lora_task.listener_task_handle[stack_id] = NULL;
+        g_lora_task.listener_stack[stack_id] = heap_caps_malloc(LORA_LISTENER_TASK_STACK_SIZE,
+                                                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        g_lora_task.listener_tcb[stack_id]   = heap_caps_malloc(sizeof(StaticTask_t),
+                                                                  MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (!g_lora_task.listener_stack[stack_id] || !g_lora_task.listener_tcb[stack_id]) {
+            ESP_LOGW(TAG, "[Stack %d] Failed to alloc listener stack/TCB (non-fatal)", stack_id);
+            heap_caps_free(g_lora_task.listener_stack[stack_id]); g_lora_task.listener_stack[stack_id] = NULL;
+            heap_caps_free(g_lora_task.listener_tcb[stack_id]);   g_lora_task.listener_tcb[stack_id]   = NULL;
             free(listener_ctx);
+        } else {
+            snprintf(task_name, sizeof(task_name), "lora_ls_s%d", stack_id);
+            g_lora_task.listener_task_handle[stack_id] = xTaskCreateStaticPinnedToCore(
+                lora_listener_task, task_name, LORA_LISTENER_TASK_STACK_SIZE / sizeof(StackType_t),
+                listener_ctx, LORA_LISTENER_TASK_PRIORITY,
+                g_lora_task.listener_stack[stack_id], g_lora_task.listener_tcb[stack_id], tskNO_AFFINITY);
+            if (!g_lora_task.listener_task_handle[stack_id]) {
+                ESP_LOGW(TAG, "[Stack %d] Failed to create listener task (non-fatal)", stack_id);
+                heap_caps_free(g_lora_task.listener_stack[stack_id]); g_lora_task.listener_stack[stack_id] = NULL;
+                heap_caps_free(g_lora_task.listener_tcb[stack_id]);   g_lora_task.listener_tcb[stack_id]   = NULL;
+                free(listener_ctx);
+            }
         }
     }
 
@@ -425,14 +474,20 @@ esp_err_t lora_handler_task_stop(uint8_t stack_id) {
     if (g_lora_task.uplink_task_handle[stack_id]) {
         vTaskDelete(g_lora_task.uplink_task_handle[stack_id]);
         g_lora_task.uplink_task_handle[stack_id] = NULL;
+        heap_caps_free(g_lora_task.uplink_stack[stack_id]); g_lora_task.uplink_stack[stack_id] = NULL;
+        heap_caps_free(g_lora_task.uplink_tcb[stack_id]);   g_lora_task.uplink_tcb[stack_id]   = NULL;
     }
     if (g_lora_task.downlink_task_handle[stack_id]) {
         vTaskDelete(g_lora_task.downlink_task_handle[stack_id]);
         g_lora_task.downlink_task_handle[stack_id] = NULL;
+        heap_caps_free(g_lora_task.downlink_stack[stack_id]); g_lora_task.downlink_stack[stack_id] = NULL;
+        heap_caps_free(g_lora_task.downlink_tcb[stack_id]);   g_lora_task.downlink_tcb[stack_id]   = NULL;
     }
     if (g_lora_task.listener_task_handle[stack_id]) {
         vTaskDelete(g_lora_task.listener_task_handle[stack_id]);
         g_lora_task.listener_task_handle[stack_id] = NULL;
+        heap_caps_free(g_lora_task.listener_stack[stack_id]); g_lora_task.listener_stack[stack_id] = NULL;
+        heap_caps_free(g_lora_task.listener_tcb[stack_id]);   g_lora_task.listener_tcb[stack_id]   = NULL;
     }
     if (g_lora_task.uplink_queue[stack_id]) {
         vQueueDelete(g_lora_task.uplink_queue[stack_id]);

@@ -5,6 +5,7 @@
 
 #include "rs485_handler.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "frame_types.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -16,7 +17,7 @@
 static const char *TAG = "RS485_HANDLER";
 
 /* ===== Configuration ===== */
-#define RS485_HANDLER_TASK_STACK_SIZE 4096
+#define RS485_HANDLER_TASK_STACK_SIZE (8 * 1024)   // PSRAM stack
 #define RS485_HANDLER_TASK_PRIORITY 5
 #define RS485_RX_BUFFER_SIZE 512
 #define RS485_TX_TIMEOUT_MS 1000
@@ -44,6 +45,8 @@ typedef struct {
 
 static struct {
   TaskHandle_t task_handle;
+  StackType_t  *task_stack;   // PSRAM stack buffer
+  StaticTask_t *task_tcb;     // internal SRAM TCB
   QueueHandle_t downlink_queue;
   rs485_comm_handle_t comm_handle;
   rs485_handler_stats_t stats;
@@ -95,13 +98,28 @@ esp_err_t rs485_handler_start(void) {
   // Reset statistics
   memset(&g_rs485_ctx.stats, 0, sizeof(rs485_handler_stats_t));
 
-  // Create handler task
-  BaseType_t task_ret = xTaskCreate(
-      rs485_handler_task, "rs485_handler", RS485_HANDLER_TASK_STACK_SIZE, NULL,
-      RS485_HANDLER_TASK_PRIORITY, &g_rs485_ctx.task_handle);
+  // Create handler task (PSRAM stack)
+  g_rs485_ctx.task_stack = heap_caps_malloc(RS485_HANDLER_TASK_STACK_SIZE,
+                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  g_rs485_ctx.task_tcb   = heap_caps_malloc(sizeof(StaticTask_t),
+                                             MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (!g_rs485_ctx.task_stack || !g_rs485_ctx.task_tcb) {
+    ESP_LOGE(TAG, "Failed to alloc RS485 task stack/TCB");
+    heap_caps_free(g_rs485_ctx.task_stack); g_rs485_ctx.task_stack = NULL;
+    heap_caps_free(g_rs485_ctx.task_tcb);   g_rs485_ctx.task_tcb   = NULL;
+    vQueueDelete(g_rs485_ctx.downlink_queue);
+    return ESP_ERR_NO_MEM;
+  }
+  g_rs485_ctx.task_handle = xTaskCreateStaticPinnedToCore(
+      rs485_handler_task, "rs485_handler",
+      RS485_HANDLER_TASK_STACK_SIZE / sizeof(StackType_t),
+      NULL, RS485_HANDLER_TASK_PRIORITY,
+      g_rs485_ctx.task_stack, g_rs485_ctx.task_tcb, tskNO_AFFINITY);
 
-  if (task_ret != pdPASS) {
+  if (!g_rs485_ctx.task_handle) {
     ESP_LOGE(TAG, "Failed to create RS485 handler task");
+    heap_caps_free(g_rs485_ctx.task_stack); g_rs485_ctx.task_stack = NULL;
+    heap_caps_free(g_rs485_ctx.task_tcb);   g_rs485_ctx.task_tcb   = NULL;
     vQueueDelete(g_rs485_ctx.downlink_queue);
     return ESP_ERR_NO_MEM;
   }
@@ -124,6 +142,8 @@ esp_err_t rs485_handler_stop(void) {
   if (g_rs485_ctx.task_handle) {
     vTaskDelete(g_rs485_ctx.task_handle);
     g_rs485_ctx.task_handle = NULL;
+    heap_caps_free(g_rs485_ctx.task_stack); g_rs485_ctx.task_stack = NULL;
+    heap_caps_free(g_rs485_ctx.task_tcb);   g_rs485_ctx.task_tcb   = NULL;
   }
 
   // Delete queue

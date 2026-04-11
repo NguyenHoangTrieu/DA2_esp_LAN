@@ -16,7 +16,7 @@ extern "C" {
  * Constants
  * ========================================================================== */
 
-#define LORA_MAX_FUNCTIONS  28      ///< 26 defined + 2 reserved slots
+#define LORA_MAX_FUNCTIONS  40      ///< 39 defined + 1 reserved slot
 #define LORA_COMMAND_LEN    128
 #define LORA_RESPONSE_LEN   64
 
@@ -63,6 +63,24 @@ typedef enum {
     JSON_LORA_FUNC_READ_RECV,
     // -- Port (25) ---------------------------------------------------------------
     JSON_LORA_FUNC_SET_PORT,
+    // -- ABP extended (26) -------------------------------------------------------
+    JSON_LORA_FUNC_GET_DEVADDR,
+    // -- MAC extended (27-30) ----------------------------------------------------
+    JSON_LORA_FUNC_SET_RETRY,
+    JSON_LORA_FUNC_SET_REPT,
+    JSON_LORA_FUNC_SET_RXWIN2,
+    JSON_LORA_FUNC_SET_DELAY,
+    // -- Data plane extended (31-32) ---------------------------------------------
+    JSON_LORA_FUNC_SEND_HEX,
+    JSON_LORA_FUNC_SEND_CONFIRMED_HEX,
+    // -- Utility (33-34) ---------------------------------------------------------
+    JSON_LORA_FUNC_CHECK_PAYLOAD_LEN,
+    JSON_LORA_FUNC_GET_VDD,
+    // -- Power management (35-38) ------------------------------------------------
+    JSON_LORA_FUNC_LOWPOWER,
+    JSON_LORA_FUNC_LOWPOWER_AUTO_ON,
+    JSON_LORA_FUNC_LOWPOWER_AUTO_OFF,
+    JSON_LORA_FUNC_WAKEUP_NOTIFY,
     // sentinel
     JSON_LORA_FUNC_MAX
 } json_lora_function_id_t;
