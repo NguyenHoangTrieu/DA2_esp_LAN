@@ -23,38 +23,56 @@ static const char *TAG = "LORA_PARSER";
  */
 static const char *LORA_FUNCTION_NAMES[JSON_LORA_FUNC_MAX] = {
     // Lifecycle (0-3)
-    "MODULE_HW_RESET",          // 0
-    "MODULE_SW_RESET",          // 1
-    "MODULE_GET_INFO",          // 2
-    "MODULE_FACTORY_RESET",     // 3
+    "MODULE_HW_RESET",              // 0
+    "MODULE_SW_RESET",              // 1
+    "MODULE_GET_INFO",              // 2
+    "MODULE_FACTORY_RESET",         // 3
     // Region / Class (4-5)
-    "MODULE_SET_REGION",        // 4
-    "MODULE_SET_CLASS",         // 5
+    "MODULE_SET_REGION",            // 4
+    "MODULE_SET_CLASS",             // 5
     // OTAA Provisioning (6-11)
-    "MODULE_SET_JOIN_MODE",     // 6
-    "MODULE_SET_DEVEUI",        // 7
-    "MODULE_GET_DEVEUI",        // 8
-    "MODULE_SET_APPEUI",        // 9
-    "MODULE_SET_APPKEY",        // 10
-    "MODULE_JOIN",              // 11
+    "MODULE_SET_JOIN_MODE",         // 6
+    "MODULE_SET_DEVEUI",            // 7
+    "MODULE_GET_DEVEUI",            // 8
+    "MODULE_SET_APPEUI",            // 9
+    "MODULE_SET_APPKEY",            // 10
+    "MODULE_JOIN",                  // 11
     // Join Status / ABP (12-15)
-    "MODULE_GET_JOIN_STATUS",   // 12
-    "MODULE_SET_DEVADDR",       // 13
-    "MODULE_SET_NWKSKEY",       // 14
-    "MODULE_SET_APPSKEY",       // 15
+    "MODULE_GET_JOIN_STATUS",       // 12
+    "MODULE_SET_DEVADDR",           // 13
+    "MODULE_SET_NWKSKEY",           // 14
+    "MODULE_SET_APPSKEY",           // 15
     // MAC / RF (16-21)
-    "MODULE_SET_DR",            // 16
-    "MODULE_SET_ADR",           // 17
-    "MODULE_SET_TXP",           // 18
-    "MODULE_SET_CHANNEL",       // 19
-    "MODULE_SET_CONFIRM",       // 20
-    "MODULE_SET_PUBLIC_NET",    // 21
+    "MODULE_SET_DR",                // 16
+    "MODULE_SET_ADR",               // 17
+    "MODULE_SET_TXP",               // 18
+    "MODULE_SET_CHANNEL",           // 19
+    "MODULE_SET_CONFIRM",           // 20
+    "MODULE_SET_PUBLIC_NET",        // 21
     // Data plane (22-24)
-    "MODULE_SEND_UNCONFIRMED",  // 22
-    "MODULE_SEND_CONFIRMED",    // 23
-    "MODULE_READ_RECV",         // 24
+    "MODULE_SEND_UNCONFIRMED",      // 22
+    "MODULE_SEND_CONFIRMED",        // 23
+    "MODULE_READ_RECV",             // 24
     // Port (25)
-    "MODULE_SET_PORT",          // 25
+    "MODULE_SET_PORT",              // 25
+    // ABP extended (26)
+    "MODULE_GET_DEVADDR",           // 26
+    // MAC extended (27-30)
+    "MODULE_SET_RETRY",             // 27
+    "MODULE_SET_REPT",              // 28
+    "MODULE_SET_RXWIN2",            // 29
+    "MODULE_SET_DELAY",             // 30
+    // Data plane extended (31-32)
+    "MODULE_SEND_HEX",              // 31
+    "MODULE_SEND_CONFIRMED_HEX",    // 32
+    // Utility (33-34)
+    "MODULE_CHECK_PAYLOAD_LEN",     // 33
+    "MODULE_GET_VDD",               // 34
+    // Power management (35-38)
+    "MODULE_LOWPOWER",              // 35
+    "MODULE_LOWPOWER_AUTO_ON",      // 36
+    "MODULE_LOWPOWER_AUTO_OFF",     // 37
+    "MODULE_WAKEUP_NOTIFY",         // 38
 };
 
 /* ============================================================================
@@ -66,6 +84,7 @@ static const char *LORA_FUNCTION_NAMES[JSON_LORA_FUNC_MAX] = {
  */
 static json_lora_function_id_t get_function_id(const char *function_name) {
     for (int i = 0; i < JSON_LORA_FUNC_MAX; i++) {
+        if (LORA_FUNCTION_NAMES[i] == NULL) continue;
         if (strcmp(function_name, LORA_FUNCTION_NAMES[i]) == 0) {
             return (json_lora_function_id_t)i;
         }

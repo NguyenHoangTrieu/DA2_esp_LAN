@@ -216,16 +216,6 @@ esp_err_t zigbee_handler_load_config(uint8_t stack_id,
     strncpy(dst->module_name, parsed->metadata.module_name,
             sizeof(dst->module_name) - 1);
 
-    if (!g_zigbee_module_ctrl_initialized) {
-        esp_err_t r2 = module_config_controller_init();
-        if (r2 != ESP_OK) {
-            ESP_LOGE(TAG, "module_config_controller_init failed");
-            free(parsed); xSemaphoreGive(g_zigbee_mutex);
-            return r2;
-        }
-        g_zigbee_module_ctrl_initialized = true;
-    }
-
     switch (parsed->metadata.communication.port_type) {
     case COMM_PORT_UART:
         strncpy(dst->comm_port_type, "uart", sizeof(dst->comm_port_type) - 1);
@@ -274,7 +264,6 @@ esp_err_t zigbee_handler_load_config(uint8_t stack_id,
         d->available      = true;
         d->is_hex         = src->is_hex;
         d->is_prefix      = src->is_prefix;
-        d->is_async_event = src->is_async_event;
         d->timeout_ms     = src->timeout_ms;
         d->delay_start_ms = src->delay_start_ms;
         d->delay_end_ms   = src->delay_end_ms;
@@ -314,11 +303,7 @@ esp_err_t zigbee_handler_execute_command_with_config(
         return ESP_ERR_NOT_SUPPORTED;
     }
 
-    if (fc->is_async_event) {
-        ESP_LOGW(TAG, "Function %d is async-event only, cannot be directly executed", func_id);
-        if (result) result->status = ESP_ERR_NOT_SUPPORTED;
-        return ESP_ERR_NOT_SUPPORTED;
-    }
+
 
     TickType_t start_tick = xTaskGetTickCount();
     esp_err_t  ret        = ESP_OK;
@@ -364,34 +349,25 @@ esp_err_t zigbee_handler_execute_command_with_config(
             }
         }
     } else {
-        /* ===== Binary / HEX command =====
-         * command field = "55 CMD_TYPE CMD_CODE"  (3 hex bytes, space-separated)
-         * Frame built:  [0x55][LEN][CMD_TYPE][CMD_CODE][DATA...][XOR]
-         * LEN = 3 + payload_len  (CMD_TYPE + CMD_CODE + DATA + XOR)
-         * XOR = CMD_TYPE ^ CMD_CODE ^ DATA...
+        /* ===== Generic Binary / HEX command =====
+         * command field contains space-separated hex bytes (e.g. "55 04 01 05").
+         * Decoded bytes are sent as-is.  If is_prefix=true, runtime data bytes
+         * are appended directly after the decoded command bytes.
          */
-        uint8_t cmd_bytes[4];
-        size_t  cmd_byte_len = hex_str_to_bytes(fc->command, cmd_bytes, sizeof(cmd_bytes));
-        if (cmd_byte_len >= 3 && cmd_bytes[0] == 0x55) {
-            uint8_t cmd_type    = cmd_bytes[1];
-            uint8_t cmd_code    = cmd_bytes[2];
-            size_t  payload_len = (fc->is_prefix && data && data_len > 0) ? data_len : 0;
-            uint8_t frame[ZIGBEE_COMMAND_LEN + 260];
-            frame[0] = 0x55;
-            frame[1] = (uint8_t)(3 + payload_len);
-            frame[2] = cmd_type;
-            frame[3] = cmd_code;
-            size_t frame_pos = 4;
-            if (payload_len > 0) {
-                memcpy(frame + frame_pos, data, payload_len);
-                frame_pos += payload_len;
+        uint8_t hex_cmd[ZIGBEE_COMMAND_LEN];
+        size_t  hex_cmd_len = hex_str_to_bytes(fc->command, hex_cmd, sizeof(hex_cmd));
+        if (hex_cmd_len > 0) {
+            uint8_t frame[ZIGBEE_COMMAND_LEN + 256];
+            memcpy(frame, hex_cmd, hex_cmd_len);
+            size_t frame_len = hex_cmd_len;
+            if (fc->is_prefix && data && data_len > 0) {
+                size_t append = data_len < (sizeof(frame) - frame_len) ? data_len : (sizeof(frame) - frame_len);
+                memcpy(frame + frame_len, data, append);
+                frame_len += append;
             }
-            uint8_t xor_chk = cmd_type ^ cmd_code;
-            for (size_t i = 0; i < payload_len; i++) xor_chk ^= data[i];
-            frame[frame_pos++] = xor_chk;
-            ret = module_bus_write(stack_id, port_type, frame, frame_pos);
+            ret = module_bus_write(stack_id, port_type, frame, frame_len);
             if (ret != ESP_OK) {
-                ESP_LOGE(TAG, "HEX frame write failed: %s", esp_err_to_name(ret));
+                ESP_LOGE(TAG, "HEX write failed: %s", esp_err_to_name(ret));
                 xSemaphoreGive(g_zigbee_bus_mutex[stack_id]);
                 if (result) result->status = ret;
                 return ret;
@@ -466,6 +442,11 @@ esp_err_t zigbee_handler_listen(uint8_t stack_id,
     }
 
     comm_port_type_t port_type = get_port(stack_id);
+    if (port_type == COMM_PORT_MAX) {
+        xSemaphoreGive(g_zigbee_bus_mutex[stack_id]);
+        return ESP_ERR_INVALID_STATE;
+    }
+
     size_t chunk_len = 0;
     esp_err_t ret = module_bus_read(stack_id, port_type,
                                     buf, max,

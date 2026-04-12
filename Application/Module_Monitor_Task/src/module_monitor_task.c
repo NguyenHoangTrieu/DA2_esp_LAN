@@ -24,7 +24,7 @@ static const char *TAG = "MODULE_MONITOR";
 
 /* ===== Configuration ===== */
 
-#define MODULE_MONITOR_TASK_STACK_SIZE 4096
+#define MODULE_MONITOR_TASK_STACK_SIZE (16 * 1024)
 #define MODULE_MONITOR_TASK_PRIORITY 3
 #define MODULE_MONITOR_CONFIG_QUEUE_SIZE 10
 #define MODULE_MONITOR_MAX_STACKS 2
@@ -37,6 +37,7 @@ static struct {
   QueueHandle_t config_queue;
   SemaphoreHandle_t mutex;
   module_info_t module_info[MODULE_MONITOR_MAX_STACKS]; // Stack 0 and Stack 1
+  bool nvs_restore_pending[MODULE_MONITOR_MAX_STACKS];  // Set by start(), consumed by task
 } g_monitor_state = {0};
 
 /* ===== Module Config Queue Types ===== */
@@ -137,67 +138,11 @@ esp_err_t module_monitor_task_start(void) {
   ESP_LOGI(TAG, "Module IDs: Stack_1=%s, Stack_2=%s",
            config_get_stack_1_id(), config_get_stack_2_id());
 
-  // 5. Load saved JSON only for stacks whose module ID has not changed.
+  // 5. Mark which stacks need NVS restore. The actual restore (cJSON parse +
+  //    handler init + HW reset) runs inside the monitor task to avoid
+  //    overflowing the main task's 8 KB stack.
   for (int i = 0; i < MODULE_MONITOR_MAX_STACKS; i++) {
-    if (id_changed[i]) {
-      ESP_LOGI(TAG, "Stack %d: module was replaced, waiting for new config", i);
-      continue;
-    }
-
-    char *json_str = NULL;
-    uint16_t json_len = 0;
-
-    if (config_load_module_json_from_nvs(i, &json_str, &json_len) == ESP_OK) {
-      ESP_LOGI(TAG, "Loaded saved config for Stack %d from NVS", i);
-      if (module_parse_json_config(i, json_str, json_len) == ESP_OK) {
-        g_monitor_state.module_info[i].is_configured = true;
-        free(json_str); // module_parse_json_config makes its own copy
-
-        // Auto-start handler task for restored config (no queue message on boot)
-        esp_err_t start_ret = module_monitor_start_handler(i);
-        if (start_ret == ESP_OK) {
-          ESP_LOGI(TAG, "Handler auto-started for Stack %d (NVS restore)", i);
-
-          // Load config into handler → triggers HW reset + enter CMD mode
-          // (same sequence as when receiving JSON from WAN MCU)
-          module_info_t *info = &g_monitor_state.module_info[i];
-          if (info->module_type == MODULE_TYPE_BLE) {
-            esp_err_t cfg_ret = ble_handler_task_load_config(i,
-                                                             info->json_config_str,
-                                                             info->json_config_len);
-            if (cfg_ret != ESP_OK) {
-              ESP_LOGE(TAG, "Failed to load config into BLE handler for Stack %d", i);
-            } else {
-              ESP_LOGI(TAG, "BLE handler config loaded after NVS restore (Stack %d)", i);
-            }
-          } else if (info->module_type == MODULE_TYPE_LORA) {
-            esp_err_t cfg_ret = lora_handler_task_load_config(i,
-                                                              info->json_config_str,
-                                                              info->json_config_len);
-            if (cfg_ret != ESP_OK) {
-              ESP_LOGE(TAG, "Failed to load LoRa config for Stack %d after NVS restore", i);
-            } else {
-              ESP_LOGI(TAG, "LoRa handler config loaded after NVS restore (Stack %d)", i);
-            }
-          } else if (info->module_type == MODULE_TYPE_ZIGBEE) {
-            esp_err_t cfg_ret = zigbee_handler_task_load_config(i,
-                                                                info->json_config_str,
-                                                                info->json_config_len);
-            if (cfg_ret != ESP_OK) {
-              ESP_LOGE(TAG, "Failed to load Zigbee config for Stack %d after NVS restore", i);
-            } else {
-              ESP_LOGI(TAG, "Zigbee handler config loaded after NVS restore (Stack %d)", i);
-            }
-          }
-        } else {
-          ESP_LOGW(TAG, "Handler start failed for Stack %d: %s", i,
-                   esp_err_to_name(start_ret));
-        }
-      } else {
-        ESP_LOGW(TAG, "Failed to parse saved config for Stack %d", i);
-        free(json_str);
-      }
-    }
+    g_monitor_state.nvs_restore_pending[i] = !id_changed[i];
   }
 
   // Create and start monitor task
@@ -525,6 +470,61 @@ static esp_err_t module_stop_handler_task(uint8_t stack_id) {
  */
 static void module_monitor_task_impl(void *pvParameters) {
   ESP_LOGI(TAG, "Monitor task running");
+
+  // Boot-time NVS restore – runs here (16 KB stack) instead of in app_main
+  // (8 KB stack) to avoid stack overflow during cJSON parse + handler init.
+  for (int i = 0; i < MODULE_MONITOR_MAX_STACKS; i++) {
+    if (!g_monitor_state.nvs_restore_pending[i]) continue;
+    g_monitor_state.nvs_restore_pending[i] = false;
+
+    char *json_str = NULL;
+    uint16_t json_len = 0;
+
+    if (config_load_module_json_from_nvs(i, &json_str, &json_len) == ESP_OK) {
+      ESP_LOGI(TAG, "Loaded saved config for Stack %d from NVS", i);
+      if (module_parse_json_config(i, json_str, json_len) == ESP_OK) {
+        g_monitor_state.module_info[i].is_configured = true;
+        free(json_str);
+
+        esp_err_t start_ret = module_monitor_start_handler(i);
+        if (start_ret == ESP_OK) {
+          ESP_LOGI(TAG, "Handler auto-started for Stack %d (NVS restore)", i);
+          module_info_t *info = &g_monitor_state.module_info[i];
+          if (info->module_type == MODULE_TYPE_BLE) {
+            esp_err_t cfg_ret = ble_handler_task_load_config(i,
+                                                             info->json_config_str,
+                                                             info->json_config_len);
+            if (cfg_ret != ESP_OK)
+              ESP_LOGE(TAG, "Failed to load config into BLE handler for Stack %d", i);
+            else
+              ESP_LOGI(TAG, "BLE handler config loaded after NVS restore (Stack %d)", i);
+          } else if (info->module_type == MODULE_TYPE_LORA) {
+            esp_err_t cfg_ret = lora_handler_task_load_config(i,
+                                                              info->json_config_str,
+                                                              info->json_config_len);
+            if (cfg_ret != ESP_OK)
+              ESP_LOGE(TAG, "Failed to load LoRa config for Stack %d after NVS restore", i);
+            else
+              ESP_LOGI(TAG, "LoRa handler config loaded after NVS restore (Stack %d)", i);
+          } else if (info->module_type == MODULE_TYPE_ZIGBEE) {
+            esp_err_t cfg_ret = zigbee_handler_task_load_config(i,
+                                                                info->json_config_str,
+                                                                info->json_config_len);
+            if (cfg_ret != ESP_OK)
+              ESP_LOGE(TAG, "Failed to load Zigbee config for Stack %d after NVS restore", i);
+            else
+              ESP_LOGI(TAG, "Zigbee handler config loaded after NVS restore (Stack %d)", i);
+          }
+        } else {
+          ESP_LOGW(TAG, "Handler start failed for Stack %d: %s", i,
+                   esp_err_to_name(start_ret));
+        }
+      } else {
+        ESP_LOGW(TAG, "Failed to parse saved config for Stack %d", i);
+        free(json_str);
+      }
+    }
+  }
 
   module_config_msg_t msg;
 

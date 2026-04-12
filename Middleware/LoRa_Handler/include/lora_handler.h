@@ -86,7 +86,8 @@ typedef enum {
  */
 typedef struct {
     bool available;                     ///< Is function present in JSON config
-    char command[128];                  ///< AT command or prefix string
+    bool is_hex;                        ///< true = binary/hex (send raw bytes), false = ASCII AT + CRLF
+    char command[128];                  ///< AT command or hex bytes (space-separated)
     uint8_t gpio_start[8];              ///< GPIO pins to set before command
     uint8_t gpio_start_state[8];        ///< GPIO states (0=LOW, 1=HIGH)
     uint8_t gpio_start_count;           ///< Number of pre-command GPIO actions

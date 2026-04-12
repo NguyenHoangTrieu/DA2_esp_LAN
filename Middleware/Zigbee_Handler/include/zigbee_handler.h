@@ -2,13 +2,11 @@
  * @file zigbee_handler.h
  * @brief Zigbee Handler Middleware – Transportation Layer
  *
- * Provides AT command execution and async-event listening for the
- * E180-ZG120B (and compatible) Zigbee coordinator modules.
+ * Provides AT command execution for the E180-ZG120B (and compatible) Zigbee coordinator modules.
  *
  * Unified format: all commands are ASCII AT strings (same as BLE/LoRa handlers).
  *  is_hex == false : ASCII/AT command – send command string, match ASCII response
  *  is_hex == true  : binary/hex command – reserved for future use
- *  is_async_event  : no command sent; listener matches expect_response prefix
  */
 
 #ifndef ZIGBEE_HANDLER_H
@@ -99,7 +97,6 @@ typedef struct {
     bool     available;
     bool     is_hex;                            ///< false = ASCII/AT, true = binary
     bool     is_prefix;
-    bool     is_async_event;
     char     command[ZIGBEE_COMMAND_LEN];       ///< AT command string
     char     expect_response[ZIGBEE_RESPONSE_LEN]; ///< ASCII response prefix
     uint16_t timeout_ms;

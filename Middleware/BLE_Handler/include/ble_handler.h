@@ -66,7 +66,8 @@ typedef struct {
  */
 typedef struct {
     bool available;                     ///< Is function available in JSON config
-    char command[128];                  ///< AT command or binary command
+    bool is_hex;                        ///< true = binary/hex (send raw bytes), false = ASCII AT command
+    char command[128];                  ///< AT command or hex bytes (space-separated)
     uint8_t gpio_start[8];              ///< GPIO pins to control before command
     uint8_t gpio_start_state[8];        ///< GPIO states (0=LOW, 1=HIGH)
     uint8_t gpio_start_count;           ///< Number of GPIO controls

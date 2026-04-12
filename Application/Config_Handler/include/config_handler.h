@@ -15,8 +15,8 @@
 
 // Command buffer size
 // Maximum length for config command data
-// Increased to support JSON module configs (~3-4KB typical)
-#define CONFIG_CMD_MAX_LEN 8192
+// Increased to support JSON module configs (~8-16KB typical)
+#define CONFIG_CMD_MAX_LEN 16384
 #define CONFIG_QUEUE_SIZE 10
 
 /**

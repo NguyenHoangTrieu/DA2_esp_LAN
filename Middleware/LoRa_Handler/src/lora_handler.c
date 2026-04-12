@@ -112,6 +112,77 @@ static esp_err_t lora_read_until_terminator(uint8_t stack_id,
     return found ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 
+/* ===== Hex helpers ===== */
+
+static size_t hex_str_to_bytes(const char *hex_str, uint8_t *buf, size_t out_max) {
+    if (!hex_str || !buf || out_max == 0) return 0;
+    size_t n = 0;
+    const char *p = hex_str;
+    while (*p && n < out_max) {
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p) break;
+        unsigned int bval = 0;
+        int consumed = 0;
+        if (sscanf(p, "%2x%n", &bval, &consumed) != 1 || consumed == 0) break;
+        buf[n++] = (uint8_t)bval;
+        p += consumed;
+    }
+    return n;
+}
+
+/**
+ * @brief Binary read variant: accumulate raw bytes and match with memmem.
+ *        Used for is_hex=true commands where response is binary, not ASCII.
+ */
+static esp_err_t lora_read_until_binary(uint8_t stack_id,
+                                         comm_port_type_t port_type,
+                                         const uint8_t *expect_bytes,
+                                         size_t expect_len,
+                                         uint8_t *out_buf,
+                                         size_t out_max,
+                                         size_t *out_len,
+                                         uint32_t timeout_ms) {
+    TickType_t start = xTaskGetTickCount();
+    TickType_t limit = pdMS_TO_TICKS(timeout_ms);
+    uint8_t    chunk[LORA_RESPONSE_CHUNK];
+    size_t     acc   = 0;
+    bool       found = false;
+    *out_len = 0;
+
+    while ((xTaskGetTickCount() - start) < limit) {
+        TickType_t elapsed = xTaskGetTickCount() - start;
+        TickType_t left    = limit - elapsed;
+        uint32_t   win_ms  = (uint32_t)(left * portTICK_PERIOD_MS);
+        if (win_ms > 500U) win_ms = 500U;
+
+        size_t    chunk_len = 0;
+        esp_err_t r = module_bus_read(stack_id, port_type,
+                                      chunk, sizeof(chunk), win_ms, &chunk_len);
+        if (r != ESP_OK && r != ESP_ERR_TIMEOUT) break;
+
+        if (chunk_len > 0) {
+            size_t space = out_max - acc;
+            size_t copy  = chunk_len < space ? chunk_len : space;
+            if (copy > 0) {
+                memcpy(out_buf + acc, chunk, copy);
+                acc += copy;
+            }
+            if (expect_len == 0) {
+                found = true;
+                break;
+            }
+            if (acc >= expect_len &&
+                memmem(out_buf, acc, expect_bytes, expect_len) != NULL) {
+                found = true;
+                break;
+            }
+        }
+    }
+
+    *out_len = acc;
+    return found ? ESP_OK : ESP_ERR_TIMEOUT;
+}
+
 /* ===== Static Data ===== */
 
 static struct {
@@ -169,7 +240,7 @@ static bool lora_parse_pin_id(const char *pin_str, uint8_t *pin_out) {
 
     char *end_ptr = NULL;
     long pin_val = strtol(digits, &end_ptr, 10);
-    if (end_ptr == digits || pin_val < 1 || pin_val > 9) return false;
+    if (end_ptr == digits || pin_val < 1 || pin_val > 17) return false;
 
     *pin_out = (uint8_t)pin_val;
     return true;
@@ -177,11 +248,8 @@ static bool lora_parse_pin_id(const char *pin_str, uint8_t *pin_out) {
 
 static void lora_format_pin_str(uint8_t stack_id, uint8_t pin_id,
                                  char *pin_str, size_t sz) {
-    if (pin_id == LORA_GPIO_PIN_ID_RESET) {
-        snprintf(pin_str, sz, "%dR", stack_id);
-    } else {
-        snprintf(pin_str, sz, "%d%d", stack_id, pin_id);
-    }
+    /* Format as "X%02d" so module_gpio_write receives e.g. "004" or "010" */
+    snprintf(pin_str, sz, "%d%02d", stack_id, (int)pin_id);
 }
 
 static lora_function_config_t *
@@ -337,29 +405,38 @@ static esp_err_t lora_execute_function_internal(uint8_t stack_id,
         return ESP_ERR_TIMEOUT;
     }
 
-    /*
-     * Generic CRLF append: LoRa modules (RAK3172, RN2483, Seeed E5) all require
-     * \r\n as a command delimiter regardless of prefix.  Unlike the BLE handler
-     * (which checks for the "AT" prefix first) we append unconditionally if the
-     * trailing two bytes are not already \r\n.
-     */
-    char lora_cmd_buf[LORA_CMD_MAX_LEN] = {0};
-    const uint8_t *write_ptr = (const uint8_t *)final_command;
-    size_t         write_len = cmd_len;
-    if (cmd_len >= 2 &&
-        (final_command[cmd_len - 2] != '\r' || final_command[cmd_len - 1] != '\n')) {
-        strncpy(lora_cmd_buf, final_command, sizeof(lora_cmd_buf) - 3);
-        lora_cmd_buf[sizeof(lora_cmd_buf) - 3] = '\0';
-        strcat(lora_cmd_buf, "\r\n");
+    /* Build write buffer based on is_hex flag */
+    char    lora_cmd_buf[LORA_CMD_MAX_LEN] = {0};
+    uint8_t hex_cmd_buf[LORA_CMD_MAX_LEN];
+    const uint8_t *write_ptr;
+    size_t         write_len;
+
+    if (!func_cfg->is_hex) {
+        /*
+         * ASCII path: append \r\n if not already present.
+         * LoRa modules (RAK3172, RN2483, Seeed E5) require \r\n as delimiter.
+         */
+        if (cmd_len >= 2 &&
+            (final_command[cmd_len - 2] != '\r' || final_command[cmd_len - 1] != '\n')) {
+            strncpy(lora_cmd_buf, final_command, sizeof(lora_cmd_buf) - 3);
+            lora_cmd_buf[sizeof(lora_cmd_buf) - 3] = '\0';
+            strcat(lora_cmd_buf, "\r\n");
+        } else {
+            strncpy(lora_cmd_buf, final_command, sizeof(lora_cmd_buf) - 3);
+            strcat(lora_cmd_buf, "\r\n");
+        }
         write_ptr = (const uint8_t *)lora_cmd_buf;
         write_len = strlen(lora_cmd_buf);
-        ESP_LOGD(TAG, "Appended CRLF to LoRa command");
-    } else if (cmd_len < 2) {
-        /* Very short command (e.g. single char) – just append \r\n */
-        strncpy(lora_cmd_buf, final_command, sizeof(lora_cmd_buf) - 3);
-        strcat(lora_cmd_buf, "\r\n");
-        write_ptr = (const uint8_t *)lora_cmd_buf;
-        write_len = strlen(lora_cmd_buf);
+    } else {
+        /* HEX path: decode command hex string and send raw bytes, no CRLF */
+        write_len = hex_str_to_bytes(final_command, hex_cmd_buf, sizeof(hex_cmd_buf));
+        if (write_len == 0) {
+            ESP_LOGE(TAG, "Failed to decode hex command for function %d", func_id);
+            xSemaphoreGive(g_lora_bus_mutex[stack_id]);
+            if (result) result->status = ESP_ERR_INVALID_ARG;
+            return ESP_ERR_INVALID_ARG;
+        }
+        write_ptr = hex_cmd_buf;
     }
 
     ret = module_bus_write(stack_id, port_type, write_ptr, write_len);
@@ -376,28 +453,53 @@ static esp_err_t lora_execute_function_internal(uint8_t stack_id,
     bool skip_read = (expect_len == 0 && func_cfg->timeout_ms == 0);
 
     if (!skip_read) {
-        ret = lora_read_until_terminator(stack_id, port_type,
-                                         expect_len > 0 ? func_cfg->expect_response : NULL,
-                                         func_cfg->timeout_ms,
-                                         response_buffer, sizeof(response_buffer),
-                                         &response_len);
-
-        bool response_valid = (ret == ESP_OK);
+        bool response_valid;
+        if (!func_cfg->is_hex) {
+            /* ASCII response matching */
+            ret = lora_read_until_terminator(stack_id, port_type,
+                                             expect_len > 0 ? func_cfg->expect_response : NULL,
+                                             func_cfg->timeout_ms,
+                                             response_buffer, sizeof(response_buffer),
+                                             &response_len);
+            response_valid = (ret == ESP_OK);
+            if (!response_valid && expect_len > 0) {
+                ESP_LOGW(TAG, "Response validation failed: expected '%s'",
+                         func_cfg->expect_response);
+                xSemaphoreGive(g_lora_bus_mutex[stack_id]);
+                if (result) {
+                    result->status = ESP_ERR_INVALID_RESPONSE;
+                    snprintf(result->response, sizeof(result->response), "%s",
+                             response_len > 0 ? response_buffer : "TIMEOUT");
+                    result->response_len = (uint16_t)response_len;
+                }
+                return ESP_ERR_INVALID_RESPONSE;
+            }
+        } else {
+            /* Binary response matching: decode expect_response hex string */
+            uint8_t resp_pattern[16];
+            size_t  resp_plen = hex_str_to_bytes(func_cfg->expect_response,
+                                                  resp_pattern, sizeof(resp_pattern));
+            ret = lora_read_until_binary(stack_id, port_type,
+                                          resp_plen > 0 ? resp_pattern : NULL,
+                                          resp_plen,
+                                          (uint8_t *)response_buffer,
+                                          sizeof(response_buffer),
+                                          &response_len,
+                                          func_cfg->timeout_ms);
+            response_valid = (ret == ESP_OK);
+            if (!response_valid && resp_plen > 0) {
+                ESP_LOGW(TAG, "Binary response validation failed for function %d", func_id);
+                xSemaphoreGive(g_lora_bus_mutex[stack_id]);
+                if (result) {
+                    result->status = ESP_ERR_INVALID_RESPONSE;
+                    memcpy(result->response, response_buffer, response_len);
+                    result->response_len = (uint16_t)response_len;
+                }
+                return ESP_ERR_INVALID_RESPONSE;
+            }
+        }
         if (response_len > 0) {
             ESP_LOGD(TAG, "Received response (%u bytes)", (unsigned)response_len);
-        }
-
-        if (!response_valid && expect_len > 0) {
-            ESP_LOGW(TAG, "Response validation failed: expected '%s'",
-                     func_cfg->expect_response);
-            xSemaphoreGive(g_lora_bus_mutex[stack_id]);
-            if (result) {
-                result->status = ESP_ERR_INVALID_RESPONSE;
-                snprintf(result->response, sizeof(result->response), "%s",
-                         response_len > 0 ? response_buffer : "TIMEOUT");
-                result->response_len = (uint16_t)response_len;
-            }
-            return ESP_ERR_INVALID_RESPONSE;
         }
     } else {
         ESP_LOGD(TAG, "Skipping response read (no response expected, timeout=0)");
@@ -423,8 +525,12 @@ static esp_err_t lora_execute_function_internal(uint8_t stack_id,
     uint32_t exec_time = (xTaskGetTickCount() - start_tick) * portTICK_PERIOD_MS;
     if (result) {
         result->status = ESP_OK;
-        snprintf(result->response, sizeof(result->response), "%s",
-                 response_len > 0 ? response_buffer : "OK");
+        if (!func_cfg->is_hex) {
+            snprintf(result->response, sizeof(result->response), "%s",
+                     response_len > 0 ? response_buffer : "OK");
+        } else {
+            memcpy(result->response, response_buffer, response_len);
+        }
         result->response_len    = (uint16_t)response_len;
         result->execution_time_ms = exec_time;
     }
@@ -501,17 +607,6 @@ esp_err_t lora_handler_load_config(uint8_t stack_id, const char *json_config,
         return ret;
     }
 
-    if (!g_lora_module_ctrl_initialized) {
-        ret = module_config_controller_init();
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to init module config controller");
-            free(parsed);
-            xSemaphoreGive(g_lora_handler_mutex);
-            return ret;
-        }
-        g_lora_module_ctrl_initialized = true;
-    }
-
     memset(&g_lora_handler.config[stack_id], 0, sizeof(lora_module_config_t));
     g_lora_handler.config[stack_id].module_id = stack_id;
     strncpy(g_lora_handler.config[stack_id].module_type,
@@ -575,6 +670,7 @@ esp_err_t lora_handler_load_config(uint8_t stack_id, const char *json_config,
         lora_function_config_t *dst =
             &g_lora_handler.config[stack_id].functions[src->function_id];
         dst->available = true;
+        dst->is_hex    = src->is_hex;
         strncpy(dst->command, src->command, sizeof(dst->command) - 1);
         strncpy(dst->expect_response, src->expect_response,
                 sizeof(dst->expect_response) - 1);
@@ -753,8 +849,20 @@ static const char *s_lora_func_names[LORA_FUNC_COUNT] = {
     "MODULE_SEND_CONFIRMED",    // 23
     "MODULE_READ_RECV",         // 24
     "MODULE_SET_PORT",          // 25
-    /* Slots 26-27 reserved for future extensions */
-    "", "",
+    "MODULE_GET_DEVADDR",       // 26
+    "MODULE_SET_RETRY",         // 27
+    "MODULE_SET_REPT",          // 28
+    "MODULE_SET_RXWIN2",        // 29
+    "MODULE_SET_DELAY",         // 30
+    "MODULE_SEND_HEX",          // 31
+    "MODULE_SEND_CONFIRMED_HEX",// 32
+    "MODULE_CHECK_PAYLOAD_LEN", // 33
+    "MODULE_GET_VDD",           // 34
+    "MODULE_LOWPOWER",          // 35
+    "MODULE_LOWPOWER_AUTO_ON",  // 36
+    "MODULE_LOWPOWER_AUTO_OFF", // 37
+    "MODULE_WAKEUP_NOTIFY",     // 38
+    "",                         // 39 reserved
 };
 
 esp_err_t lora_handler_get_function_by_command(uint8_t stack_id,
@@ -809,7 +917,8 @@ esp_err_t lora_handler_get_function_by_command(uint8_t stack_id,
         lora_function_config_t *cfg =
             &g_lora_handler.config[stack_id].functions[func_id];
         if (!cfg->available) continue;
-        if (s_lora_func_names[func_id][0] != '\0' &&
+        if (s_lora_func_names[func_id] != NULL &&
+            s_lora_func_names[func_id][0] != '\0' &&
             strcmp(command, s_lora_func_names[func_id]) == 0) {
             memcpy(func_config, cfg, sizeof(lora_function_config_t));
             ESP_LOGI(TAG, "Matched function_name: %s (func_id=%d)",

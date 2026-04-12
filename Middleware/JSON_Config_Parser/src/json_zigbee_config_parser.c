@@ -153,9 +153,7 @@ static esp_err_t parse_function(cJSON *func_json,
     cJSON *ihx = cJSON_GetObjectItem(func_json, "is_hex");
     out->is_hex = cJSON_IsBool(ihx) && cJSON_IsTrue(ihx);
 
-    // is_async_event
-    cJSON *async = cJSON_GetObjectItem(func_json, "is_async_event");
-    out->is_async_event = cJSON_IsBool(async) && cJSON_IsTrue(async);
+
 
     // gpio_start_control
     cJSON *gstart = cJSON_GetObjectItem(func_json, "gpio_start_control");
@@ -185,8 +183,8 @@ static esp_err_t parse_function(cJSON *func_json,
     cJSON *de = cJSON_GetObjectItem(func_json, "delay_end");
     out->delay_end_ms = cJSON_IsNumber(de) ? (uint16_t)de->valueint : 0;
 
-    ESP_LOGI(TAG, "Parsed: %s (id=%d, is_hex=%d, async=%d)",
-             fn->valuestring, fid, out->is_hex, out->is_async_event);
+    ESP_LOGI(TAG, "Parsed: %s (id=%d)",
+             fn->valuestring, fid);
     return ESP_OK;
 }
 

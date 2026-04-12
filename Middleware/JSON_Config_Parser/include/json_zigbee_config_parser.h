@@ -6,7 +6,6 @@
  *  - All commands are ASCII AT strings (stored in `command`)
  *  - is_hex: true = binary/hex data, false = ASCII/AT (default)
  *  - expect_response stores ASCII prefix string for response matching
- *  - is_async_event: true = unsolicited event (no command sent, only received)
  */
 
 #ifndef JSON_ZIGBEE_CONFIG_PARSER_H
@@ -109,7 +108,6 @@ typedef struct {
     char command[ZIGBEE_COMMAND_LEN];               ///< AT command string
     bool is_prefix;                                 ///< True if runtime data appended
     bool is_hex;                                    ///< true = binary/hex, false = ASCII/AT
-    bool is_async_event;                            ///< Unsolicited event (no command sent)
     // Timing / GPIO
     gpio_control_t gpio_start[MAX_GPIO_ACTIONS];
     uint8_t  gpio_start_count;

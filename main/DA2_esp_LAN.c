@@ -3,6 +3,7 @@
 */
 
 #include "DA2_esp_LAN.h"
+#include "module_config_controller.h"
 #include "esp_bt.h"
 #include "esp_bt_main.h"
 
@@ -33,6 +34,10 @@ void app_main(void)
     
     ESP_ERROR_CHECK(stack_handler_init());
     ESP_LOGI(TAG, "Stack handler initialized");
+    
+    // Initialize module config controller ONCE at system boot (shared across all handlers)
+    ESP_ERROR_CHECK(module_config_controller_init());
+    ESP_LOGI(TAG, "Module config controller initialized");
     stack_handler_gpio_set_direction(0, STACK_GPIO_PIN_04, true);
     stack_handler_gpio_set_direction(1, STACK_GPIO_PIN_04, true);
     stack_handler_gpio_write(0, STACK_GPIO_PIN_04, true); // ADAPTER POWER ON

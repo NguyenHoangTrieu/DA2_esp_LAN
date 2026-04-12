@@ -229,7 +229,7 @@ esp_err_t config_parse_zigbee_json(const uint8_t *data, uint16_t len) {
         ESP_LOGE(TAG, "ZIGBEE JSON: invalid stack_id %u", stack_id);
         return ESP_FAIL;
     }
-    if (json_len < 2 || json_len > 8912) {
+    if (json_len < 2 || json_len > 16384) {
         ESP_LOGE(TAG, "ZIGBEE JSON: invalid length %u", json_len);
         return ESP_FAIL;
     }

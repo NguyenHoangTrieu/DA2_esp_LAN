@@ -32,6 +32,9 @@ struct wan_comm_handle_s {
     uint8_t *rx_buffer;
     size_t rx_buffer_size_aligned;
     
+    // Persistent DMA TX buffer for DQ polling requests (avoids malloc fragmentation)
+    uint8_t *tx_request_buffer;
+    
     // DMA TX Buffer - replaces legacy tx_buffer
     dma_tx_buffer_t dma_tx;
     
@@ -84,6 +87,7 @@ static void IRAM_ATTR wan_comm_gpio_isr_handler(void *arg) {
     if (handle) { \
         if (handle->transfer_mutex) vSemaphoreDelete(handle->transfer_mutex); \
         if (handle->rx_buffer) heap_caps_free(handle->rx_buffer); \
+        if (handle->tx_request_buffer) heap_caps_free(handle->tx_request_buffer); \
         if (handle->spi_device) spi_bus_remove_device(handle->spi_device); \
         spi_bus_free(handle->config.host_id); \
         free(handle); \
@@ -159,6 +163,17 @@ wan_comm_status_t wan_comm_init(const wan_comm_config_t *config, wan_comm_handle
         return WAN_COMM_ERR_NOMEM;
     }
     
+    // Allocate persistent TX request buffer for DQ polls (16KB, DMA-aligned)
+    h->tx_request_buffer = (uint8_t*)heap_caps_aligned_alloc(DMA_ALIGNMENT,
+                                                              WAN_COMM_DMA_BUFFER_SIZE,
+                                                              MALLOC_CAP_DMA);
+    if (!h->tx_request_buffer) {
+        ESP_LOGE(TAG, "Failed to allocate TX request DMA buffer");
+        heap_caps_free(h->rx_buffer);
+        free(h);
+        return WAN_COMM_ERR_NOMEM;
+    }
+    
     // Verify DMA alignment
     if (!is_dma_aligned(h->rx_buffer, h->rx_buffer_size_aligned)) {
         ESP_LOGE(TAG, "RX buffer alignment verification FAILED");
@@ -166,8 +181,15 @@ wan_comm_status_t wan_comm_init(const wan_comm_config_t *config, wan_comm_handle
         return WAN_COMM_ERR_DMA_ALIGN;
     }
     
+    if (!is_dma_aligned(h->tx_request_buffer, WAN_COMM_DMA_BUFFER_SIZE)) {
+        ESP_LOGE(TAG, "TX request buffer alignment verification FAILED");
+        CLEANUP_INIT(h);
+        return WAN_COMM_ERR_DMA_ALIGN;
+    }
+    
     ESP_LOGI(TAG, "DMA Buffers Allocated:");
-    ESP_LOGI(TAG, "  TX: static buffer (4KB, accumulation)");
+    ESP_LOGI(TAG, "  TX: static buffer (16KB, accumulation)");
+    ESP_LOGI(TAG, "  TX Request: %p (16KB, DQ polling)", h->tx_request_buffer);
     ESP_LOGI(TAG, "  RX: %p (4-byte aligned)", h->rx_buffer);
     
     // Initialize DMA TX buffer
@@ -494,18 +516,10 @@ wan_comm_status_t wan_comm_request_data(wan_comm_handle_t handle,
         return WAN_COMM_ERR_TIMEOUT;
     }
     
-    // Create separate DMA-aligned TX buffer for DQ polling packet
-    // This prevents SPI state machine confusion from residual data
-    uint8_t *tx_buffer = (uint8_t*)heap_caps_aligned_alloc(DMA_ALIGNMENT, 
-                                                             transfer_len, 
-                                                             MALLOC_CAP_DMA);
-    if (!tx_buffer) {
-        xSemaphoreGive(handle->transfer_mutex);
-        wan_comm_report_error(handle, WAN_COMM_ERR_NOMEM, "request_data TX buffer alloc failed");
-        return WAN_COMM_ERR_NOMEM;
-    }
+    // Use persistent TX request buffer instead of dynamic allocation
+    uint8_t *tx_buffer = handle->tx_request_buffer;
     
-    // Build polling packet in separate TX buffer
+    // Build polling packet in TX buffer
     memset(tx_buffer, 0, transfer_len);
     tx_buffer[0] = (WAN_COMM_HEADER_DQ >> 8) & 0xFF;
     tx_buffer[1] = WAN_COMM_HEADER_DQ & 0xFF;
@@ -535,9 +549,6 @@ wan_comm_status_t wan_comm_request_data(wan_comm_handle_t handle,
     }
     
     xSemaphoreGive(handle->transfer_mutex);
-    
-    // Free temporary TX buffer
-    heap_caps_free(tx_buffer);
     
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "SPI RX failed: %s", esp_err_to_name(ret));

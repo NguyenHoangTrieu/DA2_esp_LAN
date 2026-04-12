@@ -458,11 +458,16 @@ esp_err_t module_gpio_write(uint8_t stack_id, const char *pin, bool state) {
     pin_num = (pin[1] - '0') * 10 + (pin[2] - '0');
   }
   
-  if (pin_num < 4 || pin_num > 17) {
-    ESP_LOGE(TAG, "Invalid GPIO pin: %s (must be 04-17)", pin);
+  if (pin_num < 0 || pin_num > 17 || pin_num == 8 || pin_num == 9) {
+    ESP_LOGE(TAG, "Invalid GPIO pin: %s (must be 00-07 or 10-17)", pin);
     return ESP_ERR_INVALID_ARG;
   }
-  
+
+  // P10-P17 map to enum values 8-15 (STACK_GPIO_PIN_10=8 ... STACK_GPIO_PIN_17=15)
+  if (pin_num >= 10) {
+    pin_num -= 2;
+  }
+
   gpio_pin = (stack_gpio_pin_num_t)pin_num;
   ESP_LOGD(TAG, "Parsed pin %s as GPIO pin %d (enum %d)", pin, pin_num, gpio_pin);
 
@@ -526,11 +531,16 @@ esp_err_t module_gpio_write_multi(uint8_t stack_id,
       pin_num = (pin_str[1] - '0') * 10 + (pin_str[2] - '0');
     }
     
-    if (pin_num < 4 || pin_num > 17) {
-      ESP_LOGE(TAG, "Invalid GPIO pin format at index %d: expected 04-17, got %s", i, pin_str);
+    if (pin_num < 0 || pin_num > 17 || pin_num == 8 || pin_num == 9) {
+      ESP_LOGE(TAG, "Invalid GPIO pin format at index %d: expected 00-07 or 10-17, got %s", i, pin_str);
       return ESP_ERR_INVALID_ARG;
     }
-    
+
+    // P10-P17 map to enum values 8-15 (STACK_GPIO_PIN_10=8 ... STACK_GPIO_PIN_17=15)
+    if (pin_num >= 10) {
+      pin_num -= 2;
+    }
+
     actions[i].pin = (stack_gpio_pin_num_t)pin_num;
     actions[i].level = gpio_actions[i].state;
   }
