@@ -183,6 +183,22 @@ esp_err_t zigbee_handler_get_function_config(uint8_t stack_id,
                                               zigbee_function_id_t func_id,
                                               zigbee_function_config_t *out);
 
+/**
+ * @brief One-time hardcoded AT mode ensure for E180-ZG120B.
+ *
+ * Checks NVS flag "zb_init/at_ok_s{stack_id}".  On first call (or if
+ * verification fails) it:
+ *   1. HW-resets the module via TCA P01 (RESET#)
+ *   2. Exits transparent mode with "+++"
+ *   3. Sends HEX enter-AT command [55 03 00 16 16]
+ *   4. Verifies with AT+INFO?  (checks for "TYPE=" / "NO NET" / "MAC=")
+ *   5. Saves NVS flag on success
+ *
+ * Subsequent calls within the same session are no-ops (static flag).
+ * Must be called after UART is initialised (i.e. after zigbee_handler_load_config).
+ */
+esp_err_t zigbee_handler_ensure_at_mode(uint8_t stack_id);
+
 #ifdef __cplusplus
 }
 #endif

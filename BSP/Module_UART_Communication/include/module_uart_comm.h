@@ -23,8 +23,8 @@ extern "C" {
 #define STACK0_UART_RX_PIN  18
 
 #define STACK1_UART_PORT    UART_NUM_1
-#define STACK1_UART_TX_PIN  15
-#define STACK1_UART_RX_PIN  16
+#define STACK1_UART_TX_PIN  8
+#define STACK1_UART_RX_PIN  21
 
 /* ===== Type Definitions ===== */
 

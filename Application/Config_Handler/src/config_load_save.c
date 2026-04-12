@@ -153,7 +153,7 @@ esp_err_t config_load_module_json_from_nvs(uint8_t stack_id, char **json_str, ui
     return ret;
   }
 
-  if (required_size == 0 || required_size > 8192) { // Sanity check
+  if (required_size == 0 || required_size > 16384) { // Sanity check
     nvs_close(handle);
     ESP_LOGE(TAG, "Invalid JSON size: %lu", (unsigned long)required_size);
     return ESP_ERR_INVALID_ARG;

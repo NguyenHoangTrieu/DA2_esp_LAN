@@ -92,9 +92,16 @@ esp_err_t stack_handler_init(void) {
     for (int i = 0; i < (int)(sizeof(k_scan_addrs) / sizeof(k_scan_addrs[0])); i++) {
         uint8_t addr = k_scan_addrs[i];
         bool slotdet = false;
-        esp_err_t ret = tca_probe_slotdet(addr, &slotdet);
+        esp_err_t ret = ESP_FAIL;
+        /* Retry probe up to 3 times with 100ms delay — handles power-up
+         * timing where TCA6416A I2C is not yet ready on first boot. */
+        for (int probe_retry = 0; probe_retry < 3; probe_retry++) {
+            ret = tca_probe_slotdet(addr, &slotdet);
+            if (ret == ESP_OK) break;
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
         if (ret != ESP_OK) {
-            ESP_LOGI(TAG, "Scan 0x%02X: not present", addr);
+            ESP_LOGI(TAG, "Scan 0x%02X: not present after retries", addr);
             continue;
         }
         int slot = slotdet ? 1 : 0;

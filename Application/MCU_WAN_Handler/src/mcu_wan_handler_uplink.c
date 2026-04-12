@@ -568,24 +568,32 @@ static esp_err_t send_data_to_wan(const uint8_t *data, uint16_t length,
 
     while ((xTaskGetTickCount() - start) < timeout_ticks) {
 
-      uint8_t ack_response[8] = {0};
+      /* Use 256-byte buffer so the ACK [0x02][0x11] is found even when WAN
+       * bundles a local-response DT payload before the ACK in the same
+       * 1024-byte SPI frame. */
+      uint8_t ack_response[256] = {0};
       status = wan_comm_request_data(g_wan_handle, ack_response,
                                      sizeof(ack_response));
 
-      if (status == WAN_COMM_OK && ack_response[0] == 0x02 &&
-          ack_response[1] == ACK_TYPE_RECEIVED_OK) {
+      if (status == WAN_COMM_OK) {
+        /* Scan the full 256-byte response for the ACK pattern */
+        for (int i = 0; i <= (int)sizeof(ack_response) - 3; i++) {
+          if (ack_response[i] == 0x02 &&
+              ack_response[i + 1] == ACK_TYPE_RECEIVED_OK) {
 
-        *ack_out = (ack_type_t)ack_response[2];
-        /* STM32 may return boolean 0x01/0x00 instead of enum 0x12/0x13 —
-         * normalise: any non-zero internet byte = INTERNET_OK */
-        if (*ack_out != ACK_TYPE_INTERNET_OK && *ack_out != ACK_TYPE_NO_INTERNET) {
-          *ack_out = (ack_response[2] != 0) ? ACK_TYPE_INTERNET_OK
-                                            : ACK_TYPE_NO_INTERNET;
+            *ack_out = (ack_type_t)ack_response[i + 2];
+            /* STM32 may return boolean 0x01/0x00 instead of enum 0x12/0x13 —
+             * normalise: any non-zero internet byte = INTERNET_OK */
+            if (*ack_out != ACK_TYPE_INTERNET_OK && *ack_out != ACK_TYPE_NO_INTERNET) {
+              *ack_out = (ack_response[i + 2] != 0) ? ACK_TYPE_INTERNET_OK
+                                                     : ACK_TYPE_NO_INTERNET;
+            }
+            ESP_LOGI(TAG, "ACK received: %s (ack=0x%02X internet=0x%02X)",
+                     (*ack_out == ACK_TYPE_INTERNET_OK) ? "INTERNET_OK" : "NO_INTERNET",
+                     ack_response[i + 1], ack_response[i + 2]);
+            return ESP_OK;
+          }
         }
-        ESP_LOGI(TAG, "ACK received: %s (ack=0x%02X internet=0x%02X)",
-                 (*ack_out == ACK_TYPE_INTERNET_OK) ? "INTERNET_OK" : "NO_INTERNET",
-                 ack_response[1], ack_response[2]);
-        return ESP_OK;
       }
 
       // Small yield to allow other tasks to run
