@@ -184,6 +184,40 @@ esp_err_t zigbee_handler_get_function_config(uint8_t stack_id,
                                               zigbee_function_config_t *out);
 
 /**
+ * @brief Look up function config by command string (AT prefix or exact match).
+ *
+ * Pass 1: prefix match for AT+ commands, exact match for others.
+ * Pass 2: function-name fallback for GPIO-only triggers.
+ *
+ * @param stack_id    Stack ID
+ * @param command     Raw command string from server (e.g. "AT+INFO?")
+ * @param func_config [out] Filled on success
+ * @return ESP_OK if found, ESP_ERR_NOT_FOUND otherwise
+ */
+esp_err_t zigbee_handler_get_function_by_command(uint8_t stack_id,
+                                                   const char *command,
+                                                   zigbee_function_config_t *func_config);
+
+/**
+ * @brief Execute a raw command string using a pre-resolved function config.
+ *
+ * Sends @p command directly to the module UART (no func_id lookup).
+ * GPIO, timeout, and expected-response metadata come from @p fc.
+ *
+ * @param stack_id   Stack ID
+ * @param command    Null-terminated AT command string (e.g. "AT+INFO?")
+ * @param command_len Length of command (0 = auto strlen)
+ * @param fc         Pre-resolved function config (GPIO/timeout/expect)
+ * @param result     [out] Response buffer (may be NULL)
+ * @return ESP_OK on success
+ */
+esp_err_t zigbee_handler_execute_command_raw(uint8_t stack_id,
+                                              const char *command,
+                                              uint16_t command_len,
+                                              const zigbee_function_config_t *fc,
+                                              zigbee_exec_result_t *result);
+
+/**
  * @brief One-time hardcoded AT mode ensure for E180-ZG120B.
  *
  * Checks NVS flag "zb_init/at_ok_s{stack_id}".  On first call (or if

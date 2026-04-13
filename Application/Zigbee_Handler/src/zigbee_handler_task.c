@@ -132,21 +132,14 @@ static void zigbee_downlink_task(void *pv) {
         }
         if (!g_zb_task.running[sid]) break;
 
-        ESP_LOGI(TAG, "[Stack %d] Executing func_id=%d data_len=%d",
-                 sid, req.func_id, req.data_len);
+        ESP_LOGI(TAG, "[Stack %d] Executing command='%.*s'",
+                 sid, req.command_len, req.command);
 
         zigbee_exec_result_t result = {0};
-        esp_err_t ret = zigbee_handler_execute_command_with_config(
-            sid, req.func_id,
-            req.data_len > 0 ? req.data : NULL,
-            req.data_len,
-            &result);
+        esp_err_t ret = zigbee_handler_execute_command_raw(
+            sid, req.command, req.command_len, &req.func_config, &result);
 
-        /* Get function name for response string */
-        zigbee_function_config_t fc = {0};
-        zigbee_handler_get_function_config(sid, req.func_id, &fc);
-
-        /* Build response packet "CFZB:<stack>:OK/FAIL:<func>[:<hex_data>]" */
+        /* Build response packet "CFZB:<stack>:OK/FAIL:<cmd>[:<hex_response>]" */
         char *resp_pkt = (char *)malloc(ZIGBEE_RESP_PACKET_SIZE);
         if (!resp_pkt) {
             ESP_LOGE(TAG, "[Stack %d] Failed alloc resp buffer", sid);
@@ -156,30 +149,21 @@ static void zigbee_downlink_task(void *pv) {
         int pkt_len;
         if (ret == ESP_OK) {
             if (result.response_len > 0) {
-                /* Convert binary response to hex string */
-                char *hex_str = (char *)malloc(result.response_len * 3 + 8);
-                if (hex_str) {
-                    bytes_to_hex_str(result.response, result.response_len,
-                                     hex_str, result.response_len * 3 + 8);
-                    pkt_len = snprintf(resp_pkt, ZIGBEE_RESP_PACKET_SIZE,
-                                       "CFZB:%d:OK:%s:%s",
-                                       sid, fc.command[0] ? fc.command : "FUNC",
-                                       hex_str);
-                    free(hex_str);
-                } else {
-                    pkt_len = snprintf(resp_pkt, ZIGBEE_RESP_PACKET_SIZE,
-                                       "CFZB:%d:OK:%s", sid,
-                                       fc.command[0] ? fc.command : "FUNC");
-                }
+                /* Zigbee responses are ASCII — forward as-is */
+                result.response[result.response_len] = '\0';
+                pkt_len = snprintf(resp_pkt, ZIGBEE_RESP_PACKET_SIZE,
+                                   "CFZB:%d:OK:%.*s:%s",
+                                   sid, req.command_len, req.command,
+                                   (char *)result.response);
             } else {
                 pkt_len = snprintf(resp_pkt, ZIGBEE_RESP_PACKET_SIZE,
-                                   "CFZB:%d:OK:%s", sid,
-                                   fc.command[0] ? fc.command : "FUNC");
+                                   "CFZB:%d:OK:%.*s",
+                                   sid, req.command_len, req.command);
             }
         } else {
             pkt_len = snprintf(resp_pkt, ZIGBEE_RESP_PACKET_SIZE,
-                               "CFZB:%d:FAIL:%s:%s", sid,
-                               fc.command[0] ? fc.command : "FUNC",
+                               "CFZB:%d:FAIL:%.*s:%s",
+                               sid, req.command_len, req.command,
                                esp_err_to_name(ret));
         }
 

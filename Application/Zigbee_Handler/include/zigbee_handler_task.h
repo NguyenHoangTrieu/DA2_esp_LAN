@@ -36,14 +36,16 @@ typedef struct {
 /**
  * @brief Command execution request (from config handler).
  *
- * func_id selects the function from the JSON config.
- * data[] carries optional binary payload appended to the HEX frame.
+ * Mirrors lora_command_request_t: the raw command string from the server is
+ * carried verbatim, together with the pre-resolved function config (GPIO,
+ * timing, expected response).  The handler sends @c command directly to the
+ * module UART — no function-name lookup at dispatch time.
  */
 typedef struct {
-    uint8_t              stack_id;
-    zigbee_function_id_t func_id;
-    uint8_t              data[252];     ///< Binary payload (e.g. addr + cluster bytes)
-    uint8_t              data_len;
+    uint8_t  stack_id;
+    char     command[256];               ///< Raw AT command string from server
+    uint16_t command_len;                ///< Length of command (without CRLF)
+    zigbee_function_config_t func_config; ///< Pre-resolved config (GPIO/timeout/expect)
 } zigbee_command_request_t;
 
 /* ===== Public API ===== */

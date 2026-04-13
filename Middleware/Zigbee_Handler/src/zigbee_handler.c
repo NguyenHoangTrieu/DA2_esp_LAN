@@ -33,8 +33,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-static bool g_zigbee_module_ctrl_initialized = false;
-
 static const char *TAG = "ZIGBEE_HANDLER";
 
 /* ===== Configuration Constants ===== */
@@ -150,7 +148,7 @@ static esp_err_t zigbee_read_until(uint8_t sid, comm_port_type_t port_type,
 
 /* ===== GPIO helpers (mirrors lora_handler.c) ===== */
 
-static void zigbee_apply_gpio(uint8_t sid, gpio_control_t *list, uint8_t count) {
+static void zigbee_apply_gpio(uint8_t sid, const gpio_control_t *list, uint8_t count) {
     for (uint8_t i = 0; i < count; i++) {
         char pin_str[16];
         snprintf(pin_str, sizeof(pin_str), "%d%s", sid, list[i].pin);
@@ -470,6 +468,171 @@ esp_err_t zigbee_handler_get_function_config(uint8_t stack_id,
     if (!g_zigbee.initialized || !is_valid_stack(stack_id)) return ESP_ERR_INVALID_ARG;
     if (func_id >= ZIGBEE_FUNC_COUNT || !out) return ESP_ERR_INVALID_ARG;
     *out = g_zigbee.config[stack_id].functions[func_id];
+    return ESP_OK;
+}
+
+esp_err_t zigbee_handler_get_function_by_command(uint8_t stack_id,
+                                                   const char *command,
+                                                   zigbee_function_config_t *func_config) {
+    if (!g_zigbee.initialized || !command || !func_config) return ESP_ERR_INVALID_ARG;
+    if (!is_valid_stack(stack_id)) return ESP_ERR_INVALID_ARG;
+
+    size_t cmd_len = strlen(command);
+
+    /* Pass 1: match by cfg->command (AT+ prefix or exact) */
+    for (int fid = 0; fid < ZIGBEE_FUNC_COUNT; fid++) {
+        zigbee_function_config_t *cfg = &g_zigbee.config[stack_id].functions[fid];
+        if (!cfg->available) continue;
+
+        size_t cfg_len = strlen(cfg->command);
+        /* Strip trailing \r\n */
+        while (cfg_len > 0 &&
+               (cfg->command[cfg_len - 1] == '\n' ||
+                cfg->command[cfg_len - 1] == '\r')) {
+            cfg_len--;
+        }
+        if (cfg_len == 0) continue;
+
+        if (strncmp(cfg->command, "AT+", 3) == 0) {
+            /* AT commands: prefix match to allow params after the base command */
+            if (cmd_len >= cfg_len &&
+                strncmp(command, cfg->command, cfg_len) == 0) {
+                memcpy(func_config, cfg, sizeof(zigbee_function_config_t));
+                ESP_LOGI(TAG, "ZB match prefix: '%.*s' (fid=%d)", (int)cfg_len, cfg->command, fid);
+                return ESP_OK;
+            }
+        } else {
+            /* Non-AT: exact match */
+            if (cmd_len == cfg_len &&
+                strncmp(command, cfg->command, cfg_len) == 0) {
+                memcpy(func_config, cfg, sizeof(zigbee_function_config_t));
+                ESP_LOGI(TAG, "ZB match exact: '%.*s' (fid=%d)", (int)cfg_len, cfg->command, fid);
+                return ESP_OK;
+            }
+        }
+    }
+
+    ESP_LOGW(TAG, "ZB no config match for '%s' — using defaults", command);
+    return ESP_ERR_NOT_FOUND;
+}
+
+esp_err_t zigbee_handler_execute_command_raw(uint8_t stack_id,
+                                              const char *command,
+                                              uint16_t command_len,
+                                              const zigbee_function_config_t *fc,
+                                              zigbee_exec_result_t *result) {
+    if (!g_zigbee.initialized || !is_valid_stack(stack_id)) return ESP_ERR_INVALID_ARG;
+    if (!command || !fc) return ESP_ERR_INVALID_ARG;
+
+    if (command_len == 0) command_len = (uint16_t)strlen(command);
+
+    comm_port_type_t port_type = get_port(stack_id);
+    if (port_type == COMM_PORT_MAX) return ESP_ERR_INVALID_STATE;
+
+    if (xSemaphoreTake(g_zigbee_bus_mutex[stack_id],
+                       pdMS_TO_TICKS(ZIGBEE_BUS_MUTEX_MS)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    TickType_t start_tick = xTaskGetTickCount();
+
+    /* GPIO start */
+    zigbee_apply_gpio(stack_id, fc->gpio_start, fc->gpio_start_count);
+    if (fc->delay_start_ms > 0) vTaskDelay(pdMS_TO_TICKS(fc->delay_start_ms));
+
+    /* Send command */
+    esp_err_t ret = ESP_OK;
+    if (!fc->is_hex) {
+        /* AT mode: send command string + \r\n */
+        /* Strip any trailing \r\n the caller may have included */
+        size_t raw_len = command_len;
+        while (raw_len > 0 &&
+               (command[raw_len - 1] == '\r' || command[raw_len - 1] == '\n')) {
+            raw_len--;
+        }
+        char *buf = malloc(raw_len + 3);
+        if (!buf) {
+            xSemaphoreGive(g_zigbee_bus_mutex[stack_id]);
+            return ESP_ERR_NO_MEM;
+        }
+        memcpy(buf, command, raw_len);
+        buf[raw_len]     = '\r';
+        buf[raw_len + 1] = '\n';
+        buf[raw_len + 2] = '\0';
+        ESP_LOGI(TAG, "ZB raw TX: %s", buf);
+        ret = module_bus_write(stack_id, port_type, (const uint8_t *)buf, raw_len + 2);
+        free(buf);
+    } else {
+        /* HEX mode: decode hex string payload and send raw bytes */
+        uint8_t hex_bytes[252];
+        size_t  hex_len = hex_str_to_bytes(command, hex_bytes, sizeof(hex_bytes));
+        if (hex_len == 0) {
+            xSemaphoreGive(g_zigbee_bus_mutex[stack_id]);
+            return ESP_ERR_INVALID_ARG;
+        }
+        ret = module_bus_write(stack_id, port_type, hex_bytes, hex_len);
+    }
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "ZB raw TX failed: %s", esp_err_to_name(ret));
+        xSemaphoreGive(g_zigbee_bus_mutex[stack_id]);
+        return ret;
+    }
+
+    /* Read response */
+    size_t resp_len  = 0;
+    bool   skip_read = (fc->timeout_ms == 0);
+
+    if (!skip_read && result) {
+        uint8_t  resp_pattern[16];
+        size_t   resp_pattern_len = 0;
+        if (!fc->is_hex) {
+            size_t ascii_len = strlen(fc->expect_response);
+            if (ascii_len > 0) {
+                if (ascii_len > sizeof(resp_pattern)) ascii_len = sizeof(resp_pattern);
+                memcpy(resp_pattern, fc->expect_response, ascii_len);
+                resp_pattern_len = ascii_len;
+            }
+        } else {
+            resp_pattern_len = hex_str_to_bytes(fc->expect_response,
+                                                resp_pattern, sizeof(resp_pattern));
+        }
+        ret = zigbee_read_until(
+            stack_id, port_type,
+            resp_pattern_len > 0 ? resp_pattern : NULL,
+            resp_pattern_len,
+            fc->timeout_ms,
+            result->response, ZIGBEE_RESP_BUF_SIZE - 1,
+            &resp_len);
+
+        if (ret != ESP_OK && resp_pattern_len > 0) {
+            ESP_LOGW(TAG, "ZB raw response validation failed");
+            xSemaphoreGive(g_zigbee_bus_mutex[stack_id]);
+            result->status       = ESP_ERR_INVALID_RESPONSE;
+            result->response_len = (uint16_t)resp_len;
+            return ESP_ERR_INVALID_RESPONSE;
+        }
+    } else if (!skip_read && !result) {
+        /* Drain with default timeout so the bus is clean */
+        uint8_t dummy[64];
+        size_t  dummy_len = 0;
+        zigbee_read_until(stack_id, port_type, NULL, 0,
+                          fc->timeout_ms, dummy, sizeof(dummy), &dummy_len);
+    }
+
+    xSemaphoreGive(g_zigbee_bus_mutex[stack_id]);
+
+    /* GPIO end */
+    zigbee_apply_gpio(stack_id, fc->gpio_end, fc->gpio_end_count);
+    if (fc->delay_end_ms > 0) vTaskDelay(pdMS_TO_TICKS(fc->delay_end_ms));
+
+    uint32_t exec_ms = (xTaskGetTickCount() - start_tick) * portTICK_PERIOD_MS;
+    if (result) {
+        result->status            = ESP_OK;
+        result->response_len      = (uint16_t)resp_len;
+        result->execution_time_ms = exec_ms;
+    }
+    ESP_LOGI(TAG, "ZB raw cmd ok on stack %d (%lu ms)", stack_id, exec_ms);
     return ESP_OK;
 }
 
