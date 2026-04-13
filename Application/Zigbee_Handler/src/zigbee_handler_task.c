@@ -132,7 +132,7 @@ static void zigbee_downlink_task(void *pv) {
         }
         if (!g_zb_task.running[sid]) break;
 
-        ESP_LOGI(TAG, "[Stack %d] Executing command='%.*s'",
+        ESP_LOGI(TAG, "[Stack %d] Processing command: %.*s",
                  sid, req.command_len, req.command);
 
         zigbee_exec_result_t result = {0};
@@ -151,11 +151,13 @@ static void zigbee_downlink_task(void *pv) {
             if (result.response_len > 0) {
                 /* Zigbee responses are ASCII — forward as-is */
                 result.response[result.response_len] = '\0';
+                ESP_LOGI(TAG, "[Stack %d] Command OK: %s", sid, (char *)result.response);
                 pkt_len = snprintf(resp_pkt, ZIGBEE_RESP_PACKET_SIZE,
                                    "CFZB:%d:OK:%.*s:%s",
                                    sid, req.command_len, req.command,
                                    (char *)result.response);
             } else {
+                ESP_LOGI(TAG, "[Stack %d] Command OK", sid);
                 pkt_len = snprintf(resp_pkt, ZIGBEE_RESP_PACKET_SIZE,
                                    "CFZB:%d:OK:%.*s",
                                    sid, req.command_len, req.command);

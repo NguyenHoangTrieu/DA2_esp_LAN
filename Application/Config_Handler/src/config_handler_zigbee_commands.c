@@ -106,6 +106,7 @@ esp_err_t config_parse_zigbee_command(const uint8_t *data, uint16_t len) {
         return ret;
     }
 
+    ESP_LOGI(TAG, "[Stack %d] Command enqueued: %.*s", stack_id, copy_len, req.command);
     ESP_LOGI(TAG, "ZIGBEE CMD: enqueued successfully");
     return ESP_OK;
 }

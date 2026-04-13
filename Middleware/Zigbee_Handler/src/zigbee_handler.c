@@ -536,6 +536,9 @@ esp_err_t zigbee_handler_execute_command_raw(uint8_t stack_id,
 
     TickType_t start_tick = xTaskGetTickCount();
 
+    ESP_LOGI(TAG, "Executing command '%.*s' on stack %d with JSON config",
+             command_len, command, stack_id);
+
     /* GPIO start */
     zigbee_apply_gpio(stack_id, fc->gpio_start, fc->gpio_start_count);
     if (fc->delay_start_ms > 0) vTaskDelay(pdMS_TO_TICKS(fc->delay_start_ms));
@@ -632,7 +635,7 @@ esp_err_t zigbee_handler_execute_command_raw(uint8_t stack_id,
         result->response_len      = (uint16_t)resp_len;
         result->execution_time_ms = exec_ms;
     }
-    ESP_LOGI(TAG, "ZB raw cmd ok on stack %d (%lu ms)", stack_id, exec_ms);
+    ESP_LOGI(TAG, "Command executed successfully on stack %d (took %lu ms)", stack_id, exec_ms);
     return ESP_OK;
 }
 
