@@ -29,13 +29,18 @@ static const char *TAG = "zigbee_commands";
 /* ============================================================================
  * Unified Zigbee Command Parser
  *
- * Format: CFZB:<stack_id>:<command>
- * Example: CFZB:0:AT+INFO?
+ * New Protocol (function-name based):
+ *   CFZB:<stack_id>:<function_name>             (non-prefix, is_prefix=false)
+ *   CFZB:<stack_id>:<function_name>:<data>      (prefix, is_prefix=true)
  *
- * The command string is matched against the loaded JSON config to resolve
- * GPIO sequencing, timeout, and expected response.  If no config entry matches,
- * a sensible default (no GPIO, 2 s timeout, no expected response) is used so
- * the command is still forwarded to the module.
+ * Examples:
+ *   CFZB:0:MODULE_GET_INFO                      → executes AT+INFO?
+ *   CFZB:0:MODULE_START_NETWORK                 → executes AT+CREATENW
+ *   CFZB:0:MODULE_SET_PERMIT_JOIN:60            → executes AT+OPENWNET=60
+ *   CFZB:0:MODULE_ZCL_SEND_CONTROL_CMD:1234,01,0006,01 → AT+ZCL=1234,01,0006,01
+ *
+ * Legacy fallback: if command starts with "AT" or doesn't match a function name,
+ * falls back to old raw-command pass-through via get_function_by_command().
  * ========================================================================== */
 
 esp_err_t config_parse_zigbee_command(const uint8_t *data, uint16_t len) {
@@ -50,7 +55,7 @@ esp_err_t config_parse_zigbee_command(const uint8_t *data, uint16_t len) {
         return ESP_FAIL;
     }
 
-    /* Parse: CFZB:<stack_id>:<command> */
+    /* Parse: CFZB:<stack_id>:<function_name_or_command>[:data] */
     const char *ptr   = (const char *)(data + 5);
     const char *colon = strchr(ptr, ':');
     if (!colon) {
@@ -64,34 +69,86 @@ esp_err_t config_parse_zigbee_command(const uint8_t *data, uint16_t len) {
         return ESP_FAIL;
     }
 
-    const char *command = colon + 1;
-    uint16_t    cmd_len = len - (uint16_t)(command - (const char *)data);
+    const char *func_start = colon + 1;
+    uint16_t    remaining_len = len - (uint16_t)(func_start - (const char *)data);
 
-    if (cmd_len == 0 || cmd_len > 255) {
-        ESP_LOGE(TAG, "ZIGBEE CMD: invalid command length %u", cmd_len);
+    if (remaining_len == 0 || remaining_len > 255) {
+        ESP_LOGE(TAG, "ZIGBEE CMD: invalid command length %u", remaining_len);
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "ZIGBEE CMD: stack=%u command='%.*s'", stack_id, cmd_len, command);
+    /* Split function_name and data at first ':' */
+    char func_name[64] = {0};
+    const char *data_str = NULL;
+    uint16_t data_str_len = 0;
 
-    /* Match command against loaded JSON config (GPIO, timeout, expect_response) */
-    zigbee_function_config_t func_config = {0};
-    esp_err_t cfg_ret = zigbee_handler_get_function_by_command(stack_id, command, &func_config);
-    if (cfg_ret != ESP_OK) {
-        /* No JSON config match — use safe defaults so the command is still sent */
-        ESP_LOGW(TAG, "ZIGBEE CMD: no config match for '%.*s', using defaults", cmd_len, command);
-        func_config.available   = true;
-        func_config.is_hex      = false;
-        func_config.timeout_ms  = 2000;
-        /* expect_response left empty — accept any response */
+    const char *data_colon = memchr(func_start, ':', remaining_len);
+    if (data_colon && strncmp(func_start, "MODULE_", 7) == 0) {
+        uint16_t name_len = data_colon - func_start;
+        if (name_len >= sizeof(func_name)) name_len = sizeof(func_name) - 1;
+        memcpy(func_name, func_start, name_len);
+        func_name[name_len] = '\0';
+        data_str = data_colon + 1;
+        data_str_len = remaining_len - name_len - 1;
+    } else if (strncmp(func_start, "MODULE_", 7) == 0) {
+        uint16_t name_len = remaining_len;
+        if (name_len >= sizeof(func_name)) name_len = sizeof(func_name) - 1;
+        memcpy(func_name, func_start, name_len);
+        func_name[name_len] = '\0';
     }
+
+    zigbee_function_config_t func_config = {0};
+    char final_command[256] = {0};
+
+    if (func_name[0] != '\0') {
+        /* New function-name-based lookup */
+        esp_err_t ret = zigbee_handler_get_function_by_name(stack_id, func_name, &func_config);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "ZIGBEE CMD: No function '%s' for stack %u", func_name, stack_id);
+            char err_resp[64];
+            int  el = snprintf(err_resp, sizeof(err_resp),
+                               "CFZB:%d:FAIL:NO_FUNC:%s", stack_id, func_name);
+            if (el > 0) mcu_wan_enqueue_uplink(HANDLER_ZIGBEE, (uint8_t *)err_resp, (uint16_t)el);
+            return ESP_FAIL;
+        }
+
+        /* Build actual command to send to module */
+        if (func_config.is_prefix && data_str && data_str_len > 0) {
+            snprintf(final_command, sizeof(final_command), "%s%.*s",
+                     func_config.command, data_str_len, data_str);
+        } else {
+            strncpy(final_command, func_config.command, sizeof(final_command) - 1);
+        }
+
+        ESP_LOGI(TAG, "ZIGBEE CMD: func='%s' → cmd='%s' (is_prefix=%d, is_hex=%d)",
+                 func_name, final_command, func_config.is_prefix, func_config.is_hex);
+    } else {
+        /* Legacy fallback: raw command pass-through */
+        const char *command = func_start;
+        uint16_t cmd_len = remaining_len;
+
+        esp_err_t cfg_ret = zigbee_handler_get_function_by_command(stack_id, command, &func_config);
+        if (cfg_ret != ESP_OK) {
+            ESP_LOGW(TAG, "ZIGBEE CMD: no config match for '%.*s', using defaults", cmd_len, command);
+            func_config.available   = true;
+            func_config.is_hex      = false;
+            func_config.timeout_ms  = 2000;
+        }
+
+        if (cmd_len >= sizeof(final_command)) cmd_len = sizeof(final_command) - 1;
+        memcpy(final_command, command, cmd_len);
+        final_command[cmd_len] = '\0';
+    }
+
+    ESP_LOGI(TAG, "ZIGBEE CMD: stack=%u command='%s'", stack_id, final_command);
 
     /* Build command request */
     zigbee_command_request_t req = {0};
     req.stack_id    = stack_id;
-    uint16_t copy_len = (cmd_len > sizeof(req.command) - 1)
-                         ? (uint16_t)(sizeof(req.command) - 1) : cmd_len;
-    memcpy(req.command, command, copy_len);
+    uint16_t copy_len = strlen(final_command);
+    if (copy_len > sizeof(req.command) - 1)
+        copy_len = (uint16_t)(sizeof(req.command) - 1);
+    memcpy(req.command, final_command, copy_len);
     req.command[copy_len] = '\0';
     req.command_len = copy_len;
     memcpy(&req.func_config, &func_config, sizeof(zigbee_function_config_t));

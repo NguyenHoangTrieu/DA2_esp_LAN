@@ -21,17 +21,17 @@ static const char *TAG = "BLE_HANDLER";
 #define BLE_BINARY_CMD_MARKER 0xC0   // Binary protocol marker
 #define BLE_CMD_MAX_LEN 128          // Max command string length
 #define BLE_RESPONSE_MAX_LEN 2048    // Max response accumulation buffer
-#define BLE_RESPONSE_CHUNK 128       // UART read chunk size per iteration
+#define BLE_RESPONSE_CHUNK 128       // Bus read chunk size per iteration
 
 /**
- * @brief Read from UART, accumulating chunks until expect_response is found or timeout.
+ * @brief Read from bus (module_bus_read), accumulating chunks until expect_response is found or timeout.
  *
- * Unlike a single uart_read_bytes() call (which returns as soon as the internal
- * buffer fills, e.g. after the first 256 bytes of scan results), this function
- * keeps reading 128-byte chunks with a short inter-read timeout and appends them
- * to out_buf until the terminator string (typically "OK" or "ERROR") is found or
- * the overall timeout_ms elapses.  This is required for streaming commands like
- * AT+SCAN=5000 which produce many +SCAN: lines BEFORE the final OK.
+ * Unlike a single module_bus_read() call (which returns as soon as no more data is
+ * available in the internal buffer), this function keeps reading BLE_RESPONSE_CHUNK-byte
+ * chunks with a short inter-read timeout and appends them to out_buf until the
+ * terminator string (typically "OK" or "ERROR") is found or the overall timeout_ms
+ * elapses.  This is required for streaming commands like AT+SCAN=5000 which produce
+ * many +SCAN: lines BEFORE the final OK.
  *
  * @param stack_id         Stack identifier
  * @param port_type        Communication port
@@ -796,6 +796,7 @@ esp_err_t ble_handler_load_config(uint8_t stack_id, const char *json_config,
         &g_ble_handler.config[stack_id].functions[src->function_id];
     dst->available = true;
     dst->is_hex    = src->is_hex;
+    dst->is_prefix = src->is_prefix;
     strncpy(dst->command, src->command, sizeof(dst->command) - 1);
     strncpy(dst->expect_response, src->expect_response,
             sizeof(dst->expect_response) - 1);
@@ -1108,6 +1109,37 @@ esp_err_t ble_handler_get_function_by_command(uint8_t stack_id,
   return ESP_ERR_NOT_FOUND;
 }
 
+esp_err_t ble_handler_get_function_by_name(uint8_t stack_id,
+                                            const char *func_name,
+                                            ble_function_config_t *func_config) {
+  if (!g_ble_handler.initialized || !func_name || !func_config) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  if (!ble_is_valid_stack_id(stack_id)) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  for (int func_id = 0; func_id < BLE_FUNC_COUNT; func_id++) {
+    if (s_ble_func_names[func_id] == NULL || s_ble_func_names[func_id][0] == '\0') {
+      continue;
+    }
+    if (strcmp(func_name, s_ble_func_names[func_id]) == 0) {
+      ble_function_config_t *cfg = &g_ble_handler.config[stack_id].functions[func_id];
+      if (!cfg->available) {
+        ESP_LOGW(TAG, "Function '%s' (id=%d) not configured for stack %d",
+                 func_name, func_id, stack_id);
+        return ESP_ERR_NOT_SUPPORTED;
+      }
+      memcpy(func_config, cfg, sizeof(ble_function_config_t));
+      ESP_LOGI(TAG, "Matched function_name: %s (func_id=%d)", func_name, func_id);
+      return ESP_OK;
+    }
+  }
+
+  ESP_LOGW(TAG, "No function match for name: %s", func_name);
+  return ESP_ERR_NOT_FOUND;
+}
+
 /**
  * @brief Execute command with pre-matched function config (for task layer)
  * 
@@ -1231,7 +1263,7 @@ esp_err_t ble_handler_execute_command_with_config(uint8_t stack_id,
 
     if (!skip_read) {
       // Step 4: Read until expect_response found or timeout.
-      // Using ble_read_until_terminator instead of a single uart_read_bytes so that
+      // Using ble_read_until_terminator instead of a single module_bus_read call so that
       // streaming commands (AT+SCAN, AT+DISC, AT+CHARS ...) which emit many data
       // lines before the final OK are fully captured within the timeout window.
       ret = ble_read_until_terminator(stack_id, port_type,

@@ -199,6 +199,18 @@ esp_err_t zigbee_handler_get_function_by_command(uint8_t stack_id,
                                                    zigbee_function_config_t *func_config);
 
 /**
+ * @brief Look up function config by function name (e.g. "MODULE_GET_NET_STATUS")
+ *
+ * @param stack_id    Stack ID
+ * @param func_name   Function name
+ * @param func_config [out] Matched function config
+ * @return ESP_OK if found, ESP_ERR_NOT_FOUND otherwise
+ */
+esp_err_t zigbee_handler_get_function_by_name(uint8_t stack_id,
+                                               const char *func_name,
+                                               zigbee_function_config_t *func_config);
+
+/**
  * @brief Execute a raw command string using a pre-resolved function config.
  *
  * Sends @p command directly to the module UART (no func_id lookup).
@@ -216,6 +228,18 @@ esp_err_t zigbee_handler_execute_command_raw(uint8_t stack_id,
                                               uint16_t command_len,
                                               const zigbee_function_config_t *fc,
                                               zigbee_exec_result_t *result);
+
+/**
+ * @brief Diagnostic test: Send AT+RESET and log raw response.
+ *
+ * Useful for debugging module response issues. Sends AT+RESET command
+ * and logs all bytes received within 2000ms timeout in both hex and ASCII.
+ * Can be called from test task to verify module communication.
+ *
+ * @param stack_id Stack ID
+ * @return ESP_OK on success
+ */
+esp_err_t zigbee_handler_test_at_reset(uint8_t stack_id);
 
 /**
  * @brief One-time hardcoded AT mode ensure for E180-ZG120B.

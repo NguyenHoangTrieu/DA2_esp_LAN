@@ -28,7 +28,6 @@
 #include "module_config_controller.h"
 #include "nvs.h"
 #include "stack_handler.h"
-#include "driver/uart.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -53,6 +52,59 @@ static g_zigbee_t g_zigbee = {0};
 
 static SemaphoreHandle_t g_zigbee_mutex                      = NULL;
 static SemaphoreHandle_t g_zigbee_bus_mutex[ZIGBEE_MAX_STACKS] = {NULL, NULL};
+
+/**
+ * Function name table for function-name-based command routing.
+ * Indices match the zigbee_function_id_t enum values.
+ */
+static const char *s_zigbee_func_names[ZIGBEE_FUNC_COUNT] = {
+    "MODULE_HW_RESET",              // 0
+    "MODULE_SW_RESET",              // 1
+    "MODULE_FACTORY_RESET",         // 2
+    "MODULE_GET_INFO",              // 3
+    "MODULE_ENTER_HEX_MODE",        // 4
+    "MODULE_START_NETWORK",         // 5
+    "MODULE_STOP_NETWORK",          // 6
+    "MODULE_GET_NET_STATUS",        // 7
+    "MODULE_SET_CHANNEL",           // 8
+    "MODULE_SET_PANID",             // 9
+    "MODULE_SET_TX_POWER",          // 10
+    "MODULE_SET_PERMIT_JOIN",       // 11
+    "MODULE_NODE_JOIN_NOTIFY",      // 12
+    "MODULE_NODE_LEAVE_NOTIFY",     // 13
+    "MODULE_NODE_ANNOUNCE_NOTIFY",  // 14
+    "MODULE_QUERY_SHORT_ADDR",      // 15
+    "MODULE_QUERY_NODE_PORT_INFO",  // 16
+    "MODULE_DELETE_NODE",           // 17
+    "MODULE_ZCL_READ_ATTR",         // 18
+    "MODULE_ZCL_WRITE_ATTR",        // 19
+    "MODULE_ZCL_SEND_CONTROL_CMD",  // 20
+    "MODULE_ZCL_RECV_CONTROL_CMD",  // 21
+    "MODULE_ZCL_RECV_ATTR_REPORT",  // 22
+    "MODULE_ZCL_SET_REPORT_RULE",   // 23
+    "MODULE_SEND_UNICAST",          // 24
+    "MODULE_SEND_BROADCAST",        // 25
+    "MODULE_SET_COMM_CONFIG",       // 26
+    "MODULE_ENTER_BOOTLOADER",      // 27
+    "MODULE_LEAVE_NETWORK",         // 28
+    "MODULE_SET_DEVICE_TYPE",       // 29
+    "MODULE_QUERY_IEEE_ADDR",       // 30
+    "MODULE_ZCL_BIND",             // 31
+    "MODULE_ZCL_UNBIND",           // 32
+    "MODULE_SEND_MULTICAST",       // 33
+    "MODULE_ENTER_AT_MODE",        // 34
+    "MODULE_AUTO_FIND_TARGET",     // 35
+    "MODULE_ZCL_DISCOVER_ATTR",    // 36
+    "MODULE_ZCL_IDENTIFY",         // 37
+    "MODULE_ZCL_GET_BIND_TABLE",   // 38
+    "MODULE_ENTER_TRANSPARENT_MODE", // 39
+    "MODULE_SET_DEST_ADDR",        // 40
+    "MODULE_SET_DEST_EP",          // 41
+    "MODULE_SET_LP_LEVEL",         // 42
+    "MODULE_ENTER_SLEEP",          // 43
+    "MODULE_WAKEUP",               // 44
+    "", "", "",                     // 45-47 reserved
+};
 
 /* ===== Internal Helpers ===== */
 
@@ -330,19 +382,19 @@ esp_err_t zigbee_handler_execute_command_with_config(
     if (!fc->is_hex) {
         /* ===== ASCII / AT command ===== */
         size_t cmd_len = strlen(fc->command);
-        /* Build: command [+data_suffix] \r\n */
+        /* Build: command [+data_suffix] — sent as-is, no auto \r\n */
         char at_buf[ZIGBEE_COMMAND_LEN + 256];
         int  written = 0;
         if (cmd_len > 0) {
             if (fc->is_prefix && data && data_len > 0) {
-                written = snprintf(at_buf, sizeof(at_buf), "%s%.*s\r\n",
+                written = snprintf(at_buf, sizeof(at_buf), "%s%.*s",
                                    fc->command, (int)data_len, (const char *)data);
             } else {
-                written = snprintf(at_buf, sizeof(at_buf), "%s\r\n", fc->command);
+                written = snprintf(at_buf, sizeof(at_buf), "%s", fc->command);
             }
             /* Flush RX ring buffer before sending so stale unsolicited bytes
              * from the module do not contaminate this command's response. */
-            uart_flush_input(ZB_UART_NUM);
+            module_bus_flush(stack_id, port_type);
             ESP_LOGI(TAG, "ZB conf TX: %.*s (%d bytes)", written, at_buf, written);
             ret = module_bus_write(stack_id, port_type,
                                    (const uint8_t *)at_buf, (size_t)written);
@@ -528,6 +580,34 @@ esp_err_t zigbee_handler_get_function_by_command(uint8_t stack_id,
     return ESP_ERR_NOT_FOUND;
 }
 
+esp_err_t zigbee_handler_get_function_by_name(uint8_t stack_id,
+                                               const char *func_name,
+                                               zigbee_function_config_t *func_config) {
+    if (!g_zigbee.initialized || !func_name || !func_config) return ESP_ERR_INVALID_ARG;
+    if (!is_valid_stack(stack_id)) return ESP_ERR_INVALID_ARG;
+
+    for (int fid = 0; fid < ZIGBEE_FUNC_COUNT; fid++) {
+        if (s_zigbee_func_names[fid] == NULL ||
+            s_zigbee_func_names[fid][0] == '\0') {
+            continue;
+        }
+        if (strcmp(func_name, s_zigbee_func_names[fid]) == 0) {
+            zigbee_function_config_t *cfg = &g_zigbee.config[stack_id].functions[fid];
+            if (!cfg->available) {
+                ESP_LOGW(TAG, "ZB function '%s' (id=%d) not configured for stack %d",
+                         func_name, fid, stack_id);
+                return ESP_ERR_NOT_SUPPORTED;
+            }
+            memcpy(func_config, cfg, sizeof(zigbee_function_config_t));
+            ESP_LOGI(TAG, "ZB matched function_name: %s (fid=%d)", func_name, fid);
+            return ESP_OK;
+        }
+    }
+
+    ESP_LOGW(TAG, "ZB no function match for name: %s", func_name);
+    return ESP_ERR_NOT_FOUND;
+}
+
 esp_err_t zigbee_handler_execute_command_raw(uint8_t stack_id,
                                               const char *command,
                                               uint16_t command_len,
@@ -558,29 +638,12 @@ esp_err_t zigbee_handler_execute_command_raw(uint8_t stack_id,
     /* Send command */
     esp_err_t ret = ESP_OK;
     if (!fc->is_hex) {
-        /* AT mode: send command string + 
- */
-        /* Strip any trailing \r\n the caller may have included */
-        size_t raw_len = command_len;
-        while (raw_len > 0 &&
-               (command[raw_len - 1] == '\r' || command[raw_len - 1] == '\n')) {
-            raw_len--;
-        }
-        char *buf = malloc(raw_len + 3);
-        if (!buf) {
-            xSemaphoreGive(g_zigbee_bus_mutex[stack_id]);
-            return ESP_ERR_NO_MEM;
-        }
-        memcpy(buf, command, raw_len);
-        buf[raw_len]     = '\r';
-        buf[raw_len + 1] = '\n';
-        buf[raw_len + 2] = '\0';
+        /* AT mode: send command as-is, no auto \r\n */
         /* Flush RX ring buffer before sending so stale unsolicited bytes
          * from the module do not contaminate this command's response. */
-        uart_flush_input(ZB_UART_NUM);
-        ESP_LOGI(TAG, "ZB raw TX: %.*s (%zu bytes)", (int)(raw_len + 2), buf, raw_len + 2);
-        ret = module_bus_write(stack_id, port_type, (const uint8_t *)buf, raw_len + 2);
-        free(buf);
+        module_bus_flush(stack_id, port_type);
+        ESP_LOGI(TAG, "ZB raw TX: %.*s (%u bytes)", (int)command_len, command, command_len);
+        ret = module_bus_write(stack_id, port_type, (const uint8_t *)command, command_len);
     } else {
         /* HEX mode: decode hex string payload and send raw bytes */
         uint8_t hex_bytes[252];
@@ -669,7 +732,7 @@ esp_err_t zigbee_handler_execute_command_raw(uint8_t stack_id,
  * Fully hardcoded. Every TX/RX is logged to help diagnose issues.
  *
  * Hardware (fixed):
- *   UART   : UART_NUM_1, TX=15, RX=16, 115200 8N1
+ *   Bus    : configured via module_config_controller (STACK_UART_PORT), 115200 8N1
  *   RESET# : TCA6416A pin STACK_GPIO_PIN_05 (P05) via stack_handler
  *
  * E180-ZG120B modes (from Ebyte datasheet):
@@ -696,7 +759,6 @@ esp_err_t zigbee_handler_execute_command_raw(uint8_t stack_id,
  * =========================================================== */
 
 #define ZB_AT_NVS_NS   "zb_init"
-#define ZB_UART_NUM    UART_NUM_1
 #define ZB_RESET_PIN   STACK_GPIO_PIN_05   /* TCA P05 = E180 nRESET# */
 
 /* HEX command: Enter AT mode  TYPE=0x00 CODE=0x16 XOR=0x16 */
@@ -725,26 +787,20 @@ static void zb_log_buf(const char *label, const uint8_t *buf, size_t len) {
     }
 }
 
-/* ---- UART helpers (direct, no middleware mutex) ---- */
-/** Read bytes until ms timeout, return count */
-static size_t zb_uart_drain(uint8_t *buf, size_t max, uint32_t ms) {
-    size_t    total = 0;
-    TickType_t t0   = xTaskGetTickCount();
-    while ((xTaskGetTickCount() - t0) < pdMS_TO_TICKS(ms) && total < max - 1) {
-        int n = uart_read_bytes(ZB_UART_NUM, buf + total, max - 1 - total,
-                                pdMS_TO_TICKS(20));
-        if (n > 0) total += (size_t)n;
-    }
-    buf[total] = '\0';
-    return total;
+/* ---- Comm helpers (all go through module_config_controller) ---- */
+/** Drain bytes arriving within window_ms into buf; returns byte count */
+static size_t zb_bus_drain(uint8_t sid, uint8_t *buf, size_t max, uint32_t ms) {
+    comm_port_type_t pt = get_port(sid);
+    return module_bus_drain(sid, pt, buf, max, ms);
 }
 
-/** Flush RX ring buffer, then send data with logging */
-static void zb_tx(const char *label, const uint8_t *data, size_t len) {
-    uart_flush_input(ZB_UART_NUM);
+/** Flush RX buffer, then send data with logging */
+static void zb_tx(uint8_t sid, const char *label, const uint8_t *data, size_t len) {
+    comm_port_type_t pt = get_port(sid);
+    module_bus_flush(sid, pt);
     ESP_LOGI(TAG, "  >> TX [%s]  %zu bytes", label, len);
     zb_log_buf(label, data, len);
-    uart_write_bytes(ZB_UART_NUM, data, len);
+    module_bus_write(sid, pt, data, len);
 }
 
 /** HW reset via TCA P05, wait for module boot (800 ms) */
@@ -777,8 +833,67 @@ static bool zb_is_at_info_rsp(const uint8_t *buf, size_t len) {
            memmem(buf, len, "MAC=",   4) != NULL;
 }
 
-/* ---- main function ---- */
+/* ---- Test function: Send AT+RESET and log raw response ---- */
+esp_err_t zigbee_handler_test_at_reset(uint8_t stack_id) {
+    if (!is_valid_stack(stack_id)) return ESP_ERR_INVALID_ARG;
 
+    ESP_LOGI(TAG, "\n========== TEST: AT+RESET on Stack %d ==========", stack_id);
+
+    /* Acquire bus mutex */
+    if (xSemaphoreTake(g_zigbee_bus_mutex[stack_id], pdMS_TO_TICKS(10000)) != pdTRUE) {
+        ESP_LOGE(TAG, "[Stack %d] Cannot acquire bus mutex!", stack_id);
+        return ESP_ERR_TIMEOUT;
+    }
+
+    uint8_t rx[512] = {0};
+    size_t got = 0;
+    esp_err_t ret = ESP_OK;
+
+    /* Get port and send AT+RESET */
+    comm_port_type_t port_type = get_port(stack_id);
+    if (port_type == COMM_PORT_MAX) {
+        ESP_LOGE(TAG, "[Stack %d] Invalid port type", stack_id);
+        xSemaphoreGive(g_zigbee_bus_mutex[stack_id]);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* Flush RX buffer first */
+    module_bus_flush(stack_id, port_type);
+    ESP_LOGI(TAG, "[Stack %d] Flushed RX buffer", stack_id);
+
+    /* Send AT+RESET */
+    const uint8_t *cmd = (const uint8_t *)"AT+RESET";
+    size_t cmd_len = 8; /* strlen("AT+RESET") */
+    ESP_LOGI(TAG, "[Stack %d] >> Sending command:", stack_id);
+    zb_log_buf("AT+RESET", cmd, cmd_len);
+    
+    ret = module_bus_write(stack_id, port_type, cmd, cmd_len);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "[Stack %d] Write failed: %s", stack_id, esp_err_to_name(ret));
+        xSemaphoreGive(g_zigbee_bus_mutex[stack_id]);
+        return ret;
+    }
+
+    /* Wait and collect response (2000ms timeout, same as config) */
+    ESP_LOGI(TAG, "[Stack %d] Waiting 2000ms for response...", stack_id);
+    got = zb_bus_drain(stack_id, rx, sizeof(rx), 2000);
+
+    ESP_LOGI(TAG, "[Stack %d] << Received %zu bytes:", stack_id, got);
+    if (got > 0) {
+        zb_log_buf("AT+RESET_RESPONSE", rx, got);
+        ESP_LOGI(TAG, "[Stack %d] As string: %.*s", stack_id, (int)got, (char *)rx);
+    } else {
+        ESP_LOGW(TAG, "[Stack %d] NO RESPONSE received!", stack_id);
+    }
+
+    xSemaphoreGive(g_zigbee_bus_mutex[stack_id]);
+
+    ESP_LOGI(TAG, "========== TEST COMPLETE ==========\n", stack_id);
+    return ESP_OK;
+}
+
+/* ---- main function ---- */
+#if 1
 esp_err_t zigbee_handler_ensure_at_mode(uint8_t stack_id) {
     if (!is_valid_stack(stack_id)) return ESP_ERR_INVALID_ARG;
 
@@ -812,8 +927,8 @@ esp_err_t zigbee_handler_ensure_at_mode(uint8_t stack_id) {
     /* ── Phase 1: NVS flag set → quick verify ──────────────────────── */
     if (nvs_ok) {
         ESP_LOGI(TAG, "[Stack %d] -- Phase 1: quick verify (NVS set) --", stack_id);
-        zb_tx("AT+INFO?", (const uint8_t *)"AT+INFO?\r\n", 10);
-        got = zb_uart_drain(rx, sizeof(rx), 1500);
+        zb_tx(stack_id, "AT+INFO?", (const uint8_t *)"AT+INFO?\r\n", 10);
+        got = zb_bus_drain(stack_id, rx, sizeof(rx), 1500);
         ESP_LOGI(TAG, "[Stack %d]   << RX %zu bytes:", stack_id, got);
         zb_log_buf("INFO?-rsp", rx, got);
         if (zb_is_at_info_rsp(rx, got)) {
@@ -826,9 +941,9 @@ esp_err_t zigbee_handler_ensure_at_mode(uint8_t stack_id) {
 
     /* ── Phase 2: HW Reset + detect boot mode ───────────────────────── */
     ESP_LOGI(TAG, "[Stack %d] -- Phase 2: HW Reset + boot mode detection --", stack_id);
-    uart_flush_input(ZB_UART_NUM);
+    module_bus_flush(stack_id, get_port(stack_id));
     zb_hw_reset(stack_id);
-    got = zb_uart_drain(rx, sizeof(rx), 300);
+    got = zb_bus_drain(stack_id, rx, sizeof(rx), 300);
     ESP_LOGI(TAG, "[Stack %d]   << Boot messages %zu bytes:", stack_id, got);
     zb_log_buf("BOOT", rx, got);
 
@@ -840,8 +955,8 @@ esp_err_t zigbee_handler_ensure_at_mode(uint8_t stack_id) {
     if (at_boot) {
         /* Module already stored AT mode → verify */
         ESP_LOGI(TAG, "[Stack %d]   Booted in AT mode → verify with AT+INFO?", stack_id);
-        zb_tx("AT+INFO?", (const uint8_t *)"AT+INFO?\r\n", 10);
-        got = zb_uart_drain(rx, sizeof(rx), 1500);
+        zb_tx(stack_id, "AT+INFO?", (const uint8_t *)"AT+INFO?\r\n", 10);
+        got = zb_bus_drain(stack_id, rx, sizeof(rx), 1500);
         ESP_LOGI(TAG, "[Stack %d]   << RX %zu bytes:", stack_id, got);
         zb_log_buf("INFO?-rsp", rx, got);
         if (zb_is_at_info_rsp(rx, got)) { confirmed = true; goto zb_release; }
@@ -850,8 +965,8 @@ esp_err_t zigbee_handler_ensure_at_mode(uint8_t stack_id) {
 
     /* ── Phase 3: HEX→AT command [55 03 00 16 16] ──────────────────── */
     ESP_LOGI(TAG, "[Stack %d] -- Phase 3: HEX→AT command [55 03 00 16 16] --", stack_id);
-    zb_tx("HEX->AT", k_hex_to_at, sizeof(k_hex_to_at));
-    got = zb_uart_drain(rx, sizeof(rx), 800);
+    zb_tx(stack_id, "HEX->AT", k_hex_to_at, sizeof(k_hex_to_at));
+    got = zb_bus_drain(stack_id, rx, sizeof(rx), 800);
     ESP_LOGI(TAG, "[Stack %d]   << RX %zu bytes:", stack_id, got);
     zb_log_buf("HEX->AT-rsp", rx, got);
     if (memmem(rx, got, k_hex_to_at_ack, sizeof(k_hex_to_at_ack)))
@@ -859,42 +974,42 @@ esp_err_t zigbee_handler_ensure_at_mode(uint8_t stack_id) {
     else
         ESP_LOGW(TAG, "[Stack %d]   No ACK pattern found in response", stack_id);
 
-    zb_tx("AT+INFO?", (const uint8_t *)"AT+INFO?\r\n", 10);
-    got = zb_uart_drain(rx, sizeof(rx), 1500);
+    zb_tx(stack_id, "AT+INFO?", (const uint8_t *)"AT+INFO?\r\n", 10);
+    got = zb_bus_drain(stack_id, rx, sizeof(rx), 1500);
     ESP_LOGI(TAG, "[Stack %d]   << RX %zu bytes:", stack_id, got);
     zb_log_buf("INFO?-rsp", rx, got);
     if (zb_is_at_info_rsp(rx, got)) { confirmed = true; goto zb_release; }
 
     /* ── Phase 4: Transparent exit (+++) then HEX→AT ───────────────── */
     ESP_LOGI(TAG, "[Stack %d] -- Phase 4: +++ (exit transparent) then HEX->AT --", stack_id);
-    zb_tx("+++", (const uint8_t *)"+++", 3);
+    zb_tx(stack_id, "+++", (const uint8_t *)"+++", 3);
     vTaskDelay(pdMS_TO_TICKS(1000));
-    got = zb_uart_drain(rx, sizeof(rx), 200);
+    got = zb_bus_drain(stack_id, rx, sizeof(rx), 200);
     ESP_LOGI(TAG, "[Stack %d]   << +++ response %zu bytes:", stack_id, got);
     zb_log_buf("+++-rsp", rx, got);
 
-    zb_tx("HEX->AT#2", k_hex_to_at, sizeof(k_hex_to_at));
-    got = zb_uart_drain(rx, sizeof(rx), 800);
+    zb_tx(stack_id, "HEX->AT#2", k_hex_to_at, sizeof(k_hex_to_at));
+    got = zb_bus_drain(stack_id, rx, sizeof(rx), 800);
     ESP_LOGI(TAG, "[Stack %d]   << RX %zu bytes:", stack_id, got);
     zb_log_buf("ACK#2", rx, got);
 
-    zb_tx("AT+INFO?", (const uint8_t *)"AT+INFO?\r\n", 10);
-    got = zb_uart_drain(rx, sizeof(rx), 1500);
+    zb_tx(stack_id, "AT+INFO?", (const uint8_t *)"AT+INFO?\r\n", 10);
+    got = zb_bus_drain(stack_id, rx, sizeof(rx), 1500);
     ESP_LOGI(TAG, "[Stack %d]   << RX %zu bytes:", stack_id, got);
     zb_log_buf("INFO?-rsp2", rx, got);
     if (zb_is_at_info_rsp(rx, got)) { confirmed = true; goto zb_release; }
 
     /* ── Phase 5: Last resort — reset + immediate HEX→AT ───────────── */
     ESP_LOGI(TAG, "[Stack %d] -- Phase 5: reset + immediate HEX->AT --", stack_id);
-    uart_flush_input(ZB_UART_NUM);
+    module_bus_flush(stack_id, get_port(stack_id));
     zb_hw_reset(stack_id);
-    zb_tx("HEX->AT#3", k_hex_to_at, sizeof(k_hex_to_at));
-    got = zb_uart_drain(rx, sizeof(rx), 800);
+    zb_tx(stack_id, "HEX->AT#3", k_hex_to_at, sizeof(k_hex_to_at));
+    got = zb_bus_drain(stack_id, rx, sizeof(rx), 800);
     ESP_LOGI(TAG, "[Stack %d]   << RX %zu bytes:", stack_id, got);
     zb_log_buf("ACK#3", rx, got);
 
-    zb_tx("AT+INFO?", (const uint8_t *)"AT+INFO?\r\n", 10);
-    got = zb_uart_drain(rx, sizeof(rx), 1500);
+    zb_tx(stack_id, "AT+INFO?", (const uint8_t *)"AT+INFO?\r\n", 10);
+    got = zb_bus_drain(stack_id, rx, sizeof(rx), 1500);
     ESP_LOGI(TAG, "[Stack %d]   << RX %zu bytes (final):", stack_id, got);
     zb_log_buf("INFO?-final", rx, got);
     if (zb_is_at_info_rsp(rx, got)) { confirmed = true; }
@@ -920,3 +1035,4 @@ zb_release:
     ESP_LOGI(TAG, "[Stack %d] ====== AT Mode Ensure Done ======", stack_id);
     return confirmed ? ESP_OK : ESP_ERR_NOT_FOUND;
 }
+#endif

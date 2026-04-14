@@ -5,7 +5,7 @@
  * Mirrors ble_handler.c with LoRa-specific differences:
  *  - Generic CRLF append (no AT prefix guard) for RAK3172 / RN2483 / Seeed E5 compatibility
  *  - Bus-mutex timeout 10 000 ms (JOIN may take up to 10 s)
- *  - Per-chunk read timeout 500 ms (LoRa UART may be slower between bursts)
+ *  - Per-chunk read timeout 500 ms (LoRa bus may be slower between bursts)
  *  - Listener read window 100 ms
  *  - No enter_cmd_mode function
  */
@@ -28,7 +28,7 @@ static const char *TAG = "LORA_HANDLER";
 #define LORA_BINARY_CMD_MARKER 0xC0   // Binary protocol marker
 #define LORA_CMD_MAX_LEN 128          // Max command string length
 #define LORA_RESPONSE_MAX_LEN 2048    // Max response accumulation buffer
-#define LORA_RESPONSE_CHUNK 128       // UART read chunk size per iteration
+#define LORA_RESPONSE_CHUNK 128       // Bus read chunk size per iteration
 #define LORA_MAX_STACKS 2             // Number of stacks (0 and 1)
 
 /* ===== GPIO Pin ID Sentinels ===== */
@@ -36,10 +36,10 @@ static const char *TAG = "LORA_HANDLER";
 #define LORA_GPIO_PIN_ID_RESET 10     // Sentinel for RST pin ("XR" in JSON)
 
 /**
- * @brief Read from UART, accumulating chunks until expect_response found or timeout.
+ * @brief Read from bus (module_bus_read), accumulating chunks until expect_response found or timeout.
  *
  * LoRa version uses 500 ms per-chunk timeout (vs 200 ms for BLE) because
- * LoRa UART responses can have longer inter-character gaps between bursts
+ * LoRa bus responses can have longer inter-character gaps between bursts
  * (e.g., JOIN accept lines, link-check replies, downlink windows 1 & 2).
  *
  * @param stack_id         Stack identifier
@@ -73,7 +73,7 @@ static esp_err_t lora_read_until_terminator(uint8_t stack_id,
         TickType_t elapsed  = xTaskGetTickCount() - start_tick;
         TickType_t left     = timeout_tick - elapsed;
         uint32_t   chunk_ms = (uint32_t)(left * portTICK_PERIOD_MS);
-        /* LoRa UART bursts can have 500 ms gaps between lines */
+        /* LoRa bus bursts can have 500 ms gaps between lines */
         if (chunk_ms > 500U) chunk_ms = 500U;
 
         size_t    chunk_len = 0;
@@ -671,6 +671,7 @@ esp_err_t lora_handler_load_config(uint8_t stack_id, const char *json_config,
             &g_lora_handler.config[stack_id].functions[src->function_id];
         dst->available = true;
         dst->is_hex    = src->is_hex;
+        dst->is_prefix = src->is_prefix;
         strncpy(dst->command, src->command, sizeof(dst->command) - 1);
         strncpy(dst->expect_response, src->expect_response,
                 sizeof(dst->expect_response) - 1);
@@ -931,6 +932,39 @@ esp_err_t lora_handler_get_function_by_command(uint8_t stack_id,
     return ESP_ERR_NOT_FOUND;
 }
 
+esp_err_t lora_handler_get_function_by_name(uint8_t stack_id,
+                                             const char *func_name,
+                                             lora_function_config_t *func_config) {
+    if (!g_lora_handler.initialized || !func_name || !func_config) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!lora_is_valid_stack_id(stack_id)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    for (int func_id = 0; func_id < LORA_FUNC_COUNT; func_id++) {
+        if (s_lora_func_names[func_id] == NULL ||
+            s_lora_func_names[func_id][0] == '\0') {
+            continue;
+        }
+        if (strcmp(func_name, s_lora_func_names[func_id]) == 0) {
+            lora_function_config_t *cfg =
+                &g_lora_handler.config[stack_id].functions[func_id];
+            if (!cfg->available) {
+                ESP_LOGW(TAG, "Function '%s' (id=%d) not configured for stack %d",
+                         func_name, func_id, stack_id);
+                return ESP_ERR_NOT_SUPPORTED;
+            }
+            memcpy(func_config, cfg, sizeof(lora_function_config_t));
+            ESP_LOGI(TAG, "Matched function_name: %s (func_id=%d)", func_name, func_id);
+            return ESP_OK;
+        }
+    }
+
+    ESP_LOGW(TAG, "No function match for name: %s", func_name);
+    return ESP_ERR_NOT_FOUND;
+}
+
 /* ===== Execute With Config (Task Layer) ===== */
 
 esp_err_t lora_handler_execute_command_with_config(uint8_t stack_id,
@@ -1165,7 +1199,7 @@ esp_err_t lora_handler_listen(uint8_t stack_id, char *buf, size_t max,
 
     uint8_t   chunk[LORA_RESPONSE_CHUNK];
     size_t    chunk_len = 0;
-    /* 100 ms read window (wider than BLE's 50 ms for slower LoRa UART) */
+    /* 100 ms read window (wider than BLE's 50 ms for slower LoRa bus) */
     esp_err_t ret = module_bus_read(stack_id, port_type, chunk,
                                     sizeof(chunk) - 1, 100, &chunk_len);
 

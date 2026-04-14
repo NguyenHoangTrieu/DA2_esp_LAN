@@ -424,6 +424,45 @@ esp_err_t module_bus_read(uint8_t stack_id, comm_port_type_t port_type,
   }
 }
 
+esp_err_t module_bus_flush(uint8_t stack_id, comm_port_type_t port_type) {
+  if (stack_id > 1) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  switch (port_type) {
+  case COMM_PORT_UART:
+    if (!g_stack_handles[stack_id].uart_initialized) {
+      ESP_LOGE(TAG, "UART not initialized for stack %d", stack_id);
+      return ESP_ERR_INVALID_STATE;
+    }
+    return module_uart_comm_flush(g_stack_handles[stack_id].uart);
+
+  default:
+    /* Non-UART buses have no buffered-input concept; treat as no-op */
+    return ESP_OK;
+  }
+}
+
+size_t module_bus_drain(uint8_t stack_id, comm_port_type_t port_type,
+                        uint8_t *buf, size_t max, uint32_t window_ms) {
+  if (!buf || max == 0 || stack_id > 1) return 0;
+
+  size_t     total  = 0;
+  TickType_t t0     = xTaskGetTickCount();
+  /* Use 20 ms slices so we don't miss back-to-back bytes */
+  const uint32_t SLICE_MS = 20;
+
+  while ((xTaskGetTickCount() - t0) < pdMS_TO_TICKS(window_ms) &&
+         total < max - 1) {
+    size_t got = 0;
+    module_bus_read(stack_id, port_type, buf + total, max - 1 - total,
+                    SLICE_MS, &got);
+    total += got;
+  }
+  buf[total] = '\0';
+  return total;
+}
+
 esp_err_t module_gpio_write(uint8_t stack_id, const char *pin, bool state) {
   if (pin == NULL || strlen(pin) < 2) {
     ESP_LOGE(TAG, "Invalid pin format");

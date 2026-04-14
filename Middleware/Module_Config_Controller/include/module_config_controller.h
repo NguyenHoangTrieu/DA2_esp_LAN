@@ -106,6 +106,35 @@ esp_err_t module_bus_write(uint8_t stack_id, comm_port_type_t port_type,
                            const uint8_t *data, size_t len);
 
 /**
+ * @brief Flush the RX buffer of the configured bus for a stack
+ *
+ * Currently only effective for UART. Discards any buffered incoming bytes
+ * so that a subsequent read returns only fresh data.
+ *
+ * @param stack_id   Stack ID (0 or 1)
+ * @param port_type  Communication port type
+ * @return ESP_OK on success, ESP_ERR_INVALID_STATE if bus not initialized
+ */
+esp_err_t module_bus_flush(uint8_t stack_id, comm_port_type_t port_type);
+
+/**
+ * @brief Drain the RX buffer into buf over a time window
+ *
+ * Accumulates all data arriving on the bus within `window_ms` milliseconds.
+ * Uses repeated small reads (20 ms each) until the window expires or the
+ * buffer is full.  Null-terminates the result.
+ *
+ * @param stack_id   Stack ID (0 or 1)
+ * @param port_type  Communication port type
+ * @param buf        Destination buffer
+ * @param max        Buffer size (result is capped at max-1 bytes + NUL)
+ * @param window_ms  Total observation window in milliseconds
+ * @return Number of bytes accumulated
+ */
+size_t module_bus_drain(uint8_t stack_id, comm_port_type_t port_type,
+                        uint8_t *buf, size_t max, uint32_t window_ms);
+
+/**
  * @brief Read data from module via configured bus
  *
  * @param stack_id Stack ID (0 or 1)

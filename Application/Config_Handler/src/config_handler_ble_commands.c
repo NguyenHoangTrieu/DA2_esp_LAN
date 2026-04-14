@@ -35,15 +35,19 @@ static const char *TAG = "ble_commands";
  * ========================================================================= */
 
 /**
- * @brief Unified BLE command parser using JSON configuration
+ * @brief Unified BLE command parser using function names
  * 
- * Format: "CFBL:<stack_id>:<command>"
- * Example: "CFBL:0:AT+SCAN=5000" (prefix match)
- * Example: "CFBL:1:AT+CONNECT=001122334455" (prefix match AT+CONNECT=)
- * Example: "CFBL:0:HW_RESET" (exact match)
+ * New Protocol (function-name based):
+ *   "CFBL:<stack_id>:<function_name>"           (non-prefix, is_prefix=false)
+ *   "CFBL:<stack_id>:<function_name>:<data>"    (prefix, is_prefix=true)
  * 
- * Matches command against JSON config (prefix or exact), extracts GPIO/delays,
- * and executes via command queue.
+ * Examples:
+ *   "CFBL:0:MODULE_SW_RESET"                   → executes AT+RESET (non-prefix)
+ *   "CFBL:0:MODULE_START_DISCOVERY:5000"        → executes AT+SCAN=5000 (prefix, data appended)
+ *   "CFBL:0:MODULE_CONNECT:001122334455"        → executes AT+CONNECT=001122334455 (prefix)
+ * 
+ * Legacy fallback: if command starts with "AT" or contains no matching function name,
+ * falls back to the old raw-command pass-through via get_function_by_command().
  * 
  * @param data Command data buffer
  * @param len Length of command
@@ -61,7 +65,7 @@ esp_err_t config_parse_ble_command(const uint8_t *data, uint16_t len) {
         return ESP_FAIL;
     }
 
-    // Parse: CFBL:<stack_id>:<command>
+    // Parse: CFBL:<stack_id>:<function_name_or_command>[:data]
     const char *ptr = (const char *)(data + 5);
     
     // Extract stack_id
@@ -77,53 +81,113 @@ esp_err_t config_parse_ble_command(const uint8_t *data, uint16_t len) {
         return ESP_FAIL;
     }
     
-    // Extract command string
-    const char *command = colon + 1;
-    uint16_t cmd_len = len - (command - (const char *)data);
+    // Extract function name and optional data
+    const char *func_start = colon + 1;
+    uint16_t remaining_len = len - (func_start - (const char *)data);
     
-    if (cmd_len == 0 || cmd_len > 255) {
-        ESP_LOGE(TAG, "BLE CMD: invalid command length %u", cmd_len);
+    if (remaining_len == 0 || remaining_len > 255) {
+        ESP_LOGE(TAG, "BLE CMD: invalid command length %u", remaining_len);
         return ESP_FAIL;
     }
     
-    ESP_LOGI(TAG, "BLE CMD: stack=%u, command='%.*s'", stack_id, cmd_len, command);
+    // Split function_name and data at first ':'
+    // e.g. "MODULE_SET_REGION:EU868" → func_name="MODULE_SET_REGION", data_str="EU868"
+    char func_name[64] = {0};
+    const char *data_str = NULL;
+    uint16_t data_str_len = 0;
     
-    // Get function config matching this command from BLE handler
+    const char *data_colon = memchr(func_start, ':', remaining_len);
+    if (data_colon && strncmp(func_start, "MODULE_", 7) == 0) {
+        // Function name with data suffix
+        uint16_t name_len = data_colon - func_start;
+        if (name_len >= sizeof(func_name)) name_len = sizeof(func_name) - 1;
+        memcpy(func_name, func_start, name_len);
+        func_name[name_len] = '\0';
+        data_str = data_colon + 1;
+        data_str_len = remaining_len - name_len - 1;
+    } else if (strncmp(func_start, "MODULE_", 7) == 0) {
+        // Function name without data
+        uint16_t name_len = remaining_len;
+        if (name_len >= sizeof(func_name)) name_len = sizeof(func_name) - 1;
+        memcpy(func_name, func_start, name_len);
+        func_name[name_len] = '\0';
+    }
+    
     ble_function_config_t func_config = {0};
-    esp_err_t ret = ble_handler_get_function_by_command(stack_id, command, &func_config);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "BLE CMD: No matching function for '%.*s'", cmd_len, command);
-        // Notify App: command not recognized by JSON config
-        char err_resp[64];
-        int err_len = snprintf(err_resp, sizeof(err_resp),
-                               "CFBL:%d:FAIL:NO_MATCH", stack_id);
-        if (err_len > 0) {
-            mcu_wan_enqueue_uplink(HANDLER_BLE, (uint8_t *)err_resp, (uint16_t)err_len);
+    char final_command[256] = {0};
+    
+    if (func_name[0] != '\0') {
+        // New function-name-based lookup
+        esp_err_t ret = ble_handler_get_function_by_name(stack_id, func_name, &func_config);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "BLE CMD: No function '%s' for stack %u", func_name, stack_id);
+            char err_resp[64];
+            int err_len = snprintf(err_resp, sizeof(err_resp),
+                                   "CFBL:%d:FAIL:NO_FUNC:%s", stack_id, func_name);
+            if (err_len > 0) {
+                mcu_wan_enqueue_uplink(HANDLER_BLE, (uint8_t *)err_resp, (uint16_t)err_len);
+            }
+            return ESP_FAIL;
         }
-        return ESP_FAIL;
+        
+        // Build the actual command to send to the module
+        if (func_config.is_prefix && data_str && data_str_len > 0) {
+            // Prefix command: append data after the stored command
+            // e.g. command="AT+SCAN=" + data="5000" → "AT+SCAN=5000"
+            snprintf(final_command, sizeof(final_command), "%s%.*s",
+                     func_config.command, data_str_len, data_str);
+        } else if (!func_config.is_prefix) {
+            // Non-prefix command: use stored command as-is
+            strncpy(final_command, func_config.command, sizeof(final_command) - 1);
+        } else {
+            // Prefix but no data — send command as-is (may fail on module)
+            strncpy(final_command, func_config.command, sizeof(final_command) - 1);
+        }
+        
+        ESP_LOGI(TAG, "BLE CMD: func='%s' → cmd='%s' (is_prefix=%d, is_hex=%d)",
+                 func_name, final_command, func_config.is_prefix, func_config.is_hex);
+    } else {
+        // Legacy fallback: raw command pass-through (for AT commands sent directly)
+        const char *command = func_start;
+        uint16_t cmd_len = remaining_len;
+        
+        esp_err_t ret = ble_handler_get_function_by_command(stack_id, command, &func_config);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "BLE CMD: No matching function for '%.*s'", cmd_len, command);
+            char err_resp[64];
+            int err_len = snprintf(err_resp, sizeof(err_resp),
+                                   "CFBL:%d:FAIL:NO_MATCH", stack_id);
+            if (err_len > 0) {
+                mcu_wan_enqueue_uplink(HANDLER_BLE, (uint8_t *)err_resp, (uint16_t)err_len);
+            }
+            return ESP_FAIL;
+        }
+        
+        if (cmd_len >= sizeof(final_command)) cmd_len = sizeof(final_command) - 1;
+        memcpy(final_command, command, cmd_len);
+        final_command[cmd_len] = '\0';
     }
     
-    // Build command request - reuse ble_function_config_t struct
+    // Build command request
     ble_command_request_t cmd_req = {0};
     cmd_req.stack_id = stack_id;
-    cmd_req.is_streaming = false; // For now, no streaming support
+    cmd_req.is_streaming = false;
     
-    // Copy command string
+    uint16_t cmd_len = strlen(final_command);
     if (cmd_len > sizeof(cmd_req.command) - 1) {
         cmd_len = sizeof(cmd_req.command) - 1;
     }
-    memcpy(cmd_req.command, command, cmd_len);
+    memcpy(cmd_req.command, final_command, cmd_len);
     cmd_req.command[cmd_len] = '\0';
     cmd_req.command_len = cmd_len;
     
-    // Copy entire function config struct (no field duplication!)
+    // Copy entire function config struct
     memcpy(&cmd_req.func_config, &func_config, sizeof(ble_function_config_t));
     
     // Execute command via queue
-    ret = ble_handler_task_execute_command(&cmd_req);
+    esp_err_t ret = ble_handler_task_execute_command(&cmd_req);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "BLE CMD: Failed to enqueue command: %s", esp_err_to_name(ret));
-        // Notify App: command queue full or handler not running
         char err_resp[64];
         int err_len = snprintf(err_resp, sizeof(err_resp),
                                "CFBL:%d:FAIL:QUEUE_FULL", stack_id);

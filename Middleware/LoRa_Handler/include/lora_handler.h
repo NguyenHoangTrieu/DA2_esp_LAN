@@ -87,6 +87,7 @@ typedef enum {
 typedef struct {
     bool available;                     ///< Is function present in JSON config
     bool is_hex;                        ///< true = binary/hex (send raw bytes), false = ASCII AT + CRLF
+    bool is_prefix;                     ///< true = command is prefix, runtime data appended after it
     char command[128];                  ///< AT command or hex bytes (space-separated)
     uint8_t gpio_start[8];              ///< GPIO pins to set before command
     uint8_t gpio_start_state[8];        ///< GPIO states (0=LOW, 1=HIGH)
@@ -173,6 +174,18 @@ esp_err_t lora_handler_get_function_by_command(uint8_t stack_id,
                                                 lora_function_config_t *func_config);
 
 /**
+ * @brief Look up function config by function name (e.g. "MODULE_SW_RESET")
+ *
+ * @param stack_id    Stack ID (0 or 1)
+ * @param func_name   Function name (e.g. "MODULE_SW_RESET", "MODULE_SET_REGION")
+ * @param func_config [out] Matched function config
+ * @return ESP_OK if found, ESP_ERR_NOT_FOUND otherwise
+ */
+esp_err_t lora_handler_get_function_by_name(uint8_t stack_id,
+                                             const char *func_name,
+                                             lora_function_config_t *func_config);
+
+/**
  * @brief Execute a command using pre-matched function config.
  *
  * Called by the task layer after lora_handler_get_function_by_command().
@@ -208,7 +221,7 @@ esp_err_t lora_handler_send_binary_command(uint8_t stack_id,
  * Tries to acquire the per-stack bus mutex with a 50 ms timeout.
  * Returns ESP_ERR_TIMEOUT immediately if the command task owns the bus,
  * allowing the listener task to yield without stalling commands.
- * Short 100 ms read window (LoRa UART may be slower than BLE).
+ * Short 100 ms read window (LoRa bus may be slower than BLE).
  *
  * @param stack_id Stack ID (0 or 1)
  * @param buf      Caller-allocated receive buffer

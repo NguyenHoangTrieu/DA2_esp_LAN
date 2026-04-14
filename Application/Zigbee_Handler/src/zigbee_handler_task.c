@@ -421,15 +421,15 @@ esp_err_t zigbee_handler_task_load_config(uint8_t stack_id,
     }
     vTaskDelay(pdMS_TO_TICKS(500));
 
-    /* Ensure module is in AT command mode.
-     * E180-ZG120B boots in HEX binary mode by default — this sends the
-     * HEX frame [55 03 00 16 16] to switch to AT mode, with fallback phases.
-     * Must be called after EVERY hardware/software reset. */
-    if (zigbee_handler_ensure_at_mode(stack_id) != ESP_OK) {
-        ESP_LOGW(TAG, "[Stack %d] AT mode ensure failed — subsequent AT commands may return INVALID",
-                 stack_id);
-    }
-
+    // /* Ensure module is in AT command mode.
+    //  * E180-ZG120B boots in HEX binary mode by default — this sends the
+    //  * HEX frame [55 03 00 16 16] to switch to AT mode, with fallback phases.
+    //  * Must be called after EVERY hardware/software reset. */
+    // if (zigbee_handler_ensure_at_mode(stack_id) != ESP_OK) {
+    //     ESP_LOGW(TAG, "[Stack %d] AT mode ensure failed — subsequent AT commands may return INVALID",
+    //              stack_id);
+    // }
+    zigbee_handler_test_at_reset(stack_id);  // Best-effort AT reset (some modules may not support)
     /* Get module info */
     ret = zigbee_handler_execute_command_with_config(
         stack_id, ZIGBEE_FUNC_GET_INFO, NULL, 0, &res);
