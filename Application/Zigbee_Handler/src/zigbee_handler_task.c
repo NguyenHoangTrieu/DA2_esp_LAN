@@ -163,10 +163,24 @@ static void zigbee_downlink_task(void *pv) {
                                    sid, req.command_len, req.command);
             }
         } else {
-            pkt_len = snprintf(resp_pkt, ZIGBEE_RESP_PACKET_SIZE,
-                               "CFZB:%d:FAIL:%.*s:%s",
-                               sid, req.command_len, req.command,
-                               esp_err_to_name(ret));
+            if (result.response_len > 0) {
+                result.response[result.response_len] = '\0';
+                ESP_LOGW(TAG, "[Stack %d] Command FAIL: %s | Module replied: %.*s",
+                         sid, esp_err_to_name(ret),
+                         (int)result.response_len, (char *)result.response);
+                pkt_len = snprintf(resp_pkt, ZIGBEE_RESP_PACKET_SIZE,
+                                   "CFZB:%d:FAIL:%.*s:%s:%s",
+                                   sid, req.command_len, req.command,
+                                   esp_err_to_name(ret),
+                                   (char *)result.response);
+            } else {
+                ESP_LOGW(TAG, "[Stack %d] Command FAIL: %s | No response from module",
+                         sid, esp_err_to_name(ret));
+                pkt_len = snprintf(resp_pkt, ZIGBEE_RESP_PACKET_SIZE,
+                                   "CFZB:%d:FAIL:%.*s:%s:NOREPLY",
+                                   sid, req.command_len, req.command,
+                                   esp_err_to_name(ret));
+            }
         }
 
         if (pkt_len > 0 && pkt_len < ZIGBEE_RESP_PACKET_SIZE) {
@@ -177,7 +191,7 @@ static void zigbee_downlink_task(void *pv) {
             }
         }
         free(resp_pkt);
-    }
+    }  /* end while (g_zb_task.running[sid]) */
 
     ESP_LOGI(TAG, "[Stack %d] Downlink task exiting", sid);
     free(ctx);
@@ -396,16 +410,6 @@ esp_err_t zigbee_handler_task_load_config(uint8_t stack_id,
         ESP_LOGE(TAG, "[Stack %d] Config load failed: %s", stack_id, esp_err_to_name(ret));
         return ret;
     }
-#if 0
-     /* Optional: print loaded config for debugging */
-    /* One-time: ensure E180-ZG120B is in AT command mode.
-     * Hardcoded — independent of JSON config.
-     * NVS-flagged: runs full flow only on first ever call; quick-verify on subsequent boots. */
-    if (zigbee_handler_ensure_at_mode(stack_id) != ESP_OK) {
-        ESP_LOGW(TAG, "[Stack %d] AT mode ensure failed — module may be unresponsive", stack_id);
-    }
-#endif
-
     zigbee_exec_result_t res = {0};
 
     /* HW Reset (GPIO NRST) */
@@ -416,6 +420,15 @@ esp_err_t zigbee_handler_task_load_config(uint8_t stack_id,
                  stack_id, esp_err_to_name(ret));
     }
     vTaskDelay(pdMS_TO_TICKS(500));
+
+    /* Ensure module is in AT command mode.
+     * E180-ZG120B boots in HEX binary mode by default — this sends the
+     * HEX frame [55 03 00 16 16] to switch to AT mode, with fallback phases.
+     * Must be called after EVERY hardware/software reset. */
+    if (zigbee_handler_ensure_at_mode(stack_id) != ESP_OK) {
+        ESP_LOGW(TAG, "[Stack %d] AT mode ensure failed — subsequent AT commands may return INVALID",
+                 stack_id);
+    }
 
     /* Get module info */
     ret = zigbee_handler_execute_command_with_config(

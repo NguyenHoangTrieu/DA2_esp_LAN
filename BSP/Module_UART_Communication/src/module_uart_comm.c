@@ -207,9 +207,11 @@ esp_err_t module_uart_comm_flush(module_uart_comm_handle_t handle) {
     return ESP_ERR_INVALID_ARG;
   }
 
-  esp_err_t ret = uart_flush(handle->port);
+  /* uart_flush_input clears the software RX ring buffer (stale received bytes).
+   * This is distinct from uart_flush() which flushes the TX FIFO. */
+  esp_err_t ret = uart_flush_input(handle->port);
   if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "UART flush failed: %s", esp_err_to_name(ret));
+    ESP_LOGE(TAG, "UART RX flush failed: %s", esp_err_to_name(ret));
   }
 
   return ret;

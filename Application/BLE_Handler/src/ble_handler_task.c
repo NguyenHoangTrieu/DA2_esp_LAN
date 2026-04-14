@@ -203,9 +203,15 @@ static void ble_downlink_task(void *pvParameters) {
                                             "CFML:%d:OK:%s",
                                             stack_id, clean_resp);
                     } else {
-                        resp_len = snprintf(resp_packet, 3072,
-                                            "CFML:%d:FAIL:%s",
-                                            stack_id, clean_resp);
+                        if (ci > 0) {
+                            resp_len = snprintf(resp_packet, 3072,
+                                                "CFML:%d:FAIL:%s:%s",
+                                                stack_id, esp_err_to_name(ret), clean_resp);
+                        } else {
+                            resp_len = snprintf(resp_packet, 3072,
+                                                "CFML:%d:FAIL:%s:NOREPLY",
+                                                stack_id, esp_err_to_name(ret));
+                        }
                     }
 
                     if (resp_len > 0 && resp_len < 3072) {

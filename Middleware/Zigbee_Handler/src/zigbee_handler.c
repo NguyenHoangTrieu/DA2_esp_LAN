@@ -340,6 +340,10 @@ esp_err_t zigbee_handler_execute_command_with_config(
             } else {
                 written = snprintf(at_buf, sizeof(at_buf), "%s\r\n", fc->command);
             }
+            /* Flush RX ring buffer before sending so stale unsolicited bytes
+             * from the module do not contaminate this command's response. */
+            uart_flush_input(ZB_UART_NUM);
+            ESP_LOGI(TAG, "ZB conf TX: %.*s (%d bytes)", written, at_buf, written);
             ret = module_bus_write(stack_id, port_type,
                                    (const uint8_t *)at_buf, (size_t)written);
             if (ret != ESP_OK) {
@@ -403,8 +407,16 @@ esp_err_t zigbee_handler_execute_command_with_config(
             result->response, ZIGBEE_RESP_BUF_SIZE - 1,
             &resp_len);
 
+        result->response[resp_len] = '\0';
+        if (resp_len > 0) {
+            ESP_LOGI(TAG, "ZB RX (%zu bytes): %.*s", resp_len, (int)resp_len, (char *)result->response);
+        } else {
+            ESP_LOGI(TAG, "ZB RX: (no data)");
+        }
+
         if (ret != ESP_OK && resp_pattern_len > 0) {
-            ESP_LOGW(TAG, "Zigbee response validation failed for func %d", func_id);
+            ESP_LOGW(TAG, "Zigbee response validation failed for func %d (expected: \"%s\")",
+                     func_id, fc->expect_response);
             xSemaphoreGive(g_zigbee_bus_mutex[stack_id]);
             result->status       = ESP_ERR_INVALID_RESPONSE;
             result->response_len = (uint16_t)resp_len;
@@ -546,7 +558,8 @@ esp_err_t zigbee_handler_execute_command_raw(uint8_t stack_id,
     /* Send command */
     esp_err_t ret = ESP_OK;
     if (!fc->is_hex) {
-        /* AT mode: send command string + \r\n */
+        /* AT mode: send command string + 
+ */
         /* Strip any trailing \r\n the caller may have included */
         size_t raw_len = command_len;
         while (raw_len > 0 &&
@@ -562,7 +575,10 @@ esp_err_t zigbee_handler_execute_command_raw(uint8_t stack_id,
         buf[raw_len]     = '\r';
         buf[raw_len + 1] = '\n';
         buf[raw_len + 2] = '\0';
-        ESP_LOGI(TAG, "ZB raw TX: %s", buf);
+        /* Flush RX ring buffer before sending so stale unsolicited bytes
+         * from the module do not contaminate this command's response. */
+        uart_flush_input(ZB_UART_NUM);
+        ESP_LOGI(TAG, "ZB raw TX: %.*s (%zu bytes)", (int)(raw_len + 2), buf, raw_len + 2);
         ret = module_bus_write(stack_id, port_type, (const uint8_t *)buf, raw_len + 2);
         free(buf);
     } else {
@@ -573,6 +589,7 @@ esp_err_t zigbee_handler_execute_command_raw(uint8_t stack_id,
             xSemaphoreGive(g_zigbee_bus_mutex[stack_id]);
             return ESP_ERR_INVALID_ARG;
         }
+        ESP_LOGI(TAG, "ZB raw TX: HEX (%zu bytes)", hex_len);
         ret = module_bus_write(stack_id, port_type, hex_bytes, hex_len);
     }
 
@@ -608,8 +625,15 @@ esp_err_t zigbee_handler_execute_command_raw(uint8_t stack_id,
             result->response, ZIGBEE_RESP_BUF_SIZE - 1,
             &resp_len);
 
+        result->response[resp_len] = '\0';
+        if (resp_len > 0) {
+            ESP_LOGI(TAG, "ZB raw RX (%zu bytes): %.*s", resp_len, (int)resp_len, (char *)result->response);
+        } else {
+            ESP_LOGI(TAG, "ZB raw RX: (no data)");
+        }
+
         if (ret != ESP_OK && resp_pattern_len > 0) {
-            ESP_LOGW(TAG, "ZB raw response validation failed");
+            ESP_LOGW(TAG, "ZB raw response validation failed (expected: \"%s\")", fc->expect_response);
             xSemaphoreGive(g_zigbee_bus_mutex[stack_id]);
             result->status       = ESP_ERR_INVALID_RESPONSE;
             result->response_len = (uint16_t)resp_len;
@@ -756,9 +780,7 @@ static bool zb_is_at_info_rsp(const uint8_t *buf, size_t len) {
 /* ---- main function ---- */
 
 esp_err_t zigbee_handler_ensure_at_mode(uint8_t stack_id) {
-    static bool s_done[ZIGBEE_MAX_STACKS] = {false, false};
     if (!is_valid_stack(stack_id)) return ESP_ERR_INVALID_ARG;
-    if (s_done[stack_id])          return ESP_OK;
 
     ESP_LOGI(TAG, "[Stack %d] ====== E180-ZG120B AT Mode Ensure (verbose) ======", stack_id);
 
@@ -780,7 +802,6 @@ esp_err_t zigbee_handler_ensure_at_mode(uint8_t stack_id) {
     /* Acquire bus mutex (blocks listener task) */
     if (xSemaphoreTake(g_zigbee_bus_mutex[stack_id], pdMS_TO_TICKS(10000)) != pdTRUE) {
         ESP_LOGE(TAG, "[Stack %d]   Cannot acquire bus mutex!", stack_id);
-        s_done[stack_id] = true;
         return ESP_ERR_TIMEOUT;
     }
 
@@ -897,6 +918,5 @@ zb_release:
         ESP_LOGE(TAG, "[Stack %d]     - E180 module power not up (+3V3_CTRL low?)", stack_id);
     }
     ESP_LOGI(TAG, "[Stack %d] ====== AT Mode Ensure Done ======", stack_id);
-    s_done[stack_id] = true;
     return confirmed ? ESP_OK : ESP_ERR_NOT_FOUND;
 }
