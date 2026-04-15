@@ -740,6 +740,7 @@ esp_err_t ble_handler_load_config(uint8_t stack_id, const char *json_config,
   strncpy(g_ble_handler.config[stack_id].module_name,
           parsed->metadata.module_name,
           sizeof(g_ble_handler.config[stack_id].module_name) - 1);
+  g_ble_handler.config[stack_id].crlf_terminated = parsed->metadata.crlf_terminated;
 
   switch (parsed->metadata.communication.port_type) {
   case COMM_PORT_UART:
@@ -1237,10 +1238,10 @@ esp_err_t ble_handler_execute_command_with_config(uint8_t stack_id,
     char at_cmd_buf[BLE_CMD_MAX_LEN] = {0};
     const uint8_t *write_ptr = (const uint8_t *)command;
     size_t write_len = cmd_len;
-    if (strncmp(command, "AT", 2) == 0 &&
+    if (g_ble_handler.config[stack_id].crlf_terminated &&
         (cmd_len < 2 || command[cmd_len - 2] != '\r' || command[cmd_len - 1] != '\n')) {
       strncpy(at_cmd_buf, command, sizeof(at_cmd_buf) - 3);
-      at_cmd_buf[sizeof(at_cmd_buf) - 3] = '\0'; // ensure null-terminated before concat
+      at_cmd_buf[sizeof(at_cmd_buf) - 3] = '\0';
       strcat(at_cmd_buf, "\r\n");
       write_ptr = (const uint8_t *)at_cmd_buf;
       write_len = strlen(at_cmd_buf);

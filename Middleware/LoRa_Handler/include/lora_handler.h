@@ -110,6 +110,7 @@ typedef struct {
     char     module_name[32];               ///< e.g. "RAK3172"
     char     comm_port_type[16];            ///< "uart" / "spi" / "i2c" / "usb"
     uint32_t baudrate;                      ///< UART baud rate
+    bool     crlf_terminated;              ///< true = append \r\n to ASCII commands
     lora_function_config_t functions[LORA_FUNC_COUNT]; ///< All 40 slots (39 defined + 1 reserved)
 } lora_module_config_t;
 

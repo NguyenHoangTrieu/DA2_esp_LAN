@@ -118,6 +118,7 @@ typedef struct {
   char module_id[MAX_MODULE_ID_LEN];
   char module_type[MAX_MODULE_TYPE_LEN];
   char module_name[MAX_MODULE_NAME_LEN];
+  bool crlf_terminated;           ///< true = append \r\n to ASCII commands
   comm_config_t communication;
 } module_metadata_t;
 

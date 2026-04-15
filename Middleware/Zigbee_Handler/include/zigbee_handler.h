@@ -118,6 +118,7 @@ typedef struct {
     char     module_name[32];
     char     comm_port_type[16];
     uint32_t baudrate;
+    bool     crlf_terminated;          ///< true = append \r\n to ASCII commands
     zigbee_function_config_t functions[ZIGBEE_FUNC_COUNT];
 } zigbee_module_config_t;
 

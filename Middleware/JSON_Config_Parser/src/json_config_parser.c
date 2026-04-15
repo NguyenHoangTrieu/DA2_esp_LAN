@@ -309,6 +309,11 @@ esp_err_t json_config_parse_metadata(const char *json_str,
           MAX_MODULE_NAME_LEN - 1);
   metadata->module_name[MAX_MODULE_NAME_LEN - 1] = '\0';
 
+  // Extract is_crlf_terminated (optional, default true for backward compatibility)
+  cJSON *is_crlf = cJSON_GetObjectItem(root, "is_crlf_terminated");
+  metadata->crlf_terminated = cJSON_IsBool(is_crlf) ? cJSON_IsTrue(is_crlf) : true;
+  ESP_LOGI(TAG, "CRLF terminated: %s", metadata->crlf_terminated ? "yes" : "no");
+
   // Extract module_communication
   cJSON *module_communication =
       cJSON_GetObjectItem(root, "module_communication");

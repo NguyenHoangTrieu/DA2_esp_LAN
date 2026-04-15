@@ -90,6 +90,7 @@ typedef struct {
     char module_name[32];               ///< "JDY-23" or similar
     char comm_port_type[16];            ///< "uart", "spi", "i2c"
     uint32_t baudrate;                  ///< For UART communication
+    bool crlf_terminated;               ///< true = append \r\n to ASCII commands
     ble_function_config_t functions[BLE_FUNC_COUNT]; ///< All 21 functions
 } ble_module_config_t;
 

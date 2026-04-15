@@ -413,17 +413,17 @@ static esp_err_t lora_execute_function_internal(uint8_t stack_id,
 
     if (!func_cfg->is_hex) {
         /*
-         * ASCII path: append \r\n if not already present.
-         * LoRa modules (RAK3172, RN2483, Seeed E5) require \r\n as delimiter.
+         * ASCII path: append \r\n only if is_crlf_terminated is set.
          */
-        if (cmd_len >= 2 &&
-            (final_command[cmd_len - 2] != '\r' || final_command[cmd_len - 1] != '\n')) {
-            strncpy(lora_cmd_buf, final_command, sizeof(lora_cmd_buf) - 3);
-            lora_cmd_buf[sizeof(lora_cmd_buf) - 3] = '\0';
-            strcat(lora_cmd_buf, "\r\n");
-        } else {
-            strncpy(lora_cmd_buf, final_command, sizeof(lora_cmd_buf) - 3);
-            strcat(lora_cmd_buf, "\r\n");
+        strncpy(lora_cmd_buf, final_command, sizeof(lora_cmd_buf) - 1);
+        lora_cmd_buf[sizeof(lora_cmd_buf) - 1] = '\0';
+        if (g_lora_handler.config[stack_id].crlf_terminated) {
+            size_t buf_len = strlen(lora_cmd_buf);
+            if (buf_len < 2 || lora_cmd_buf[buf_len - 2] != '\r' || lora_cmd_buf[buf_len - 1] != '\n') {
+                if (buf_len <= sizeof(lora_cmd_buf) - 3) {
+                    strcat(lora_cmd_buf, "\r\n");
+                }
+            }
         }
         write_ptr = (const uint8_t *)lora_cmd_buf;
         write_len = strlen(lora_cmd_buf);
@@ -615,6 +615,7 @@ esp_err_t lora_handler_load_config(uint8_t stack_id, const char *json_config,
     strncpy(g_lora_handler.config[stack_id].module_name,
             parsed->metadata.module_name,
             sizeof(g_lora_handler.config[stack_id].module_name) - 1);
+    g_lora_handler.config[stack_id].crlf_terminated = parsed->metadata.crlf_terminated;
 
     switch (parsed->metadata.communication.port_type) {
     case COMM_PORT_UART:
@@ -1030,12 +1031,13 @@ esp_err_t lora_handler_execute_command_with_config(uint8_t stack_id,
             return ESP_ERR_TIMEOUT;
         }
 
-        /* Generic CRLF append */
+        /* Generic CRLF append (only if is_crlf_terminated) */
         char lora_cmd_buf[LORA_CMD_MAX_LEN] = {0};
         const uint8_t *write_ptr = (const uint8_t *)command;
         size_t write_len = cmd_len;
-        if (cmd_len < 2 ||
-            (command[cmd_len - 2] != '\r' || command[cmd_len - 1] != '\n')) {
+        if (g_lora_handler.config[stack_id].crlf_terminated &&
+            (cmd_len < 2 ||
+             (command[cmd_len - 2] != '\r' || command[cmd_len - 1] != '\n'))) {
             strncpy(lora_cmd_buf, command, sizeof(lora_cmd_buf) - 3);
             lora_cmd_buf[sizeof(lora_cmd_buf) - 3] = '\0';
             strcat(lora_cmd_buf, "\r\n");

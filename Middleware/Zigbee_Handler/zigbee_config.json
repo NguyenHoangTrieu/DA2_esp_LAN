@@ -2,6 +2,7 @@
     "module_id": "020",
     "module_type": "ZIGBEE",
     "module_name": "E180-ZG120B",
+    "is_crlf_terminated": false,
     "module_communication": {
         "port_type": "uart",
         "parameters": {

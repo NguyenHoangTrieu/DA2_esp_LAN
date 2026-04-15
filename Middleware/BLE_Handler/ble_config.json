@@ -2,6 +2,7 @@
     "module_id": "002",
     "module_type": "BLE",
     "module_name": "STM32WB_BLE_Gateway",
+    "is_crlf_terminated": true,
     "module_communication": {
         "port_type": "uart",
         "parameters": {

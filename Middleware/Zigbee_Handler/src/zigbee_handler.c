@@ -268,6 +268,7 @@ esp_err_t zigbee_handler_load_config(uint8_t stack_id,
             sizeof(dst->module_type) - 1);
     strncpy(dst->module_name, parsed->metadata.module_name,
             sizeof(dst->module_name) - 1);
+    dst->crlf_terminated = parsed->metadata.crlf_terminated;
 
     switch (parsed->metadata.communication.port_type) {
     case COMM_PORT_UART:
@@ -382,15 +383,19 @@ esp_err_t zigbee_handler_execute_command_with_config(
     if (!fc->is_hex) {
         /* ===== ASCII / AT command ===== */
         size_t cmd_len = strlen(fc->command);
-        /* Build: command [+data_suffix] — sent as-is, no auto \r\n */
+        /* Build: command [+data_suffix] [\r\n if crlf_terminated] */
         char at_buf[ZIGBEE_COMMAND_LEN + 256];
         int  written = 0;
+        bool add_crlf = g_zigbee.config[stack_id].crlf_terminated;
         if (cmd_len > 0) {
             if (fc->is_prefix && data && data_len > 0) {
-                written = snprintf(at_buf, sizeof(at_buf), "%s%.*s",
+                written = snprintf(at_buf, sizeof(at_buf),
+                                   add_crlf ? "%s%.*s\r\n" : "%s%.*s",
                                    fc->command, (int)data_len, (const char *)data);
             } else {
-                written = snprintf(at_buf, sizeof(at_buf), "%s", fc->command);
+                written = snprintf(at_buf, sizeof(at_buf),
+                                   add_crlf ? "%s\r\n" : "%s",
+                                   fc->command);
             }
             /* Flush RX ring buffer before sending so stale unsolicited bytes
              * from the module do not contaminate this command's response. */
@@ -638,12 +643,29 @@ esp_err_t zigbee_handler_execute_command_raw(uint8_t stack_id,
     /* Send command */
     esp_err_t ret = ESP_OK;
     if (!fc->is_hex) {
-        /* AT mode: send command as-is, no auto \r\n */
+        /* AT mode: send command string + 
+ */
+        /* Strip any trailing \r\n the caller may have included */
+        size_t raw_len = command_len;
+        while (raw_len > 0 &&
+               (command[raw_len - 1] == '\r' || command[raw_len - 1] == '\n')) {
+            raw_len--;
+        }
+        char *buf = malloc(raw_len + 3);
+        if (!buf) {
+            xSemaphoreGive(g_zigbee_bus_mutex[stack_id]);
+            return ESP_ERR_NO_MEM;
+        }
+        memcpy(buf, command, raw_len);
+        buf[raw_len]     = '\r';
+        buf[raw_len + 1] = '\n';
+        buf[raw_len + 2] = '\0';
         /* Flush RX ring buffer before sending so stale unsolicited bytes
          * from the module do not contaminate this command's response. */
         module_bus_flush(stack_id, port_type);
-        ESP_LOGI(TAG, "ZB raw TX: %.*s (%u bytes)", (int)command_len, command, command_len);
-        ret = module_bus_write(stack_id, port_type, (const uint8_t *)command, command_len);
+        ESP_LOGI(TAG, "ZB raw TX: %.*s (%zu bytes)", (int)(raw_len + 2), buf, raw_len + 2);
+        ret = module_bus_write(stack_id, port_type, (const uint8_t *)buf, raw_len + 2);
+        free(buf);
     } else {
         /* HEX mode: decode hex string payload and send raw bytes */
         uint8_t hex_bytes[252];
