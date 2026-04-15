@@ -190,8 +190,6 @@ static struct {
     lora_module_config_t config[LORA_MAX_STACKS];
 } g_lora_handler = {0};
 
-static bool g_lora_module_ctrl_initialized = false;
-
 /** Protects g_lora_handler from multi-stack race conditions */
 static SemaphoreHandle_t g_lora_handler_mutex = NULL;
 
@@ -1031,59 +1029,109 @@ esp_err_t lora_handler_execute_command_with_config(uint8_t stack_id,
             return ESP_ERR_TIMEOUT;
         }
 
-        /* Generic CRLF append (only if is_crlf_terminated) */
-        char lora_cmd_buf[LORA_CMD_MAX_LEN] = {0};
-        const uint8_t *write_ptr = (const uint8_t *)command;
-        size_t write_len = cmd_len;
-        if (g_lora_handler.config[stack_id].crlf_terminated &&
-            (cmd_len < 2 ||
-             (command[cmd_len - 2] != '\r' || command[cmd_len - 1] != '\n'))) {
-            strncpy(lora_cmd_buf, command, sizeof(lora_cmd_buf) - 3);
-            lora_cmd_buf[sizeof(lora_cmd_buf) - 3] = '\0';
-            strcat(lora_cmd_buf, "\r\n");
-            write_ptr = (const uint8_t *)lora_cmd_buf;
-            write_len = strlen(lora_cmd_buf);
-            ESP_LOGD(TAG, "Appended CRLF to LoRa command (execute_with_config)");
-        }
-
-        ret = module_bus_write(stack_id, port_type, write_ptr, write_len);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to send command: %s", esp_err_to_name(ret));
-            xSemaphoreGive(g_lora_bus_mutex[stack_id]);
-            if (result) result->status = ret;
-            return ret;
-        }
-
         static char response_buffer[LORA_RESPONSE_MAX_LEN];
         memset(response_buffer, 0, LORA_RESPONSE_MAX_LEN);
         size_t response_len = 0;
-        bool skip_read = (expect_len == 0 && func_config->timeout_ms == 0);
-
-        if (!skip_read) {
-            ret = lora_read_until_terminator(stack_id, port_type,
-                                              expect_len > 0 ? func_config->expect_response : NULL,
-                                              func_config->timeout_ms,
-                                              response_buffer, sizeof(response_buffer),
-                                              &response_len);
-
-            bool response_valid = (ret == ESP_OK);
-            if (!response_valid && expect_len > 0) {
-                ESP_LOGW(TAG, "Response validation failed: expected '%s'",
-                         func_config->expect_response);
-                xSemaphoreGive(g_lora_bus_mutex[stack_id]);
-                if (result) {
-                    result->status = ESP_ERR_INVALID_RESPONSE;
-                    snprintf(result->response, sizeof(result->response), "%s",
-                             response_len > 0 ? response_buffer : "TIMEOUT");
-                    result->response_len = (uint16_t)response_len;
-                }
-                return ESP_ERR_INVALID_RESPONSE;
+        if (!func_config->is_hex) {
+            /* ASCII path: send command string with optional CRLF */
+            char lora_cmd_buf[LORA_CMD_MAX_LEN] = {0};
+            const uint8_t *write_ptr = (const uint8_t *)command;
+            size_t write_len = cmd_len;
+            if (g_lora_handler.config[stack_id].crlf_terminated &&
+                (cmd_len < 2 ||
+                 (command[cmd_len - 2] != '\r' || command[cmd_len - 1] != '\n'))) {
+                strncpy(lora_cmd_buf, command, sizeof(lora_cmd_buf) - 3);
+                lora_cmd_buf[sizeof(lora_cmd_buf) - 3] = '\0';
+                strcat(lora_cmd_buf, "\r\n");
+                write_ptr = (const uint8_t *)lora_cmd_buf;
+                write_len = strlen(lora_cmd_buf);
+                ESP_LOGD(TAG, "Appended CRLF to LoRa command (execute_with_config)");
             }
 
-            if (result && response_len > 0) {
-                snprintf(result->response, sizeof(result->response), "%s",
-                         response_buffer);
-                result->response_len = (uint16_t)response_len;
+            ret = module_bus_write(stack_id, port_type, write_ptr, write_len);
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to send command: %s", esp_err_to_name(ret));
+                xSemaphoreGive(g_lora_bus_mutex[stack_id]);
+                if (result) result->status = ret;
+                return ret;
+            }
+
+            /* Read ASCII response */
+            bool skip_read = (expect_len == 0 && func_config->timeout_ms == 0);
+            if (!skip_read) {
+                ret = lora_read_until_terminator(stack_id, port_type,
+                                                  expect_len > 0 ? func_config->expect_response : NULL,
+                                                  func_config->timeout_ms,
+                                                  response_buffer, sizeof(response_buffer),
+                                                  &response_len);
+
+                bool response_valid = (ret == ESP_OK);
+                if (!response_valid && expect_len > 0) {
+                    ESP_LOGW(TAG, "Response validation failed: expected '%s'",
+                             func_config->expect_response);
+                    xSemaphoreGive(g_lora_bus_mutex[stack_id]);
+                    if (result) {
+                        result->status = ESP_ERR_INVALID_RESPONSE;
+                        snprintf(result->response, sizeof(result->response), "%s",
+                                 response_len > 0 ? response_buffer : "TIMEOUT");
+                        result->response_len = (uint16_t)response_len;
+                    }
+                    return ESP_ERR_INVALID_RESPONSE;
+                }
+
+                if (result && response_len > 0) {
+                    snprintf(result->response, sizeof(result->response), "%s",
+                             response_buffer);
+                    result->response_len = (uint16_t)response_len;
+                }
+            }
+        } else {
+            /* HEX path: decode command hex string, send raw bytes, binary response */
+            uint8_t hex_cmd_buf[LORA_CMD_MAX_LEN];
+            size_t  hex_len = hex_str_to_bytes(command, hex_cmd_buf, sizeof(hex_cmd_buf));
+            if (hex_len == 0) {
+                ESP_LOGE(TAG, "Failed to decode HEX command string for LoRa");
+                xSemaphoreGive(g_lora_bus_mutex[stack_id]);
+                if (result) result->status = ESP_ERR_INVALID_ARG;
+                return ESP_ERR_INVALID_ARG;
+            }
+            ESP_LOGD(TAG, "LoRa HEX TX: %zu bytes", hex_len);
+            ret = module_bus_write(stack_id, port_type, hex_cmd_buf, hex_len);
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to send HEX command: %s", esp_err_to_name(ret));
+                xSemaphoreGive(g_lora_bus_mutex[stack_id]);
+                if (result) result->status = ret;
+                return ret;
+            }
+
+            /* Read binary response */
+            bool skip_read = (func_config->timeout_ms == 0);
+            if (!skip_read) {
+                uint8_t resp_pattern[16];
+                size_t  resp_plen = hex_str_to_bytes(func_config->expect_response,
+                                                      resp_pattern, sizeof(resp_pattern));
+                ret = lora_read_until_binary(stack_id, port_type,
+                                             resp_plen > 0 ? resp_pattern : NULL,
+                                             resp_plen,
+                                             (uint8_t *)response_buffer,
+                                             sizeof(response_buffer),
+                                             &response_len,
+                                             func_config->timeout_ms);
+                bool response_valid = (ret == ESP_OK);
+                if (!response_valid && resp_plen > 0) {
+                    ESP_LOGW(TAG, "LoRa HEX response validation failed");
+                    xSemaphoreGive(g_lora_bus_mutex[stack_id]);
+                    if (result) {
+                        result->status = ESP_ERR_INVALID_RESPONSE;
+                        memcpy(result->response, response_buffer, response_len);
+                        result->response_len = (uint16_t)response_len;
+                    }
+                    return ESP_ERR_INVALID_RESPONSE;
+                }
+                if (result && response_len > 0) {
+                    memcpy(result->response, response_buffer, response_len);
+                    result->response_len = (uint16_t)response_len;
+                }
             }
         }
 

@@ -76,6 +76,8 @@ static const char *ZIGBEE_FUNCTION_NAMES[JSON_ZIGBEE_FUNC_MAX] = {
     "MODULE_SET_LP_LEVEL",              // 42
     "MODULE_ENTER_SLEEP",               // 43
     "MODULE_WAKEUP",                    // 44
+    // Group 9: Mode switching
+    "MODULE_EXIT_SEND_MODE",            // 45
 };
 
 /* ============================================================================

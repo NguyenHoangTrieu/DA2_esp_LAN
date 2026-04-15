@@ -192,8 +192,6 @@ static struct {
   ble_module_config_t config[BLE_MAX_STACKS]; // Stack 0 and Stack 1
 } g_ble_handler = {0};
 
-static bool g_module_ctrl_initialized = false;
-
 // Mutex to protect g_ble_handler from multi-stack race conditions (Fix Issue #2)
 static SemaphoreHandle_t g_ble_handler_mutex = NULL;
 
@@ -1235,71 +1233,110 @@ esp_err_t ble_handler_execute_command_with_config(uint8_t stack_id,
       return ESP_ERR_TIMEOUT;
     }
 
-    char at_cmd_buf[BLE_CMD_MAX_LEN] = {0};
-    const uint8_t *write_ptr = (const uint8_t *)command;
-    size_t write_len = cmd_len;
-    if (g_ble_handler.config[stack_id].crlf_terminated &&
-        (cmd_len < 2 || command[cmd_len - 2] != '\r' || command[cmd_len - 1] != '\n')) {
-      strncpy(at_cmd_buf, command, sizeof(at_cmd_buf) - 3);
-      at_cmd_buf[sizeof(at_cmd_buf) - 3] = '\0';
-      strcat(at_cmd_buf, "\r\n");
-      write_ptr = (const uint8_t *)at_cmd_buf;
-      write_len = strlen(at_cmd_buf);
-      ESP_LOGD(TAG, "Appended CRLF to AT command for BLE UART");
-    }
-    ret = module_bus_write(stack_id, port_type, write_ptr, write_len);
-    if (ret != ESP_OK) {
-      ESP_LOGE(TAG, "Failed to send command: %s", esp_err_to_name(ret));
-      xSemaphoreGive(g_ble_bus_mutex[stack_id]);
-      if (result) result->status = ret;
-      return ret;
-    }
-
-    // Step 4: Wait for response (from JSON config timeout)
-    // Static to avoid large stack frames; serialised by g_ble_handler_mutex.
     static char response_buffer[BLE_RESPONSE_MAX_LEN];
     memset(response_buffer, 0, BLE_RESPONSE_MAX_LEN);
     size_t response_len = 0;
-    bool skip_read = (expect_len == 0 && func_config->timeout_ms == 0);
-
-    if (!skip_read) {
-      // Step 4: Read until expect_response found or timeout.
-      // Using ble_read_until_terminator instead of a single module_bus_read call so that
-      // streaming commands (AT+SCAN, AT+DISC, AT+CHARS ...) which emit many data
-      // lines before the final OK are fully captured within the timeout window.
-      ret = ble_read_until_terminator(stack_id, port_type,
-                                      expect_len > 0 ? func_config->expect_response : NULL,
-                                      func_config->timeout_ms,
-                                      response_buffer, sizeof(response_buffer),
-                                      &response_len);
-
-      // Verify response matches expect_response (from JSON)
-      bool response_valid = (ret == ESP_OK);
-      if (response_len > 0) {
-        ESP_LOGD(TAG, "Received response (%u bytes)", (unsigned)response_len);
+    if (!func_config->is_hex) {
+      /* ASCII path: send command string with optional CRLF */
+      char at_cmd_buf[BLE_CMD_MAX_LEN] = {0};
+      const uint8_t *write_ptr = (const uint8_t *)command;
+      size_t write_len = cmd_len;
+      if (g_ble_handler.config[stack_id].crlf_terminated &&
+          (cmd_len < 2 || command[cmd_len - 2] != '\r' || command[cmd_len - 1] != '\n')) {
+        strncpy(at_cmd_buf, command, sizeof(at_cmd_buf) - 3);
+        at_cmd_buf[sizeof(at_cmd_buf) - 3] = '\0';
+        strcat(at_cmd_buf, "\r\n");
+        write_ptr = (const uint8_t *)at_cmd_buf;
+        write_len = strlen(at_cmd_buf);
+        ESP_LOGD(TAG, "Appended CRLF to AT command for BLE UART");
+      }
+      ret = module_bus_write(stack_id, port_type, write_ptr, write_len);
+      if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to send command: %s", esp_err_to_name(ret));
+        xSemaphoreGive(g_ble_bus_mutex[stack_id]);
+        if (result) result->status = ret;
+        return ret;
       }
 
-      if (!response_valid && expect_len > 0) {
-        ESP_LOGW(TAG, "Response validation failed: expected '%s'",
-                 func_config->expect_response);
-        xSemaphoreGive(g_ble_bus_mutex[stack_id]);
-        if (result) {
-          result->status = ESP_ERR_INVALID_RESPONSE;
-          snprintf(result->response, sizeof(result->response), "%s",
-                   response_len > 0 ? response_buffer : "TIMEOUT");
+      /* Step 4: Read ASCII response */
+      bool skip_read = (expect_len == 0 && func_config->timeout_ms == 0);
+      if (!skip_read) {
+        ret = ble_read_until_terminator(stack_id, port_type,
+                                        expect_len > 0 ? func_config->expect_response : NULL,
+                                        func_config->timeout_ms,
+                                        response_buffer, sizeof(response_buffer),
+                                        &response_len);
+        bool response_valid = (ret == ESP_OK);
+        if (response_len > 0) {
+          ESP_LOGD(TAG, "Received response (%u bytes)", (unsigned)response_len);
+        }
+        if (!response_valid && expect_len > 0) {
+          ESP_LOGW(TAG, "Response validation failed: expected '%s'",
+                   func_config->expect_response);
+          xSemaphoreGive(g_ble_bus_mutex[stack_id]);
+          if (result) {
+            result->status = ESP_ERR_INVALID_RESPONSE;
+            snprintf(result->response, sizeof(result->response), "%s",
+                     response_len > 0 ? response_buffer : "TIMEOUT");
+            result->response_len = (uint16_t)response_len;
+          }
+          return ESP_ERR_INVALID_RESPONSE;
+        }
+        if (result && response_len > 0) {
+          snprintf(result->response, sizeof(result->response), "%s", response_buffer);
           result->response_len = (uint16_t)response_len;
         }
-        return ESP_ERR_INVALID_RESPONSE;
-      }
-
-      // Copy response to result
-      if (result && response_len > 0) {
-        snprintf(result->response, sizeof(result->response), "%s",
-                 response_buffer);
-        result->response_len = (uint16_t)response_len;
+      } else {
+        ESP_LOGD(TAG, "Skipping response read (no response expected, timeout=0)");
       }
     } else {
-      ESP_LOGD(TAG, "Skipping response read (no response expected, timeout=0)");
+      /* HEX path: decode command hex string, send raw bytes, binary response */
+      uint8_t hex_cmd_buf[BLE_CMD_MAX_LEN];
+      size_t  hex_len = hex_str_to_bytes(command, hex_cmd_buf, sizeof(hex_cmd_buf));
+      if (hex_len == 0) {
+        ESP_LOGE(TAG, "Failed to decode HEX command string for BLE");
+        xSemaphoreGive(g_ble_bus_mutex[stack_id]);
+        if (result) result->status = ESP_ERR_INVALID_ARG;
+        return ESP_ERR_INVALID_ARG;
+      }
+      ESP_LOGD(TAG, "BLE HEX TX: %zu bytes", hex_len);
+      ret = module_bus_write(stack_id, port_type, hex_cmd_buf, hex_len);
+      if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to send HEX command: %s", esp_err_to_name(ret));
+        xSemaphoreGive(g_ble_bus_mutex[stack_id]);
+        if (result) result->status = ret;
+        return ret;
+      }
+
+      /* Read binary response */
+      bool skip_read = (func_config->timeout_ms == 0);
+      if (!skip_read) {
+        uint8_t resp_pattern[16];
+        size_t  resp_plen = hex_str_to_bytes(func_config->expect_response,
+                                              resp_pattern, sizeof(resp_pattern));
+        ret = ble_read_until_binary(stack_id, port_type,
+                                    resp_plen > 0 ? resp_pattern : NULL,
+                                    resp_plen,
+                                    (uint8_t *)response_buffer,
+                                    sizeof(response_buffer),
+                                    &response_len,
+                                    func_config->timeout_ms);
+        bool response_valid = (ret == ESP_OK);
+        if (!response_valid && resp_plen > 0) {
+          ESP_LOGW(TAG, "BLE HEX response validation failed");
+          xSemaphoreGive(g_ble_bus_mutex[stack_id]);
+          if (result) {
+            result->status = ESP_ERR_INVALID_RESPONSE;
+            memcpy(result->response, response_buffer, response_len);
+            result->response_len = (uint16_t)response_len;
+          }
+          return ESP_ERR_INVALID_RESPONSE;
+        }
+        if (result && response_len > 0) {
+          memcpy(result->response, response_buffer, response_len);
+          result->response_len = (uint16_t)response_len;
+        }
+      }
     }
 
     // Release bus mutex after write+read cycle; GPIO end sequences do not

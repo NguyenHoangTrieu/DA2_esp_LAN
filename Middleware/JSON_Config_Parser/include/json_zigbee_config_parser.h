@@ -88,6 +88,8 @@ typedef enum {
     JSON_ZIGBEE_FUNC_SET_LP_LEVEL,        ///< PM1 P2 – sleep level (end device)
     JSON_ZIGBEE_FUNC_ENTER_SLEEP,         ///< PM2 P2 – force sleep
     JSON_ZIGBEE_FUNC_WAKEUP,              ///< PM3 P2 – wake via GPIO
+    // Group 9: Mode switching (45)
+    JSON_ZIGBEE_FUNC_EXIT_SEND_MODE,      ///< M1 – exit transparent/send mode (+++)
     // sentinel
     JSON_ZIGBEE_FUNC_MAX
 } json_zigbee_function_id_t;

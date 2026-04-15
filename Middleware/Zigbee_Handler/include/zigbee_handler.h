@@ -84,6 +84,7 @@ typedef enum {
     ZIGBEE_FUNC_SET_LP_LEVEL          = 42,
     ZIGBEE_FUNC_ENTER_SLEEP           = 43,
     ZIGBEE_FUNC_WAKEUP                = 44,
+    ZIGBEE_FUNC_EXIT_SEND_MODE        = 45,  ///< exit transparent/send mode (+++)
 
     ZIGBEE_FUNC_COUNT   = 48,           ///< Capacity (45 defined + 3 reserved)
     ZIGBEE_FUNC_INVALID = 0xFF
@@ -148,13 +149,30 @@ esp_err_t zigbee_handler_load_config(uint8_t stack_id,
                                       uint16_t json_len);
 
 /**
- * @brief Unified AT/Zigbee command handler — two modes via is_hex:
+ * @brief Unified AT/Zigbee command executor — mirrors BLE/LoRa execute_command_with_config.
  *
  *  is_hex==false (ASCII/AT): send "command[\r\n]" + ASCII prefix match in response
- *  is_hex==true  (Binary):   build "55 LEN CMD_TYPE CMD_CODE [DATA] XOR" and
- *                            match binary response prefix from expect_response
- */ 
+ *  is_hex==true  (Binary):   decode hex-string command → send raw bytes + binary response
+ *
+ * Signature intentionally matches ble_handler_execute_command_with_config and
+ * lora_handler_execute_command_with_config for cross-handler consistency.
+ */
 esp_err_t zigbee_handler_execute_command_with_config(
+    uint8_t stack_id,
+    const char *command,
+    const zigbee_function_config_t *fc,
+    zigbee_exec_result_t *result);
+
+/**
+ * @brief Execute a function by ID (for internal init sequences: HW_RESET, GET_INFO…).
+ *
+ * Looks up the function config from the loaded JSON config by func_id, then
+ * builds and sends the command.  For GPIO-only functions pass command=NULL/data=NULL.
+ *
+ *  is_hex==false: appends data bytes as ASCII suffix after fc->command
+ *  is_hex==true:  appends data bytes as raw bytes after decoded fc->command
+ */
+esp_err_t zigbee_handler_execute_function(
     uint8_t stack_id,
     zigbee_function_id_t func_id,
     const uint8_t *data,
@@ -210,25 +228,6 @@ esp_err_t zigbee_handler_get_function_by_command(uint8_t stack_id,
 esp_err_t zigbee_handler_get_function_by_name(uint8_t stack_id,
                                                const char *func_name,
                                                zigbee_function_config_t *func_config);
-
-/**
- * @brief Execute a raw command string using a pre-resolved function config.
- *
- * Sends @p command directly to the module UART (no func_id lookup).
- * GPIO, timeout, and expected-response metadata come from @p fc.
- *
- * @param stack_id   Stack ID
- * @param command    Null-terminated AT command string (e.g. "AT+INFO?")
- * @param command_len Length of command (0 = auto strlen)
- * @param fc         Pre-resolved function config (GPIO/timeout/expect)
- * @param result     [out] Response buffer (may be NULL)
- * @return ESP_OK on success
- */
-esp_err_t zigbee_handler_execute_command_raw(uint8_t stack_id,
-                                              const char *command,
-                                              uint16_t command_len,
-                                              const zigbee_function_config_t *fc,
-                                              zigbee_exec_result_t *result);
 
 /**
  * @brief Diagnostic test: Send AT+RESET and log raw response.

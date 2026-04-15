@@ -136,8 +136,8 @@ static void zigbee_downlink_task(void *pv) {
                  sid, req.command_len, req.command);
 
         zigbee_exec_result_t result = {0};
-        esp_err_t ret = zigbee_handler_execute_command_raw(
-            sid, req.command, req.command_len, &req.func_config, &result);
+        esp_err_t ret = zigbee_handler_execute_command_with_config(
+            sid, req.command, &req.func_config, &result);
 
         /* Build response packet "CFZB:<stack>:OK/FAIL:<cmd>[:<hex_response>]" */
         char *resp_pkt = (char *)malloc(ZIGBEE_RESP_PACKET_SIZE);
@@ -412,26 +412,29 @@ esp_err_t zigbee_handler_task_load_config(uint8_t stack_id,
     }
     zigbee_exec_result_t res = {0};
 
-    /* HW Reset (GPIO NRST) */
-    ret = zigbee_handler_execute_command_with_config(
-        stack_id, ZIGBEE_FUNC_HW_RESET, NULL, 0, &res);
+    /* Step 1: Exit transparent/send mode with +++
+     * Module may be stuck in transparent mode from a previous session.  The
+     * +++ escape sequence returns it to HEX mode (response is a binary boot
+     * frame – ignored).  Failure is non-fatal; module may already be in HEX
+     * or AT mode. */
+    ret = zigbee_handler_execute_function(
+        stack_id, ZIGBEE_FUNC_EXIT_SEND_MODE, NULL, 0, &res);
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "[Stack %d] HW reset failed (continuing): %s",
+        ESP_LOGW(TAG, "[Stack %d] Exit send mode failed (continuing): %s",
                  stack_id, esp_err_to_name(ret));
     }
-    vTaskDelay(pdMS_TO_TICKS(500));
 
-    // /* Ensure module is in AT command mode.
-    //  * E180-ZG120B boots in HEX binary mode by default — this sends the
-    //  * HEX frame [55 03 00 16 16] to switch to AT mode, with fallback phases.
-    //  * Must be called after EVERY hardware/software reset. */
-    // if (zigbee_handler_ensure_at_mode(stack_id) != ESP_OK) {
-    //     ESP_LOGW(TAG, "[Stack %d] AT mode ensure failed — subsequent AT commands may return INVALID",
-    //              stack_id);
-    // }
-    zigbee_handler_test_at_reset(stack_id);  // Best-effort AT reset (some modules may not support)
-    /* Get module info */
-    ret = zigbee_handler_execute_command_with_config(
+    /* Step 2: Switch from HEX mode to AT mode [55 03 00 16 16]
+     * Non-fatal: if module already in AT mode this will be ignored. */
+    ret = zigbee_handler_execute_function(
+        stack_id, ZIGBEE_FUNC_ENTER_AT_MODE, NULL, 0, &res);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "[Stack %d] Enter AT mode failed (continuing): %s",
+                 stack_id, esp_err_to_name(ret));
+    }
+
+    /* Step 3: Get module info */
+    ret = zigbee_handler_execute_function(
         stack_id, ZIGBEE_FUNC_GET_INFO, NULL, 0, &res);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "[Stack %d] GET_INFO failed: %s", stack_id, esp_err_to_name(ret));
