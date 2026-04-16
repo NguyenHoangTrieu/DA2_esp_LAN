@@ -288,6 +288,8 @@ static void ble_listener_task(void *pvParameters) {
                                            BLE_LISTEN_BUFFER_SIZE - 1, &recv_len);
 
         if (ret == ESP_OK && recv_len > 0) {
+            ESP_LOGI(TAG, "[Stack %d] Listener RX %u bytes: %.*s",
+                     stack_id, (unsigned)recv_len, (int)recv_len, listen_buf);
             // Replace \r\n with \x1E (same convention used for command responses)
             // so the entire EVT packet is a single flat line for the PC App.
             int ci = 0;

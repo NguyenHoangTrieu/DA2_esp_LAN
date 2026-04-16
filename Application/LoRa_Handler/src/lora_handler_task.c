@@ -265,6 +265,8 @@ static void lora_listener_task(void *pvParameters) {
                                              LORA_LISTEN_BUFFER_SIZE - 1, &recv_len);
 
         if (ret == ESP_OK && recv_len > 0) {
+            ESP_LOGI(TAG, "[Stack %d] Listener RX %u bytes: %.*s",
+                     stack_id, (unsigned)recv_len, (int)recv_len, listen_buf);
             /* Normalise \r\n to \x1E */
             int ci = 0;
             for (size_t i = 0; i < recv_len && ci < (int)(LORA_LISTEN_BUFFER_SIZE - 1); i++) {

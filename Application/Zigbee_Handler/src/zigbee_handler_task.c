@@ -226,7 +226,9 @@ static void zigbee_listener_task(void *pv) {
                                               &recv_len);
 
         if (ret == ESP_OK && recv_len > 0) {
-            /* Format as space-separated hex string */
+            ESP_LOGI(TAG, "[Stack %d] Listener RX %u bytes: %.*s",
+                     sid, (unsigned)recv_len, (int)recv_len, (char *)listen_buf);
+            /* Format as space-separated hex string for WAN packet */
             bytes_to_hex_str(listen_buf, recv_len, hex_str,
                              ZIGBEE_LISTEN_BUFFER_SIZE * 3 + 8);
 

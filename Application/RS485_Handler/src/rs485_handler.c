@@ -234,6 +234,7 @@ static void rs485_handler_task(void *arg) {
       if (ret == ESP_OK && actual_read > 0) {
         g_rs485_ctx.stats.rx_ok++;
         ESP_LOGI(TAG, "Received RS485 data: %u bytes", actual_read);
+        ESP_LOG_BUFFER_HEX(TAG, rx_buffer, actual_read);
 
         // Forward to WAN uplink
         if (mcu_wan_enqueue_uplink(HANDLER_RS485, rx_buffer, actual_read)) {
