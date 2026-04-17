@@ -124,8 +124,23 @@ static size_t hex_str_to_bytes(const char *hex_str, uint8_t *buf, size_t out_max
 }
 
 /**
+ * @brief Format a binary byte buffer as space-separated uppercase hex string.
+ *        e.g. {0x55,0x00,0x03} → "55 00 03"
+ */
+static int bytes_to_hex_str(const uint8_t *bytes, size_t len,
+                             char *out, size_t out_max) {
+    int pos = 0;
+    for (size_t i = 0; i < len && pos + 3 < (int)out_max; i++) {
+        pos += snprintf(out + pos, out_max - pos,
+                        "%s%02X", (i == 0 ? "" : " "), bytes[i]);
+    }
+    return pos;
+}
+
+/**
  * @brief Binary read variant: accumulate raw bytes and match with memmem.
  *        Used for is_hex=true commands where response is binary, not ASCII.
+ *        Data collection with early exit on memmem; caller validates with strstr.
  */
 static esp_err_t ble_read_until_binary(uint8_t stack_id,
                                         comm_port_type_t port_type,
@@ -581,7 +596,8 @@ static esp_err_t ble_execute_function_internal(uint8_t stack_id,
         return ESP_ERR_INVALID_RESPONSE;
       }
     } else {
-      /* Binary response matching: decode expect_response hex string */
+      /* HEX: collect bytes until binary-decoded pattern found or timeout,
+       * then validate by formatting bytes as "XX XX XX" string and strstr. */
       uint8_t resp_pattern[16];
       size_t  resp_plen = hex_str_to_bytes(func_cfg->expect_response,
                                             resp_pattern, sizeof(resp_pattern));
@@ -592,9 +608,19 @@ static esp_err_t ble_execute_function_internal(uint8_t stack_id,
                                    sizeof(response_buffer),
                                    &response_len,
                                    func_cfg->timeout_ms);
-      response_valid = (ret == ESP_OK);
-      if (!response_valid && resp_plen > 0) {
-        ESP_LOGW(TAG, "Binary response validation failed for function %d", func_id);
+      /* Convert received bytes to hex string for logging and validation */
+      char hex_resp[BLE_RESPONSE_MAX_LEN * 3];
+      bytes_to_hex_str((const uint8_t *)response_buffer, response_len,
+                       hex_resp, sizeof(hex_resp));
+      if (response_len > 0) {
+        ESP_LOGI(TAG, "BLE RX %zu bytes (HEX): %s", response_len, hex_resp);
+      } else {
+        ESP_LOGI(TAG, "BLE RX: (no data)");
+      }
+      if (strlen(func_cfg->expect_response) > 0 &&
+          strstr(hex_resp, func_cfg->expect_response) == NULL) {
+        ESP_LOGW(TAG, "BLE HEX response validation failed (expected: \"%s\")",
+                 func_cfg->expect_response);
         xSemaphoreGive(g_ble_bus_mutex[stack_id]);
         if (result) {
           result->status = ESP_ERR_INVALID_RESPONSE;
@@ -603,8 +629,9 @@ static esp_err_t ble_execute_function_internal(uint8_t stack_id,
         }
         return ESP_ERR_INVALID_RESPONSE;
       }
+      response_valid = true;
     }
-    if (response_len > 0) {
+    if (response_len > 0 && func_cfg->is_hex == false) {
       ESP_LOGD(TAG, "Received response (%u bytes)", (unsigned)response_len);
     }
   } else {
@@ -1321,9 +1348,19 @@ esp_err_t ble_handler_execute_command_with_config(uint8_t stack_id,
                                     sizeof(response_buffer),
                                     &response_len,
                                     func_config->timeout_ms);
-        bool response_valid = (ret == ESP_OK);
-        if (!response_valid && resp_plen > 0) {
-          ESP_LOGW(TAG, "BLE HEX response validation failed");
+        /* Convert received bytes to hex string for logging and validation */
+        char hex_resp[BLE_RESPONSE_MAX_LEN * 3];
+        bytes_to_hex_str((const uint8_t *)response_buffer, response_len,
+                         hex_resp, sizeof(hex_resp));
+        if (response_len > 0) {
+          ESP_LOGI(TAG, "BLE RX %zu bytes (HEX): %s", response_len, hex_resp);
+        } else {
+          ESP_LOGI(TAG, "BLE RX: (no data)");
+        }
+        if (strlen(func_config->expect_response) > 0 &&
+            strstr(hex_resp, func_config->expect_response) == NULL) {
+          ESP_LOGW(TAG, "BLE HEX response validation failed (expected: \"%s\")",
+                   func_config->expect_response);
           xSemaphoreGive(g_ble_bus_mutex[stack_id]);
           if (result) {
             result->status = ESP_ERR_INVALID_RESPONSE;

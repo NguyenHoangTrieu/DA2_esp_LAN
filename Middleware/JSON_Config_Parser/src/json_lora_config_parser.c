@@ -73,6 +73,11 @@ static const char *LORA_FUNCTION_NAMES[JSON_LORA_FUNC_MAX] = {
     "MODULE_LOWPOWER_AUTO_ON",      // 36
     "MODULE_LOWPOWER_AUTO_OFF",     // 37
     "MODULE_WAKEUP_NOTIFY",         // 38
+    // LoRa P2P / TEST mode (39-42)
+    "MODULE_ENTER_P2P_MODE",        // 39
+    "MODULE_SET_P2P_CONFIG",        // 40
+    "MODULE_SEND_P2P_PKT",          // 41
+    "MODULE_ENTER_P2P_RX",          // 42
 };
 
 /* ============================================================================

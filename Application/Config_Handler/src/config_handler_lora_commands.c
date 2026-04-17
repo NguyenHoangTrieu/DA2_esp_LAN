@@ -222,7 +222,7 @@ esp_err_t config_parse_lora_json(const uint8_t *data, uint16_t len) {
         ESP_LOGE(TAG, "LORA JSON: invalid stack_id %u", stack_id);
         return ESP_FAIL;
     }
-    if (json_len < 2 || json_len > 8912) {
+    if (json_len < 2 || json_len > 16*1024) {
         ESP_LOGE(TAG, "LORA JSON: invalid length %u", json_len);
         return ESP_FAIL;
     }

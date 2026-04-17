@@ -3,9 +3,11 @@
  * @brief Zigbee-specific JSON configuration parser
  *
  * Unified format identical to BLE/LoRa parsers:
- *  - All commands are ASCII AT strings (stored in `command`)
- *  - is_hex: true = binary/hex data, false = ASCII/AT (default)
- *  - expect_response stores ASCII prefix string for response matching
+ *  - command: "55 CMD_TYPE CMD_CODE" template (is_hex=true) or AT string (is_hex=false)
+ *  - is_hex: true = binary/HEX mode (E180 native protocol), false = ASCII/AT mode
+ *  - is_prefix: true = runtime data is appended after the command bytes
+ *  - expect_response: space-separated hex bytes string (HEX mode) or ASCII prefix
+ *  NOTE: cmd_type, cmd_code, resp_format JSON fields are obsolete and ignored.
  */
 
 #ifndef JSON_ZIGBEE_CONFIG_PARSER_H
@@ -21,7 +23,7 @@ extern "C" {
  * Constants
  * ========================================================================== */
 
-#define ZIGBEE_MAX_FUNCTIONS    48      ///< 45 defined + 3 reserved slots
+#define ZIGBEE_MAX_FUNCTIONS    56      ///< 51 defined + 5 reserved slots
 #define ZIGBEE_COMMAND_LEN      64      ///< Command string (AT text or hex template)
 #define ZIGBEE_RESPONSE_LEN     64      ///< Expect_response (ASCII prefix or hex bytes string)
 
@@ -90,6 +92,12 @@ typedef enum {
     JSON_ZIGBEE_FUNC_WAKEUP,              ///< PM3 P2 – wake via GPIO
     // Group 9: Mode switching (45)
     JSON_ZIGBEE_FUNC_EXIT_SEND_MODE,      ///< M1 – exit transparent/send mode (+++)
+    // Group 10: Boot/misc events (46-50)
+    JSON_ZIGBEE_FUNC_BOOT_NOTIFY,         ///< async boot/restart notify
+    JSON_ZIGBEE_FUNC_NET_STATUS_NOTIFY,   ///< async network status change
+    JSON_ZIGBEE_FUNC_FIND_BIND_NOTIFY,    ///< async auto-bind result
+    JSON_ZIGBEE_FUNC_SEND_CONFIRM,        ///< async ZCL send confirmation
+    JSON_ZIGBEE_FUNC_ZCL_DEFAULT_RSP,     ///< async ZCL default response
     // sentinel
     JSON_ZIGBEE_FUNC_MAX
 } json_zigbee_function_id_t;
@@ -138,9 +146,9 @@ typedef struct {
  * @brief Parse complete Zigbee module configuration from JSON string.
  *
  * Validates module_type == "ZIGBEE", iterates "functions" array,
- * validates each function name against the hardcoded table, and
- * parses both standard (BLE/LoRa-compatible) fields and Zigbee-specific
- * fields (cmd_type, cmd_code, response_format).
+ * and maps each function name against the hardcoded ZIGBEE_FUNCTION_NAMES[]
+ * table.  Ignores unknown/obsolete JSON fields (cmd_type, cmd_code,
+ * resp_format) silently.
  *
  * @param json_str  NULL-terminated JSON string
  * @param config    [out] Caller-allocated output structure

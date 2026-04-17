@@ -85,8 +85,13 @@ typedef enum {
     ZIGBEE_FUNC_ENTER_SLEEP           = 43,
     ZIGBEE_FUNC_WAKEUP                = 44,
     ZIGBEE_FUNC_EXIT_SEND_MODE        = 45,  ///< exit transparent/send mode (+++)
+    ZIGBEE_FUNC_BOOT_NOTIFY           = 46,  ///< bootloader notify event
+    ZIGBEE_FUNC_NET_STATUS_NOTIFY     = 47,  ///< network status change notify
+    ZIGBEE_FUNC_FIND_BIND_NOTIFY      = 48,  ///< auto-bind result notify
+    ZIGBEE_FUNC_SEND_CONFIRM          = 49,  ///< ZCL send confirmation
+    ZIGBEE_FUNC_ZCL_DEFAULT_RSP       = 50,  ///< ZCL default response
 
-    ZIGBEE_FUNC_COUNT   = 48,           ///< Capacity (45 defined + 3 reserved)
+    ZIGBEE_FUNC_COUNT   = 51,           ///< Capacity (51 defined)
     ZIGBEE_FUNC_INVALID = 0xFF
 } zigbee_function_id_t;
 

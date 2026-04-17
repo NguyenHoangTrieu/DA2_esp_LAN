@@ -71,6 +71,60 @@ bool lora_handler_is_running(uint8_t stack_id) {
     return g_lora_task.running[stack_id];
 }
 
+/**
+ * @brief Convert binary buffer to space-separated hex string.
+ *        e.g. {0x55,0x0D,0x01} → "55 0D 01"
+ */
+static int lora_bytes_to_hex_str(const uint8_t *bytes, size_t len,
+                                  char *out, size_t out_max) {
+    int pos = 0;
+    for (size_t i = 0; i < len && pos + 3 < (int)out_max; i++) {
+        pos += snprintf(out + pos, out_max - pos,
+                        "%s%02X", (i == 0 ? "" : " "), bytes[i]);
+    }
+    return pos;
+}
+
+/**
+ * @brief Parse a space-separated hex byte string into a binary buffer.
+ *        e.g. "55 00 00" → {0x55, 0x00, 0x00}
+ * @return Number of bytes written to @p buf.
+ */
+static size_t lora_hex_str_to_bytes(const char *hex_str, uint8_t *buf, size_t out_max) {
+    if (!hex_str || !buf || out_max == 0) return 0;
+    size_t n = 0;
+    const char *p = hex_str;
+    while (*p && n < out_max) {
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p) break;
+        unsigned int bval = 0;
+        int consumed = 0;
+        if (sscanf(p, "%2x%n", &bval, &consumed) != 1 || consumed == 0) break;
+        buf[n++] = (uint8_t)bval;
+        p += consumed;
+    }
+    return n;
+}
+
+/**
+ * @brief Return true if the majority of loaded functions for this stack are
+ *        HEX mode (is_hex=true).  Samples 3 well-known function names.
+ */
+static bool lora_stack_is_hex_mode(uint8_t sid) {
+    static const char *probe[] = {
+        "MODULE_GET_INFO", "MODULE_SW_RESET", "MODULE_START_NETWORK"
+    };
+    int hex_cnt = 0, ascii_cnt = 0;
+    for (int i = 0; i < 3; i++) {
+        lora_function_config_t fc;
+        if (lora_handler_get_function_by_name(sid, probe[i], &fc) == ESP_OK) {
+            if (fc.is_hex) hex_cnt++;
+            else           ascii_cnt++;
+        }
+    }
+    return (hex_cnt >= ascii_cnt);
+}
+
 /* ===== Task Implementations ===== */
 
 /**
@@ -132,23 +186,52 @@ static void lora_downlink_task(void *pvParameters) {
 
     ESP_LOGI(TAG, "[Stack %d] LoRa downlink task started", stack_id);
 
+    bool hex_mode = lora_stack_is_hex_mode(stack_id);
+
     while (g_lora_task.running[stack_id]) {
         /* Process command queue first (higher priority) */
         lora_command_request_t cmd_req;
         if (xQueueReceive(g_lora_task.command_queue[stack_id], &cmd_req, 0) == pdTRUE) {
             if (!g_lora_task.running[stack_id]) break;
 
-            ESP_LOGI(TAG, "[Stack %d] Processing command: %s", stack_id, cmd_req.command);
-
+            if (hex_mode || cmd_req.func_config.is_hex) {
+                /* Parse hex string to actual bytes before logging to avoid
+                 * printing ASCII byte-codes of the command characters. */
+                uint8_t parsed_cmd[256];
+                size_t  parsed_len = lora_hex_str_to_bytes(cmd_req.command,
+                                                            parsed_cmd, sizeof(parsed_cmd));
+                char hex_tmp[512];
+                lora_bytes_to_hex_str(parsed_cmd, parsed_len, hex_tmp, sizeof(hex_tmp));
+                ESP_LOGI(TAG, "[Stack %d] Processing HEX cmd: %s (%zu bytes)",
+                         stack_id, hex_tmp, parsed_len);
+            } else {
+                ESP_LOGI(TAG, "[Stack %d] Processing AT cmd: %s", stack_id, cmd_req.command);
+            }
             lora_exec_result_t result = {0};
             esp_err_t ret = lora_handler_execute_command_with_config(
                 stack_id, cmd_req.command, &cmd_req.func_config, &result);
 
+            bool is_hex_cmd = cmd_req.func_config.is_hex;
             if (ret == ESP_OK) {
-                ESP_LOGI(TAG, "[Stack %d] Command OK: %s", stack_id, result.response);
+                if (is_hex_cmd && result.response_len > 0) {
+                    char hex_resp[512];
+                    lora_bytes_to_hex_str((const uint8_t *)result.response,
+                                          result.response_len, hex_resp, sizeof(hex_resp));
+                    ESP_LOGI(TAG, "[Stack %d] Command OK, HEX reply: %s", stack_id, hex_resp);
+                } else {
+                    ESP_LOGI(TAG, "[Stack %d] Command OK: %s", stack_id, result.response);
+                }
             } else {
-                ESP_LOGE(TAG, "[Stack %d] Command FAIL: %s (status=%s)",
-                         stack_id, result.response, esp_err_to_name(ret));
+                if (is_hex_cmd && result.response_len > 0) {
+                    char hex_resp[512];
+                    lora_bytes_to_hex_str((const uint8_t *)result.response,
+                                          result.response_len, hex_resp, sizeof(hex_resp));
+                    ESP_LOGE(TAG, "[Stack %d] Command FAIL: %s | HEX reply: %s",
+                             stack_id, esp_err_to_name(ret), hex_resp);
+                } else {
+                    ESP_LOGE(TAG, "[Stack %d] Command FAIL: %s (status=%s)",
+                             stack_id, result.response, esp_err_to_name(ret));
+                }
             }
 
             /* Forward response to WAN MCU → PC App
@@ -165,34 +248,43 @@ static void lora_downlink_task(void *pvParameters) {
                         ? result.response_len
                         : (uint16_t)strlen(result.response);
 
-                    /* Normalise \r\n to \x1E record-separator for flat-line transport */
-                    int ci = 0;
-                    for (int i = 0; i < actual_resp_len && ci < 2047; i++) {
-                        char c = result.response[i];
-                        if (c == '\r') continue;
-                        if (c == '\n') {
-                            if (ci > 0 && clean_resp[ci - 1] != '\x1E')
-                                clean_resp[ci++] = '\x1E';
-                            continue;
-                        }
-                        clean_resp[ci++] = c;
-                    }
-                    while (ci > 0 && clean_resp[ci - 1] == '\x1E') ci--;
-                    clean_resp[ci] = '\0';
-
                     int resp_len;
-                    if (ret == ESP_OK) {
-                        resp_len = snprintf(resp_packet, 3072,
-                                            "CFLR:%d:OK:%s", stack_id, clean_resp);
+                    if (is_hex_cmd && actual_resp_len > 0) {
+                        /* HEX mode: send binary response as hex string */
+                        lora_bytes_to_hex_str((const uint8_t *)result.response,
+                                              actual_resp_len, clean_resp, 2048);
+                        resp_len = (ret == ESP_OK)
+                            ? snprintf(resp_packet, 3072, "CFLR:%d:OK:%s", stack_id, clean_resp)
+                            : snprintf(resp_packet, 3072, "CFLR:%d:FAIL:%s:%s",
+                                       stack_id, esp_err_to_name(ret), clean_resp);
                     } else {
-                        if (ci > 0) {
+                        /* ASCII/AT mode: normalise \r\n to \x1E record-separator */
+                        int ci = 0;
+                        for (int i = 0; i < actual_resp_len && ci < 2047; i++) {
+                            char c = result.response[i];
+                            if (c == '\r') continue;
+                            if (c == '\n') {
+                                if (ci > 0 && clean_resp[ci - 1] != '\x1E')
+                                    clean_resp[ci++] = '\x1E';
+                                continue;
+                            }
+                            clean_resp[ci++] = c;
+                        }
+                        while (ci > 0 && clean_resp[ci - 1] == '\x1E') ci--;
+                        clean_resp[ci] = '\0';
+                        if (ret == ESP_OK) {
                             resp_len = snprintf(resp_packet, 3072,
-                                                "CFLR:%d:FAIL:%s:%s",
-                                                stack_id, esp_err_to_name(ret), clean_resp);
+                                                "CFLR:%d:OK:%s", stack_id, clean_resp);
                         } else {
-                            resp_len = snprintf(resp_packet, 3072,
-                                                "CFLR:%d:FAIL:%s:NOREPLY",
-                                                stack_id, esp_err_to_name(ret));
+                            if (ci > 0) {
+                                resp_len = snprintf(resp_packet, 3072,
+                                                    "CFLR:%d:FAIL:%s:%s",
+                                                    stack_id, esp_err_to_name(ret), clean_resp);
+                            } else {
+                                resp_len = snprintf(resp_packet, 3072,
+                                                    "CFLR:%d:FAIL:%s:NOREPLY",
+                                                    stack_id, esp_err_to_name(ret));
+                            }
                         }
                     }
 
@@ -245,9 +337,13 @@ static void lora_listener_task(void *pvParameters) {
 
     ESP_LOGI(TAG, "[Stack %d] LoRa listener task started", stack_id);
 
+    bool hex_mode = lora_stack_is_hex_mode(stack_id);
+    ESP_LOGI(TAG, "[Stack %d] Listener: %s mode", stack_id, hex_mode ? "HEX" : "ASCII");
+
+    /* hex_str is only needed in HEX mode but allocate regardless for simplicity */
     char *listen_buf = (char *)malloc(LORA_LISTEN_BUFFER_SIZE);
-    char *clean_buf  = (char *)malloc(LORA_LISTEN_BUFFER_SIZE);
-    char *evt_packet = (char *)malloc(LORA_LISTEN_BUFFER_SIZE + 32);
+    char *clean_buf  = (char *)malloc(LORA_LISTEN_BUFFER_SIZE * 3);  /* larger for hex output */
+    char *evt_packet = (char *)malloc(LORA_LISTEN_BUFFER_SIZE * 3 + 32);
 
     if (!listen_buf || !clean_buf || !evt_packet) {
         ESP_LOGE(TAG, "[Stack %d] Failed to alloc listener buffers", stack_id);
@@ -265,34 +361,43 @@ static void lora_listener_task(void *pvParameters) {
                                              LORA_LISTEN_BUFFER_SIZE - 1, &recv_len);
 
         if (ret == ESP_OK && recv_len > 0) {
-            ESP_LOGI(TAG, "[Stack %d] Listener RX %u bytes: %.*s",
-                     stack_id, (unsigned)recv_len, (int)recv_len, listen_buf);
-            /* Normalise \r\n to \x1E */
-            int ci = 0;
-            for (size_t i = 0; i < recv_len && ci < (int)(LORA_LISTEN_BUFFER_SIZE - 1); i++) {
-                char c = listen_buf[i];
-                if (c == '\r') continue;
-                if (c == '\n') {
-                    if (ci > 0 && clean_buf[ci - 1] != '\x1E')
-                        clean_buf[ci++] = '\x1E';
-                    continue;
-                }
-                clean_buf[ci++] = c;
-            }
-            while (ci > 0 && clean_buf[ci - 1] == '\x1E') ci--;
-            clean_buf[ci] = '\0';
-
-            if (ci > 0) {
-                int pkt_len = snprintf(evt_packet, LORA_LISTEN_BUFFER_SIZE + 32,
-                                       "CFLR:%d:EVT:%s", stack_id, clean_buf);
-                if (pkt_len > 0) {
-                    if (!mcu_wan_enqueue_uplink(HANDLER_LORA,
-                                                 (uint8_t *)evt_packet,
-                                                 (uint16_t)pkt_len)) {
-                        ESP_LOGW(TAG, "[Stack %d] Failed to enqueue EVT to WAN", stack_id);
-                    } else {
-                        ESP_LOGD(TAG, "[Stack %d] EVT forwarded: %s", stack_id, evt_packet);
+            int pkt_len;
+            if (hex_mode) {
+                lora_bytes_to_hex_str((const uint8_t *)listen_buf, recv_len,
+                                      clean_buf, LORA_LISTEN_BUFFER_SIZE * 3);
+                ESP_LOGI(TAG, "[Stack %d] Listener RX %u bytes (HEX): %s",
+                         stack_id, (unsigned)recv_len, clean_buf);
+                pkt_len = snprintf(evt_packet, LORA_LISTEN_BUFFER_SIZE * 3 + 32,
+                                   "CFLR:%d:EVT:%s", stack_id, clean_buf);
+            } else {
+                /* ASCII/AT mode: normalise \r\n to \x1E */
+                int ci = 0;
+                for (size_t i = 0; i < recv_len && ci < (int)(LORA_LISTEN_BUFFER_SIZE - 1); i++) {
+                    char c = listen_buf[i];
+                    if (c == '\r') continue;
+                    if (c == '\n') {
+                        if (ci > 0 && clean_buf[ci - 1] != '\x1E')
+                            clean_buf[ci++] = '\x1E';
+                        continue;
                     }
+                    clean_buf[ci++] = c;
+                }
+                while (ci > 0 && clean_buf[ci - 1] == '\x1E') ci--;
+                clean_buf[ci] = '\0';
+                ESP_LOGI(TAG, "[Stack %d] Listener RX %u bytes (ASCII): %s",
+                         stack_id, (unsigned)recv_len, clean_buf);
+                pkt_len = (ci > 0)
+                    ? snprintf(evt_packet, LORA_LISTEN_BUFFER_SIZE * 3 + 32,
+                               "CFLR:%d:EVT:%s", stack_id, clean_buf)
+                    : 0;
+            }
+            if (pkt_len > 0) {
+                if (!mcu_wan_enqueue_uplink(HANDLER_LORA,
+                                             (uint8_t *)evt_packet,
+                                             (uint16_t)pkt_len)) {
+                    ESP_LOGW(TAG, "[Stack %d] Failed to enqueue EVT to WAN", stack_id);
+                } else {
+                    ESP_LOGD(TAG, "[Stack %d] EVT forwarded: %s", stack_id, evt_packet);
                 }
             }
         } else if (ret == ESP_ERR_TIMEOUT) {

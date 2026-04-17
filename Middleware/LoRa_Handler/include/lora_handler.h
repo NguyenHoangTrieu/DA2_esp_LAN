@@ -77,7 +77,13 @@ typedef enum {
     LORA_FUNC_LOWPOWER_AUTO_OFF,
     LORA_FUNC_WAKEUP_NOTIFY,
 
-    LORA_FUNC_COUNT    = 40,     ///< Capacity (39 defined + 1 reserved)
+    /* -- LoRa P2P / TEST mode (39-42) ---------------------------------------- */
+    LORA_FUNC_ENTER_P2P_MODE,
+    LORA_FUNC_SET_P2P_CONFIG,
+    LORA_FUNC_SEND_P2P_PKT,
+    LORA_FUNC_ENTER_P2P_RX,
+
+    LORA_FUNC_COUNT    = 44,     ///< Capacity (43 defined + 1 reserved)
     LORA_FUNC_INVALID  = 0xFF
 } lora_function_id_t;
 

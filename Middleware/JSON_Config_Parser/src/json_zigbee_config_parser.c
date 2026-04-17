@@ -78,6 +78,12 @@ static const char *ZIGBEE_FUNCTION_NAMES[JSON_ZIGBEE_FUNC_MAX] = {
     "MODULE_WAKEUP",                    // 44
     // Group 9: Mode switching
     "MODULE_EXIT_SEND_MODE",            // 45
+    // Group 10: Boot/misc events
+    "MODULE_BOOT_NOTIFY",               // 46
+    "MODULE_NET_STATUS_NOTIFY",         // 47
+    "MODULE_FIND_BIND_NOTIFY",          // 48
+    "MODULE_SEND_CONFIRM",              // 49
+    "MODULE_ZCL_DEFAULT_RSP",           // 50
 };
 
 /* ============================================================================

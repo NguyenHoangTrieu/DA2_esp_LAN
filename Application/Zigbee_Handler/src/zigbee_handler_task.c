@@ -78,6 +78,45 @@ static int bytes_to_hex_str(const uint8_t *bytes, size_t len,
     return pos;
 }
 
+/**
+ * @brief Parse a space-separated hex byte string into a binary buffer.
+ *        e.g. "55 00 00" → {0x55, 0x00, 0x00}
+ * @return Number of bytes written to @p buf.
+ */
+static size_t zb_task_hex_str_to_bytes(const char *hex_str, uint8_t *buf, size_t out_max) {
+    if (!hex_str || !buf || out_max == 0) return 0;
+    size_t n = 0;
+    const char *p = hex_str;
+    while (*p && n < out_max) {
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p) break;
+        unsigned int bval = 0;
+        int consumed = 0;
+        if (sscanf(p, "%2x%n", &bval, &consumed) != 1 || consumed == 0) break;
+        buf[n++] = (uint8_t)bval;
+        p += consumed;
+    }
+    return n;
+}
+
+/**
+ * @brief Return true when the majority of available functions in this stack
+ *        are configured as HEX (is_hex == true).  Used to decide whether
+ *        listener/downlink logs should print bytes as hex or as ASCII text.
+ */
+static bool stack_is_hex_mode(uint8_t sid) {
+    int hex_cnt = 0, ascii_cnt = 0;
+    for (int i = 0; i < ZIGBEE_FUNC_COUNT; i++) {
+        zigbee_function_config_t fc;
+        if (zigbee_handler_get_function_config(sid, (zigbee_function_id_t)i, &fc) != ESP_OK)
+            continue;
+        if (!fc.available) continue;
+        if (fc.is_hex) hex_cnt++;
+        else           ascii_cnt++;
+    }
+    return (hex_cnt >= ascii_cnt);
+}
+
 /* ===== Task Implementations ===== */
 
 static void zigbee_uplink_task(void *pv) {
@@ -132,14 +171,27 @@ static void zigbee_downlink_task(void *pv) {
         }
         if (!g_zb_task.running[sid]) break;
 
-        ESP_LOGI(TAG, "[Stack %d] Processing command: %.*s",
-                 sid, req.command_len, req.command);
+        bool hex_mode = req.func_config.is_hex;
+
+        if (hex_mode) {
+            /* Parse the hex string to actual bytes before logging, so the log
+             * shows the real binary octets (e.g. "55 00 00"), not the ASCII
+             * byte-values of the command string characters. */
+            uint8_t parsed_cmd[256];
+            size_t  parsed_len = zb_task_hex_str_to_bytes(req.command, parsed_cmd, sizeof(parsed_cmd));
+            char hex_tmp[512];
+            bytes_to_hex_str(parsed_cmd, parsed_len, hex_tmp, sizeof(hex_tmp));
+            ESP_LOGI(TAG, "[Stack %d] Processing HEX cmd: %s (%zu bytes)", sid, hex_tmp, parsed_len);
+        } else {
+            ESP_LOGI(TAG, "[Stack %d] Processing AT cmd: %.*s",
+                     sid, req.command_len, req.command);
+        }
 
         zigbee_exec_result_t result = {0};
         esp_err_t ret = zigbee_handler_execute_command_with_config(
             sid, req.command, &req.func_config, &result);
 
-        /* Build response packet "CFZB:<stack>:OK/FAIL:<cmd>[:<hex_response>]" */
+        /* Build response packet "CFZB:<stack>:OK/FAIL:<cmd>[:<response>]" */
         char *resp_pkt = (char *)malloc(ZIGBEE_RESP_PACKET_SIZE);
         if (!resp_pkt) {
             ESP_LOGE(TAG, "[Stack %d] Failed alloc resp buffer", sid);
@@ -149,30 +201,43 @@ static void zigbee_downlink_task(void *pv) {
         int pkt_len;
         if (ret == ESP_OK) {
             if (result.response_len > 0) {
-                /* Zigbee responses are ASCII — forward as-is */
-                result.response[result.response_len] = '\0';
-                ESP_LOGI(TAG, "[Stack %d] Command OK: %s", sid, (char *)result.response);
+                char resp_log[512];
+                if (hex_mode) {
+                    bytes_to_hex_str(result.response, result.response_len,
+                                     resp_log, sizeof(resp_log));
+                    ESP_LOGI(TAG, "[Stack %d] Command OK, HEX reply: %s", sid, resp_log);
+                } else {
+                    result.response[result.response_len] = '\0';
+                    snprintf(resp_log, sizeof(resp_log), "%s", (char *)result.response);
+                    ESP_LOGI(TAG, "[Stack %d] Command OK: %s", sid, resp_log);
+                }
                 pkt_len = snprintf(resp_pkt, ZIGBEE_RESP_PACKET_SIZE,
                                    "CFZB:%d:OK:%.*s:%s",
-                                   sid, req.command_len, req.command,
-                                   (char *)result.response);
+                                   sid, req.command_len, req.command, resp_log);
             } else {
-                ESP_LOGI(TAG, "[Stack %d] Command OK", sid);
+                ESP_LOGI(TAG, "[Stack %d] Command OK (no response)", sid);
                 pkt_len = snprintf(resp_pkt, ZIGBEE_RESP_PACKET_SIZE,
                                    "CFZB:%d:OK:%.*s",
                                    sid, req.command_len, req.command);
             }
         } else {
             if (result.response_len > 0) {
-                result.response[result.response_len] = '\0';
-                ESP_LOGW(TAG, "[Stack %d] Command FAIL: %s | Module replied: %.*s",
-                         sid, esp_err_to_name(ret),
-                         (int)result.response_len, (char *)result.response);
+                char resp_log[512];
+                if (hex_mode) {
+                    bytes_to_hex_str(result.response, result.response_len,
+                                     resp_log, sizeof(resp_log));
+                    ESP_LOGW(TAG, "[Stack %d] Command FAIL: %s | HEX reply: %s",
+                             sid, esp_err_to_name(ret), resp_log);
+                } else {
+                    result.response[result.response_len] = '\0';
+                    snprintf(resp_log, sizeof(resp_log), "%s", (char *)result.response);
+                    ESP_LOGW(TAG, "[Stack %d] Command FAIL: %s | AT reply: %s",
+                             sid, esp_err_to_name(ret), resp_log);
+                }
                 pkt_len = snprintf(resp_pkt, ZIGBEE_RESP_PACKET_SIZE,
                                    "CFZB:%d:FAIL:%.*s:%s:%s",
                                    sid, req.command_len, req.command,
-                                   esp_err_to_name(ret),
-                                   (char *)result.response);
+                                   esp_err_to_name(ret), resp_log);
             } else {
                 ESP_LOGW(TAG, "[Stack %d] Command FAIL: %s | No response from module",
                          sid, esp_err_to_name(ret));
@@ -219,6 +284,9 @@ static void zigbee_listener_task(void *pv) {
         return;
     }
 
+    bool hex_mode = stack_is_hex_mode(sid);
+    ESP_LOGI(TAG, "[Stack %d] Listener: %s mode", sid, hex_mode ? "HEX" : "ASCII");
+
     while (g_zb_task.running[sid]) {
         size_t    recv_len = 0;
         esp_err_t ret = zigbee_handler_listen(sid, listen_buf,
@@ -226,20 +294,37 @@ static void zigbee_listener_task(void *pv) {
                                               &recv_len);
 
         if (ret == ESP_OK && recv_len > 0) {
-            ESP_LOGI(TAG, "[Stack %d] Listener RX %u bytes: %.*s",
-                     sid, (unsigned)recv_len, (int)recv_len, (char *)listen_buf);
-            /* Format as space-separated hex string for WAN packet */
-            bytes_to_hex_str(listen_buf, recv_len, hex_str,
-                             ZIGBEE_LISTEN_BUFFER_SIZE * 3 + 8);
-
-            int pkt_len = snprintf(evt_pkt,
-                                   ZIGBEE_LISTEN_BUFFER_SIZE * 3 + 32,
-                                   "CFZB:%d:EVT:%s", sid, hex_str);
-            if (pkt_len > 0) {
-                if (!mcu_wan_enqueue_uplink(HANDLER_ZIGBEE,
-                                             (uint8_t *)evt_pkt,
-                                             (uint16_t)pkt_len)) {
-                    ESP_LOGW(TAG, "[Stack %d] EVT enqueue failed", sid);
+            if (hex_mode) {
+                /* HEX mode: format bytes as space-separated hex, log & forward */
+                bytes_to_hex_str(listen_buf, recv_len, hex_str,
+                                 ZIGBEE_LISTEN_BUFFER_SIZE * 3 + 8);
+                ESP_LOGI(TAG, "[Stack %d] Listener RX %u bytes (HEX): %s",
+                         sid, (unsigned)recv_len, hex_str);
+                int pkt_len = snprintf(evt_pkt,
+                                       ZIGBEE_LISTEN_BUFFER_SIZE * 3 + 32,
+                                       "CFZB:%d:EVT:%s", sid, hex_str);
+                if (pkt_len > 0) {
+                    if (!mcu_wan_enqueue_uplink(HANDLER_ZIGBEE,
+                                                 (uint8_t *)evt_pkt,
+                                                 (uint16_t)pkt_len)) {
+                        ESP_LOGW(TAG, "[Stack %d] EVT enqueue failed", sid);
+                    }
+                }
+            } else {
+                /* ASCII/AT mode: forward as-is text */
+                listen_buf[recv_len < ZIGBEE_LISTEN_BUFFER_SIZE
+                            ? recv_len : ZIGBEE_LISTEN_BUFFER_SIZE - 1] = '\0';
+                ESP_LOGI(TAG, "[Stack %d] Listener RX %u bytes (ASCII): %s",
+                         sid, (unsigned)recv_len, (char *)listen_buf);
+                int pkt_len = snprintf(evt_pkt,
+                                       ZIGBEE_LISTEN_BUFFER_SIZE * 3 + 32,
+                                       "CFZB:%d:EVT:%s", sid, (char *)listen_buf);
+                if (pkt_len > 0) {
+                    if (!mcu_wan_enqueue_uplink(HANDLER_ZIGBEE,
+                                                 (uint8_t *)evt_pkt,
+                                                 (uint16_t)pkt_len)) {
+                        ESP_LOGW(TAG, "[Stack %d] EVT enqueue failed", sid);
+                    }
                 }
             }
         } else if (ret == ESP_ERR_TIMEOUT) {
@@ -426,14 +511,14 @@ esp_err_t zigbee_handler_task_load_config(uint8_t stack_id,
                  stack_id, esp_err_to_name(ret));
     }
 
-    /* Step 2: Switch from HEX mode to AT mode [55 03 00 16 16]
-     * Non-fatal: if module already in AT mode this will be ignored. */
-    ret = zigbee_handler_execute_function(
-        stack_id, ZIGBEE_FUNC_ENTER_AT_MODE, NULL, 0, &res);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "[Stack %d] Enter AT mode failed (continuing): %s",
-                 stack_id, esp_err_to_name(ret));
-    }
+    // /* Step 2: Switch from HEX mode to AT mode [55 03 00 16 16]
+    //  * Non-fatal: if module already in AT mode this will be ignored. */
+    // ret = zigbee_handler_execute_function(
+    //     stack_id, ZIGBEE_FUNC_ENTER_AT_MODE, NULL, 0, &res);
+    // if (ret != ESP_OK) {
+    //     ESP_LOGW(TAG, "[Stack %d] Enter AT mode failed (continuing): %s",
+    //              stack_id, esp_err_to_name(ret));
+    // }
 
     /* Step 3: Get module info */
     ret = zigbee_handler_execute_function(

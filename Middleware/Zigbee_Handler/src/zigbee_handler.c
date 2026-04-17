@@ -105,7 +105,11 @@ static const char *s_zigbee_func_names[ZIGBEE_FUNC_COUNT] = {
     "MODULE_ENTER_SLEEP",          // 43
     "MODULE_WAKEUP",               // 44
     "MODULE_EXIT_SEND_MODE",         // 45
-    "", "",                         // 46-47 reserved
+    "MODULE_BOOT_NOTIFY",          // 46
+    "MODULE_NET_STATUS_NOTIFY",    // 47
+    "MODULE_FIND_BIND_NOTIFY",     // 48
+    "MODULE_SEND_CONFIRM",         // 49
+    "MODULE_ZCL_DEFAULT_RSP",      // 50
 };
 
 /* ===== Internal Helpers ===== */
@@ -131,6 +135,20 @@ static size_t hex_str_to_bytes(const char *hex_str, uint8_t *buf, size_t out_max
         p += consumed;
     }
     return n;
+}
+
+/**
+ * @brief Format a binary byte buffer as space-separated uppercase hex string.
+ *        e.g. {0x55,0x00,0x00} → "55 00 00"
+ */
+static int bytes_to_hex_str(const uint8_t *bytes, size_t len,
+                             char *out, size_t out_max) {
+    int pos = 0;
+    for (size_t i = 0; i < len && pos + 3 < (int)out_max; i++) {
+        pos += snprintf(out + pos, out_max - pos,
+                        "%s%02X", (i == 0 ? "" : " "), bytes[i]);
+    }
+    return pos;
 }
 
 static comm_port_type_t get_port(uint8_t sid) {
@@ -444,42 +462,70 @@ esp_err_t zigbee_handler_execute_function(
     bool skip_read  = (fc->timeout_ms == 0);
 
     if (!skip_read && result) {
-        /* Build pattern for response matching (ASCII or binary) */
-        uint8_t  resp_pattern[16];
-        size_t   resp_pattern_len = 0;
         if (!fc->is_hex) {
-            size_t ascii_len = strlen(fc->expect_response);
+            /* ASCII: match by raw bytes of expect_response string */
+            uint8_t  resp_pattern[16];
+            size_t   resp_pattern_len = 0;
+            size_t   ascii_len = strlen(fc->expect_response);
             if (ascii_len > 0) {
                 if (ascii_len > sizeof(resp_pattern)) ascii_len = sizeof(resp_pattern);
                 memcpy(resp_pattern, fc->expect_response, ascii_len);
                 resp_pattern_len = ascii_len;
             }
+            ret = zigbee_read_until(
+                stack_id, port_type,
+                resp_pattern_len > 0 ? resp_pattern : NULL,
+                resp_pattern_len,
+                fc->timeout_ms,
+                result->response, ZIGBEE_RESP_BUF_SIZE - 1,
+                &resp_len);
+            result->response[resp_len] = '\0';
+            if (resp_len > 0) {
+                ESP_LOGI(TAG, "ZB RX (%zu bytes): %.*s", resp_len, (int)resp_len, (char *)result->response);
+            } else {
+                ESP_LOGI(TAG, "ZB RX: (no data)");
+            }
+            if (ret != ESP_OK && resp_pattern_len > 0) {
+                ESP_LOGW(TAG, "ZB response validation failed for func %d (expected: \"%s\")",
+                         func_id, fc->expect_response);
+                xSemaphoreGive(g_zigbee_bus_mutex[stack_id]);
+                result->status       = ESP_ERR_INVALID_RESPONSE;
+                result->response_len = (uint16_t)resp_len;
+                return ESP_ERR_INVALID_RESPONSE;
+            }
         } else {
-            resp_pattern_len = hex_str_to_bytes(fc->expect_response,
-                                                resp_pattern, sizeof(resp_pattern));
-        }
-        ret = zigbee_read_until(
-            stack_id, port_type,
-            resp_pattern_len > 0 ? resp_pattern : NULL,
-            resp_pattern_len,
-            fc->timeout_ms,
-            result->response, ZIGBEE_RESP_BUF_SIZE - 1,
-            &resp_len);
-
-        result->response[resp_len] = '\0';
-        if (resp_len > 0) {
-            ESP_LOGI(TAG, "ZB RX (%zu bytes): %.*s", resp_len, (int)resp_len, (char *)result->response);
-        } else {
-            ESP_LOGI(TAG, "ZB RX: (no data)");
-        }
-
-        if (ret != ESP_OK && resp_pattern_len > 0) {
-            ESP_LOGW(TAG, "Zigbee response validation failed for func %d (expected: \"%s\")",
-                     func_id, fc->expect_response);
-            xSemaphoreGive(g_zigbee_bus_mutex[stack_id]);
-            result->status       = ESP_ERR_INVALID_RESPONSE;
-            result->response_len = (uint16_t)resp_len;
-            return ESP_ERR_INVALID_RESPONSE;
+            /* HEX: collect data until binary-decoded expected pattern is found or
+             * timeout, then validate by formatting received bytes as "XX XX XX"
+             * hex string and using strstr() against expect_response. */
+            uint8_t  resp_pattern[16];
+            size_t   resp_pattern_len = hex_str_to_bytes(fc->expect_response,
+                                                          resp_pattern, sizeof(resp_pattern));
+            ret = zigbee_read_until(
+                stack_id, port_type,
+                resp_pattern_len > 0 ? resp_pattern : NULL,
+                resp_pattern_len,
+                fc->timeout_ms,
+                result->response, ZIGBEE_RESP_BUF_SIZE - 1,
+                &resp_len);
+            /* Format received binary bytes as space-separated hex string */
+            char hex_resp[ZIGBEE_RESP_BUF_SIZE * 3];
+            bytes_to_hex_str(result->response, resp_len, hex_resp, sizeof(hex_resp));
+            if (resp_len > 0) {
+                ESP_LOGI(TAG, "ZB RX %zu bytes (HEX): %s", resp_len, hex_resp);
+            } else {
+                ESP_LOGI(TAG, "ZB RX: (no data)");
+            }
+            /* Validate: hex-formatted response must contain expect_response as substring */
+            if (strlen(fc->expect_response) > 0 &&
+                strstr(hex_resp, fc->expect_response) == NULL) {
+                ESP_LOGW(TAG, "ZB response validation failed (expected: \"%s\")",
+                         fc->expect_response);
+                xSemaphoreGive(g_zigbee_bus_mutex[stack_id]);
+                result->status       = ESP_ERR_INVALID_RESPONSE;
+                result->response_len = (uint16_t)resp_len;
+                return ESP_ERR_INVALID_RESPONSE;
+            }
+            ret = ESP_OK;
         }
     }
 
@@ -577,37 +623,62 @@ esp_err_t zigbee_handler_execute_command_with_config(
     bool   skip_read = (fc->timeout_ms == 0);
 
     if (!skip_read && result) {
-        uint8_t resp_pattern[16];
-        size_t  resp_pattern_len = 0;
         if (!fc->is_hex) {
-            size_t ascii_len = strlen(fc->expect_response);
+            /* ASCII: match by raw bytes of expect_response string */
+            uint8_t resp_pattern[16];
+            size_t  resp_pattern_len = 0;
+            size_t  ascii_len = strlen(fc->expect_response);
             if (ascii_len > 0) {
                 if (ascii_len > sizeof(resp_pattern)) ascii_len = sizeof(resp_pattern);
                 memcpy(resp_pattern, fc->expect_response, ascii_len);
                 resp_pattern_len = ascii_len;
             }
+            ret = zigbee_read_until(
+                stack_id, port_type,
+                resp_pattern_len > 0 ? resp_pattern : NULL,
+                resp_pattern_len,
+                fc->timeout_ms,
+                result->response, ZIGBEE_RESP_BUF_SIZE - 1,
+                &resp_len);
+            result->response[resp_len] = '\0';
+            if (resp_len > 0)
+                ESP_LOGI(TAG, "ZB RX (%zu bytes): %.*s", resp_len, (int)resp_len, (char *)result->response);
+            if (ret != ESP_OK && resp_pattern_len > 0) {
+                ESP_LOGW(TAG, "ZB response validation failed (expected: \"%s\")", fc->expect_response);
+                xSemaphoreGive(g_zigbee_bus_mutex[stack_id]);
+                result->status       = ESP_ERR_INVALID_RESPONSE;
+                result->response_len = (uint16_t)resp_len;
+                return ESP_ERR_INVALID_RESPONSE;
+            }
         } else {
-            resp_pattern_len = hex_str_to_bytes(fc->expect_response,
-                                                resp_pattern, sizeof(resp_pattern));
-        }
-        ret = zigbee_read_until(
-            stack_id, port_type,
-            resp_pattern_len > 0 ? resp_pattern : NULL,
-            resp_pattern_len,
-            fc->timeout_ms,
-            result->response, ZIGBEE_RESP_BUF_SIZE - 1,
-            &resp_len);
-
-        result->response[resp_len] = '\0';
-        if (resp_len > 0)
-            ESP_LOGI(TAG, "ZB RX (%zu bytes): %.*s", resp_len, (int)resp_len, (char *)result->response);
-
-        if (ret != ESP_OK && resp_pattern_len > 0) {
-            ESP_LOGW(TAG, "ZB response validation failed (expected: \"%s\")", fc->expect_response);
-            xSemaphoreGive(g_zigbee_bus_mutex[stack_id]);
-            result->status       = ESP_ERR_INVALID_RESPONSE;
-            result->response_len = (uint16_t)resp_len;
-            return ESP_ERR_INVALID_RESPONSE;
+            /* HEX: collect data until binary-decoded expected pattern is found or
+             * timeout, then validate by formatting received bytes as "XX XX XX"
+             * hex string and using strstr() against expect_response. */
+            uint8_t resp_pattern[16];
+            size_t  resp_pattern_len = hex_str_to_bytes(fc->expect_response,
+                                                         resp_pattern, sizeof(resp_pattern));
+            ret = zigbee_read_until(
+                stack_id, port_type,
+                resp_pattern_len > 0 ? resp_pattern : NULL,
+                resp_pattern_len,
+                fc->timeout_ms,
+                result->response, ZIGBEE_RESP_BUF_SIZE - 1,
+                &resp_len);
+            /* Format received binary bytes as space-separated hex string */
+            char hex_resp[ZIGBEE_RESP_BUF_SIZE * 3];
+            bytes_to_hex_str(result->response, resp_len, hex_resp, sizeof(hex_resp));
+            if (resp_len > 0)
+                ESP_LOGI(TAG, "ZB RX %zu bytes (HEX): %s", resp_len, hex_resp);
+            /* Validate: hex-formatted response must contain expect_response as substring */
+            if (strlen(fc->expect_response) > 0 &&
+                strstr(hex_resp, fc->expect_response) == NULL) {
+                ESP_LOGW(TAG, "ZB response validation failed (expected: \"%s\")", fc->expect_response);
+                xSemaphoreGive(g_zigbee_bus_mutex[stack_id]);
+                result->status       = ESP_ERR_INVALID_RESPONSE;
+                result->response_len = (uint16_t)resp_len;
+                return ESP_ERR_INVALID_RESPONSE;
+            }
+            ret = ESP_OK;
         }
     } else if (!skip_read && !result) {
         uint8_t dummy[64];

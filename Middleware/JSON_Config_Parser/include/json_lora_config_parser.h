@@ -16,7 +16,7 @@ extern "C" {
  * Constants
  * ========================================================================== */
 
-#define LORA_MAX_FUNCTIONS  40      ///< 39 defined + 1 reserved slot
+#define LORA_MAX_FUNCTIONS  44      ///< 43 defined + 1 reserved slot
 #define LORA_COMMAND_LEN    128
 #define LORA_RESPONSE_LEN   64
 
@@ -81,6 +81,11 @@ typedef enum {
     JSON_LORA_FUNC_LOWPOWER_AUTO_ON,
     JSON_LORA_FUNC_LOWPOWER_AUTO_OFF,
     JSON_LORA_FUNC_WAKEUP_NOTIFY,
+    // -- LoRa P2P / TEST mode (39-42) -------------------------------------------
+    JSON_LORA_FUNC_ENTER_P2P_MODE,
+    JSON_LORA_FUNC_SET_P2P_CONFIG,
+    JSON_LORA_FUNC_SEND_P2P_PKT,
+    JSON_LORA_FUNC_ENTER_P2P_RX,
     // sentinel
     JSON_LORA_FUNC_MAX
 } json_lora_function_id_t;
