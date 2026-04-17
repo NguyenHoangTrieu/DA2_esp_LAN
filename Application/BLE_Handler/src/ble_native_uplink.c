@@ -32,6 +32,8 @@ typedef struct {
 
 static QueueHandle_t  s_uplink_queue  = NULL;
 static TaskHandle_t   s_uplink_task   = NULL;
+static StackType_t    *s_uplink_stack = NULL;
+static StaticTask_t   *s_uplink_tcb   = NULL;
 static volatile bool  s_task_running  = false;
 
 /* --------------------------------------------------------------------------
@@ -95,16 +97,33 @@ esp_err_t ble_native_uplink_task_start(void) {
     }
 
     s_task_running = true;
-    BaseType_t ret = xTaskCreate(uplink_task, "ble_native_up",
-                                 4 * 1024, NULL, 5, &s_uplink_task);
-    if (ret != pdPASS) {
+    s_uplink_stack = (StackType_t *)heap_caps_malloc(4 * 1024, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_uplink_tcb = (StaticTask_t *)heap_caps_malloc(sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+
+    if (!s_uplink_stack || !s_uplink_tcb) {
+        ESP_LOGE(TAG, "Failed to allocate memory for uplink task");
+        if (s_uplink_stack) heap_caps_free(s_uplink_stack);
+        if (s_uplink_tcb) heap_caps_free(s_uplink_tcb);
         s_task_running = false;
+        vQueueDelete(s_uplink_queue);
+        s_uplink_queue = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+
+    s_uplink_task = xTaskCreateStatic(uplink_task, "ble_native_up", 4 * 1024 / sizeof(StackType_t),
+                                      NULL, 5, s_uplink_stack, s_uplink_tcb);
+
+    if (s_uplink_task == NULL) {
+        s_task_running = false;
+        heap_caps_free(s_uplink_stack);
+        heap_caps_free(s_uplink_tcb);
         vQueueDelete(s_uplink_queue);
         s_uplink_queue = NULL;
         ESP_LOGE(TAG, "Failed to create uplink task");
         return ESP_ERR_NO_MEM;
     }
 
+    ESP_LOGI(TAG, "BLE Native Uplink task created in PSRAM");
     return ESP_OK;
 }
 
@@ -113,6 +132,10 @@ void ble_native_uplink_task_stop(void) {
     /* Allow the task to exit gracefully */
     vTaskDelay(pdMS_TO_TICKS(200));
     s_uplink_task = NULL;
+    if (s_uplink_stack) heap_caps_free(s_uplink_stack);
+    if (s_uplink_tcb) heap_caps_free(s_uplink_tcb);
+    s_uplink_stack = NULL;
+    s_uplink_tcb = NULL;
 }
 
 esp_err_t ble_native_uplink_send_ok(uint8_t stack_id, const char *payload) {

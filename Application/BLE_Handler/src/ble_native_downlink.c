@@ -48,6 +48,8 @@ typedef struct {
 
 static QueueHandle_t  s_dn_queue    = NULL;
 static TaskHandle_t   s_dn_task     = NULL;
+static StackType_t    *s_dn_stack   = NULL;
+static StaticTask_t   *s_dn_tcb     = NULL;
 static volatile bool  s_task_running = false;
 
 /* 
@@ -1596,15 +1598,33 @@ esp_err_t ble_native_downlink_task_start(void) {
     }
 
     s_task_running = true;
-    BaseType_t ret = xTaskCreate(downlink_task, "ble_native_dn",
-                                  6 * 1024, NULL, 5, &s_dn_task);
-    if (ret != pdPASS) {
+    s_dn_stack = (StackType_t *)heap_caps_malloc(6 * 1024, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_dn_tcb = (StaticTask_t *)heap_caps_malloc(sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+
+    if (!s_dn_stack || !s_dn_tcb) {
+        ESP_LOGE(TAG, "Failed to allocate memory for downlink task");
+        if (s_dn_stack) heap_caps_free(s_dn_stack);
+        if (s_dn_tcb) heap_caps_free(s_dn_tcb);
         s_task_running = false;
+        vQueueDelete(s_dn_queue);
+        s_dn_queue = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+
+    s_dn_task = xTaskCreateStatic(downlink_task, "ble_native_dn", 6 * 1024 / sizeof(StackType_t),
+                                  NULL, 5, s_dn_stack, s_dn_tcb);
+
+    if (s_dn_task == NULL) {
+        s_task_running = false;
+        heap_caps_free(s_dn_stack);
+        heap_caps_free(s_dn_tcb);
         vQueueDelete(s_dn_queue);
         s_dn_queue = NULL;
         ESP_LOGE(TAG, "Failed to create downlink task");
         return ESP_ERR_NO_MEM;
     }
+    
+    ESP_LOGI(TAG, "BLE Native Downlink task created in PSRAM");
     return ESP_OK;
 }
 
@@ -1612,6 +1632,10 @@ void ble_native_downlink_task_stop(void) {
     s_task_running = false;
     vTaskDelay(pdMS_TO_TICKS(200));
     s_dn_task = NULL;
+    if (s_dn_stack) heap_caps_free(s_dn_stack);
+    if (s_dn_tcb) heap_caps_free(s_dn_tcb);
+    s_dn_stack = NULL;
+    s_dn_tcb = NULL;
 }
 
 esp_err_t ble_native_downlink_enqueue(const uint8_t *data, uint16_t len) {

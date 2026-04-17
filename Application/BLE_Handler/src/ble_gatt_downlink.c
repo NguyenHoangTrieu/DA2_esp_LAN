@@ -45,6 +45,8 @@ typedef struct {
 
 static QueueHandle_t s_dn_queue     = NULL;
 static TaskHandle_t  s_dn_task      = NULL;
+static StackType_t   *s_dn_stack     = NULL;
+static StaticTask_t  *s_dn_tcb       = NULL;
 static volatile bool s_task_running = false;
 
 /* --------------------------------------------------------------------------
@@ -574,21 +576,29 @@ esp_err_t ble_gatt_downlink_task_start(void) {
     }
 
     s_task_running = true;
-    /* Allocate task stack from PSRAM — 8KB in SPIRAM leaves internal RAM
-     * available for BT stack and other time-critical allocations. */
-    BaseType_t ret = xTaskCreateWithCaps(downlink_task, "ble_gatt_dn",
-                                          8 * 1024, NULL, 5, &s_dn_task,
-                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (ret != pdPASS) {
-        /* Fall back to internal RAM if PSRAM allocation failed */
-        ESP_LOGW(TAG, "PSRAM stack alloc failed, retrying with internal RAM");
-        ret = xTaskCreate(downlink_task, "ble_gatt_dn",
-                          4 * 1024, NULL, 5, &s_dn_task);
-    }
-    if (ret != pdPASS) {
+    s_dn_stack = (StackType_t *)heap_caps_malloc(8 * 1024, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_dn_tcb = (StaticTask_t *)heap_caps_malloc(sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+
+    if (!s_dn_stack || !s_dn_tcb) {
+        ESP_LOGE(TAG, "Failed to allocate memory for downlink task");
+        if (s_dn_stack) heap_caps_free(s_dn_stack);
+        if (s_dn_tcb) heap_caps_free(s_dn_tcb);
         s_task_running = false;
         return ESP_FAIL;
     }
+
+    s_dn_task = xTaskCreateStatic(downlink_task, "ble_gatt_dn", 8 * 1024 / sizeof(StackType_t),
+                                  NULL, 5, s_dn_stack, s_dn_tcb);
+
+    if (s_dn_task == NULL) {
+        s_task_running = false;
+        heap_caps_free(s_dn_stack);
+        heap_caps_free(s_dn_tcb);
+        ESP_LOGE(TAG, "Failed to create downlink task");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "BLE GATT Downlink task created in PSRAM");
     return ESP_OK;
 }
 
@@ -596,6 +606,10 @@ void ble_gatt_downlink_task_stop(void) {
     s_task_running = false;
     vTaskDelay(pdMS_TO_TICKS(200));
     s_dn_task = NULL;
+    if (s_dn_stack) heap_caps_free(s_dn_stack);
+    if (s_dn_tcb) heap_caps_free(s_dn_tcb);
+    s_dn_stack = NULL;
+    s_dn_tcb = NULL;
 }
 
 esp_err_t ble_gatt_downlink_enqueue(const uint8_t *data, uint16_t len) {

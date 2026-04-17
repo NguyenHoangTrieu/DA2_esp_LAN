@@ -32,6 +32,8 @@ QueueHandle_t g_config_handler_queue = NULL;
 
 static bool config_handler_running = false;
 static TaskHandle_t config_handler_task_handle = NULL;
+static StackType_t *g_config_task_stack = NULL;
+static StaticTask_t *g_config_task_tcb = NULL;
 static esp_err_t config_parse_fota(const char *data, uint16_t len,
                                    fota_lan_command_t *cfg);
 static void mcu_wan_config_callback(const uint8_t *data, uint16_t len,
@@ -527,16 +529,29 @@ void config_handler_task_start(void) {
   config_handler_running = true;
 
   // Stack size increased from 4KB to 16KB to handle large config structures (4KB+ each)
-  BaseType_t ret = xTaskCreate(config_handler_task, "config_handler", 1024 * 16,
-                               NULL, 5, &config_handler_task_handle);
+  g_config_task_stack = (StackType_t *)heap_caps_malloc(1024 * 16, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  g_config_task_tcb = (StaticTask_t *)heap_caps_malloc(sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 
-  if (ret != pdPASS) {
+  if (!g_config_task_stack || !g_config_task_tcb) {
+      ESP_LOGE(TAG, "Failed to allocate memory for config handler task");
+      if (g_config_task_stack) heap_caps_free(g_config_task_stack);
+      if (g_config_task_tcb) heap_caps_free(g_config_task_tcb);
+      config_handler_running = false;
+      return;
+  }
+
+  config_handler_task_handle = xTaskCreateStatic(config_handler_task, "config_handler", 1024 * 16 / sizeof(StackType_t),
+                               NULL, 5, g_config_task_stack, g_config_task_tcb);
+
+  if (config_handler_task_handle == NULL) {
     ESP_LOGE(TAG, "Failed to create config handler task");
+    heap_caps_free(g_config_task_stack);
+    heap_caps_free(g_config_task_tcb);
     config_handler_running = false;
     return;
   }
 
-  ESP_LOGI(TAG, "Config LAN handler task created");
+  ESP_LOGI(TAG, "Config LAN handler task created in PSRAM");
 }
 
 /**
@@ -553,6 +568,10 @@ void config_handler_task_stop(void) {
   if (config_handler_task_handle) {
     vTaskDelay(pdMS_TO_TICKS(200)); // Give time to exit gracefully
     config_handler_task_handle = NULL;
+    if (g_config_task_stack) heap_caps_free(g_config_task_stack);
+    if (g_config_task_tcb) heap_caps_free(g_config_task_tcb);
+    g_config_task_stack = NULL;
+    g_config_task_tcb = NULL;
   }
 
   ESP_LOGI(TAG, "Config LAN handler task stopped");

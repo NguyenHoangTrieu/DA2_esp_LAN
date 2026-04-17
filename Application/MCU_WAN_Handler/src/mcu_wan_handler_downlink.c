@@ -41,6 +41,8 @@ extern volatile TickType_t g_last_cf_dispatch_tick;
 //
 
 static TaskHandle_t g_downlink_task_handle = NULL;
+static StackType_t *g_downlink_stack = NULL;
+static StaticTask_t *g_downlink_tcb = NULL;
 static uint32_t g_isr_trigger_count = 0;
 static uint32_t g_dq_success_count = 0;
 static uint32_t g_dq_fail_count = 0;
@@ -101,13 +103,24 @@ esp_err_t mcu_wan_handler_start_downlink_task(void) {
     return ESP_FAIL;
   }
 
-  // Create task
-  BaseType_t ret =
-      xTaskCreate(downlink_poll_task, "wan_downlink", DOWNLINK_TASK_STACK_SIZE,
-                  NULL, DOWNLINK_TASK_PRIORITY, &g_downlink_task_handle);
+  // Allocate stack in PSRAM
+  g_downlink_stack = (StackType_t *)heap_caps_malloc(DOWNLINK_TASK_STACK_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  g_downlink_tcb = (StaticTask_t *)heap_caps_malloc(sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 
-  if (ret != pdPASS) {
+  if (!g_downlink_stack || !g_downlink_tcb) {
+      ESP_LOGE(TAG, "Failed to allocate memory for downlink task");
+      if (g_downlink_stack) heap_caps_free(g_downlink_stack);
+      if (g_downlink_tcb) heap_caps_free(g_downlink_tcb);
+      return ESP_FAIL;
+  }
+
+  g_downlink_task_handle = xTaskCreateStatic(downlink_poll_task, "wan_downlink", DOWNLINK_TASK_STACK_SIZE / sizeof(StackType_t),
+                                             NULL, DOWNLINK_TASK_PRIORITY, g_downlink_stack, g_downlink_tcb);
+
+  if (g_downlink_task_handle == NULL) {
     ESP_LOGE(TAG, "Failed to create downlink task");
+    heap_caps_free(g_downlink_stack);
+    heap_caps_free(g_downlink_tcb);
     return ESP_FAIL;
   }
 
@@ -119,6 +132,10 @@ void mcu_wan_handler_stop_downlink_task(void) {
   if (g_downlink_task_handle) {
     vTaskDelete(g_downlink_task_handle);
     g_downlink_task_handle = NULL;
+    if (g_downlink_stack) heap_caps_free(g_downlink_stack);
+    if (g_downlink_tcb) heap_caps_free(g_downlink_tcb);
+    g_downlink_stack = NULL;
+    g_downlink_tcb = NULL;
 
     ESP_LOGI(TAG, "Downlink task stopped");
     ESP_LOGI(TAG, "Statistics: ISR=%lu, DQ_OK=%lu, DQ_FAIL=%lu",

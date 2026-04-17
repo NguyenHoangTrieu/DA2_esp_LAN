@@ -38,6 +38,8 @@ static struct {
   SemaphoreHandle_t mutex;
   module_info_t module_info[MODULE_MONITOR_MAX_STACKS]; // Stack 0 and Stack 1
   bool nvs_restore_pending[MODULE_MONITOR_MAX_STACKS];  // Set by start(), consumed by task
+  StackType_t *monitor_stack;
+  StaticTask_t *monitor_tcb;
 } g_monitor_state = {0};
 
 /* ===== Module Config Queue Types ===== */
@@ -146,20 +148,37 @@ esp_err_t module_monitor_task_start(void) {
   }
 
   // Create and start monitor task
-  BaseType_t task_ret = xTaskCreate(module_monitor_task_impl, "module_monitor",
-                                    MODULE_MONITOR_TASK_STACK_SIZE, NULL,
-                                    MODULE_MONITOR_TASK_PRIORITY,
-                                    &g_monitor_state.monitor_task_handle);
+  g_monitor_state.monitor_stack = (StackType_t *)heap_caps_malloc(MODULE_MONITOR_TASK_STACK_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  g_monitor_state.monitor_tcb = (StaticTask_t *)heap_caps_malloc(sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  
+  if (!g_monitor_state.monitor_stack || !g_monitor_state.monitor_tcb) {
+      ESP_LOGE(TAG, "Failed to allocate memory for monitor task");
+      if (g_monitor_state.monitor_stack) heap_caps_free(g_monitor_state.monitor_stack);
+      if (g_monitor_state.monitor_tcb) heap_caps_free(g_monitor_state.monitor_tcb);
+      vQueueDelete(g_monitor_state.config_queue);
+      vSemaphoreDelete(g_monitor_state.mutex);
+      g_monitor_state.initialized = false;
+      return ESP_FAIL;
+  }
 
-  if (task_ret != pdPASS) {
+  g_monitor_state.monitor_task_handle = xTaskCreateStatic(
+                                      module_monitor_task_impl, "module_monitor",
+                                      MODULE_MONITOR_TASK_STACK_SIZE / sizeof(StackType_t), NULL,
+                                      MODULE_MONITOR_TASK_PRIORITY,
+                                      g_monitor_state.monitor_stack,
+                                      g_monitor_state.monitor_tcb);
+
+  if (g_monitor_state.monitor_task_handle == NULL) {
     ESP_LOGE(TAG, "Failed to create monitor task");
+    heap_caps_free(g_monitor_state.monitor_stack);
+    heap_caps_free(g_monitor_state.monitor_tcb);
     vQueueDelete(g_monitor_state.config_queue);
     vSemaphoreDelete(g_monitor_state.mutex);
     g_monitor_state.initialized = false;
     return ESP_FAIL;
   }
 
-  ESP_LOGI(TAG, "Module monitor task started");
+  ESP_LOGI(TAG, "Module monitor task started in PSRAM");
   return ESP_OK;
 }
 
@@ -179,6 +198,10 @@ esp_err_t module_monitor_task_stop(void) {
   if (g_monitor_state.monitor_task_handle) {
     vTaskDelete(g_monitor_state.monitor_task_handle);
     g_monitor_state.monitor_task_handle = NULL;
+    if (g_monitor_state.monitor_stack) heap_caps_free(g_monitor_state.monitor_stack);
+    if (g_monitor_state.monitor_tcb) heap_caps_free(g_monitor_state.monitor_tcb);
+    g_monitor_state.monitor_stack = NULL;
+    g_monitor_state.monitor_tcb = NULL;
   }
 
   // Cleanup queues and mutex

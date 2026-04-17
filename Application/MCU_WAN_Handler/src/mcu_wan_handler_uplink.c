@@ -61,6 +61,8 @@ extern bool g_handler_running;
 
 static QueueHandle_t g_uplink_queue = NULL;
 static TaskHandle_t g_uplink_task_handle = NULL;
+static StackType_t *g_uplink_stack = NULL;
+static StaticTask_t *g_uplink_tcb = NULL;
 static internet_status_t g_internet_status = INTERNET_STATUS_OFFLINE;
 static rtc_cache_t g_rtc_cache = {.rtc_string = {0}, .valid = false};
 static uint32_t g_cached_wan_fw_version = 0;
@@ -110,13 +112,25 @@ esp_err_t mcu_wan_handler_start_uplink_task(void) {
     return ESP_FAIL;
   }
 
-  // Create task
-  BaseType_t ret =
-      xTaskCreate(uplink_handler_task, "wan_uplink", UPLINK_TASK_STACK_SIZE,
-                  NULL, UPLINK_TASK_PRIORITY, &g_uplink_task_handle);
+  // Stack shifted to PSRAM
+  g_uplink_stack = (StackType_t *)heap_caps_malloc(UPLINK_TASK_STACK_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  g_uplink_tcb = (StaticTask_t *)heap_caps_malloc(sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 
-  if (ret != pdPASS) {
+  if (!g_uplink_stack || !g_uplink_tcb) {
+      ESP_LOGE(TAG, "Failed to allocate memory for uplink task");
+      if (g_uplink_stack) heap_caps_free(g_uplink_stack);
+      if (g_uplink_tcb) heap_caps_free(g_uplink_tcb);
+      vQueueDelete(g_uplink_queue);
+      return ESP_FAIL;
+  }
+
+  g_uplink_task_handle = xTaskCreateStatic(uplink_handler_task, "wan_uplink", UPLINK_TASK_STACK_SIZE / sizeof(StackType_t),
+                                           NULL, UPLINK_TASK_PRIORITY, g_uplink_stack, g_uplink_tcb);
+
+  if (g_uplink_task_handle == NULL) {
     ESP_LOGE(TAG, "Failed to create uplink task");
+    heap_caps_free(g_uplink_stack);
+    heap_caps_free(g_uplink_tcb);
     vQueueDelete(g_uplink_queue);
     return ESP_FAIL;
   }
@@ -132,6 +146,10 @@ void mcu_wan_handler_stop_uplink_task(void) {
   if (g_uplink_task_handle) {
     vTaskDelete(g_uplink_task_handle);
     g_uplink_task_handle = NULL;
+    if (g_uplink_stack) heap_caps_free(g_uplink_stack);
+    if (g_uplink_tcb) heap_caps_free(g_uplink_tcb);
+    g_uplink_stack = NULL;
+    g_uplink_tcb = NULL;
 
     ESP_LOGI(TAG, "Uplink task stopped");
     ESP_LOGI(TAG,
