@@ -99,6 +99,14 @@ static int split_tokens(const char *src, char *buf, size_t buf_sz,
 
 /* CFBG:<slot>:SCAN:<duration_ms> */
 static void handle_scan(uint8_t stack_id, const char *params) {
+    /* Reject if a scan is already running to avoid SCAN_START_FAILED from
+     * Bluedroid when start_scanning() is called on a busy controller. */
+    if (ble_gatt_handler_is_scan_active()) {
+        ESP_LOGW(TAG, "Scan already in progress, rejecting new request");
+        ble_gatt_uplink_send_fail(stack_id, "SCAN:BUSY");
+        return;
+    }
+
     ble_gatt_stack_config_t *cfg = ble_gatt_config_get(stack_id);
 
     uint32_t duration_sec = 10;
@@ -147,6 +155,7 @@ static void handle_scan(uint8_t stack_id, const char *params) {
 
 /* CFBG:<slot>:STOP */
 static void handle_stop(uint8_t stack_id) {
+    ble_gatt_handler_set_scan_stop_requested();
     esp_err_t ret = esp_ble_gap_stop_scanning();
     if (ret != ESP_OK) {
         ble_gatt_uplink_send_fail(stack_id, "STOP:FAILED");

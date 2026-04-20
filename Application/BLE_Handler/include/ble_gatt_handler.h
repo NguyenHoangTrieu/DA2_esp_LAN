@@ -124,6 +124,21 @@ void ble_gatt_handler_clear_devices(void);
  */
 void ble_gatt_handler_set_pending_stack(uint8_t stack_id);
 
+/**
+ * @brief Signal that an explicit STOP command was issued.
+ *
+ * Must be called before esp_ble_gap_stop_scanning() so that the
+ * SCAN_STOP_COMPLETE_EVT handler knows the event is intentional and not a
+ * spurious side-effect of set_scan_params() interrupting a background scan.
+ */
+void ble_gatt_handler_set_scan_stop_requested(void);
+
+/**
+ * @brief Returns true if a scan is currently active (start_scanning succeeded
+ *        and neither INQ_CMPL_EVT nor an explicit stop has completed yet).
+ */
+bool ble_gatt_handler_is_scan_active(void);
+
 #ifdef __cplusplus
 }
 #endif

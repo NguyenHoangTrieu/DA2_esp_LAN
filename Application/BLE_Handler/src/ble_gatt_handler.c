@@ -54,6 +54,16 @@ static ble_gatt_device_t *s_devices   = NULL;  /* PSRAM-allocated device table *
 /* Stack id for the currently pending scan or connect (single-threaded ops) */
 static volatile uint8_t s_pending_stack_id = 0;
 
+/* Scan state tracking.
+ * s_scan_active:         set when we call start_scanning(), cleared on completion.
+ * s_scan_stop_requested: set when an explicit STOP command triggers stop_scanning(),
+ *                        cleared after SCAN_STOP_COMPLETE_EVT is handled.
+ *                        Guards against spurious SCAN_STOP_COMPLETE_EVT that
+ *                        Bluedroid fires when set_scan_params() is called while
+ *                        an internal background scan is in progress. */
+static volatile bool s_scan_active        = false;
+static volatile bool s_scan_stop_requested = false;
+
 /* --------------------------------------------------------------------------
  * Internal helpers
  * -------------------------------------------------------------------------- */
@@ -108,18 +118,32 @@ static void send_scan_done(void) {
     }
     ESP_LOGI(TAG, "Scan done: %d device(s)", scan_count);
 
-    char *buf = heap_caps_malloc(2048, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    /* Buffer sizing: "SCAN_DONE:32" (12) + BLE_GATT_MAX_DEVICES entries.
+     * Each entry: \x1E + "SCAN_RESULT:%d," MACSTR ",%d,%s"
+     *           ≈ 1 + 12 + 2 + 1 + 17 + 1 + 4 + 1 + BLE_GATT_DEV_NAME_LEN
+     *           = ~70 + BLE_GATT_DEV_NAME_LEN bytes ≈ 102 bytes worst case.
+     * 32 × 102 + 16 ≈ 3280 bytes → 4096 is safe. */
+    char *buf = heap_caps_malloc(4096, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!buf) {
-        ble_gatt_uplink_send_ok(s_pending_stack_id, "SCAN_DONE:0");
+        /* PSRAM allocation failed (fragmentation from active connections).
+         * Fall back to internal heap rather than hardcoding "SCAN_DONE:0". */
+        buf = malloc(4096);
+    }
+    if (!buf) {
+        /* Both allocations failed — send correct count without device list. */
+        char fallback[32];
+        snprintf(fallback, sizeof(fallback), "SCAN_DONE:%d", scan_count);
+        ESP_LOGE(TAG, "send_scan_done: alloc failed, sending count only (%d)", scan_count);
+        ble_gatt_uplink_send_ok(s_pending_stack_id, fallback);
         return;
     }
-    int pos = snprintf(buf, 2048, "SCAN_DONE:%d", scan_count);
-    for (int i = 0; i < BLE_GATT_MAX_DEVICES && pos + 70 < 2048; i++) {
+    int pos = snprintf(buf, 4096, "SCAN_DONE:%d", scan_count);
+    for (int i = 0; i < BLE_GATT_MAX_DEVICES && pos + 110 < 4096; i++) {
         if (!s_devices[i].valid) continue;
-        char name[21];
-        strncpy(name, s_devices[i].name, 20);
-        name[20] = '\0';
-        pos += snprintf(buf + pos, 2048 - pos,
+        char name[BLE_GATT_DEV_NAME_LEN + 1];
+        strncpy(name, s_devices[i].name, BLE_GATT_DEV_NAME_LEN);
+        name[BLE_GATT_DEV_NAME_LEN] = '\0';
+        pos += snprintf(buf + pos, 4096 - pos,
                         "\x1ESCAN_RESULT:%d," MACSTR ",%d,%s",
                         i, MAC2STR(s_devices[i].addr),
                         (int)s_devices[i].rssi, name);
@@ -169,24 +193,42 @@ static void gap_event_cb(esp_gap_ble_cb_event_t event,
     case ESP_GAP_BLE_SCAN_START_COMPLETE_EVT:
         if (param->scan_start_cmpl.status == ESP_BT_STATUS_SUCCESS) {
             ESP_LOGI(TAG, "Scan started successfully");
+            s_scan_active = true;
         } else {
             ESP_LOGE(TAG, "Scan start failed: %d",
                      param->scan_start_cmpl.status);
+            s_scan_active = false;
             ble_gatt_uplink_send_fail(s_pending_stack_id, "SCAN_START_FAILED");
         }
         break;
 
     case ESP_GAP_BLE_SCAN_STOP_COMPLETE_EVT:
-        /* Fired only when esp_ble_gap_stop_scanning() is called explicitly (e.g. STOP command) */
-        send_scan_done();
+        /* Bluedroid fires this event both for explicit stop_scanning() calls AND
+         * as a side-effect when set_scan_params() is called while a background
+         * BT scan is in progress (e.g. due to active connections). Only call
+         * send_scan_done() when we requested the stop via a STOP command. */
+        if (s_scan_stop_requested) {
+            s_scan_stop_requested = false;
+            s_scan_active = false;
+            send_scan_done();
+        }
         break;
 
     case ESP_GAP_BLE_SCAN_RESULT_EVT: {
         esp_ble_gap_cb_param_t *scan = param;
 
-        /* Duration-based scan expired — this is the normal completion path */
+        /* Duration-based scan expired — this is the normal completion path.
+         * Guard with s_scan_active: Bluedroid also fires INQ_CMPL_EVT for the
+         * background scan it silently stops when set_scan_params() is called.
+         * That spurious event arrives BEFORE SCAN_START_COMPLETE_EVT sets
+         * s_scan_active=true, so checking the flag here suppresses it. */
         if (scan->scan_rst.search_evt == ESP_GAP_SEARCH_INQ_CMPL_EVT) {
-            send_scan_done();
+            if (s_scan_active) {
+                s_scan_active = false;
+                send_scan_done();
+            } else {
+                ESP_LOGD(TAG, "Ignoring spurious INQ_CMPL_EVT (scan not active)");
+            }
             break;
         }
 
@@ -689,6 +731,14 @@ void ble_gatt_handler_report_scan_result(uint8_t stack_id,
 
 void ble_gatt_handler_set_pending_stack(uint8_t stack_id) {
     s_pending_stack_id = stack_id;
+}
+
+void ble_gatt_handler_set_scan_stop_requested(void) {
+    s_scan_stop_requested = true;
+}
+
+bool ble_gatt_handler_is_scan_active(void) {
+    return s_scan_active;
 }
 
 /**
