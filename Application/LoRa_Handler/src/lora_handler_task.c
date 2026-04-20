@@ -111,8 +111,20 @@ static size_t lora_hex_str_to_bytes(const char *hex_str, uint8_t *buf, size_t ou
  *        HEX mode (is_hex=true).  Samples 3 well-known function names.
  */
 static bool lora_stack_is_hex_mode(uint8_t sid) {
+    /* Cache result per stack — refresh every 5 s to pick up config reloads
+     * without spamming get_function_by_name on every listener loop tick. */
+    static bool   cached_result[LORA_MAX_STACKS]    = {false, false};
+    static TickType_t cached_at[LORA_MAX_STACKS]    = {0, 0};
+    const  TickType_t CACHE_TTL = pdMS_TO_TICKS(5000);
+
+    TickType_t now = xTaskGetTickCount();
+    if ((now - cached_at[sid]) < CACHE_TTL) {
+        return cached_result[sid];
+    }
+
+    /* Probe using function names that exist in all Wio-E5 configs */
     static const char *probe[] = {
-        "MODULE_GET_INFO", "MODULE_SW_RESET", "MODULE_START_NETWORK"
+        "MODULE_GET_INFO", "MODULE_SW_RESET", "MODULE_FACTORY_RESET"
     };
     int hex_cnt = 0, ascii_cnt = 0;
     for (int i = 0; i < 3; i++) {
@@ -122,7 +134,10 @@ static bool lora_stack_is_hex_mode(uint8_t sid) {
             else           ascii_cnt++;
         }
     }
-    return (hex_cnt >= ascii_cnt);
+    bool result = (hex_cnt > 0 && hex_cnt >= ascii_cnt);
+    cached_result[sid] = result;
+    cached_at[sid]     = now;
+    return result;
 }
 
 /* ===== Task Implementations ===== */
@@ -186,15 +201,14 @@ static void lora_downlink_task(void *pvParameters) {
 
     ESP_LOGI(TAG, "[Stack %d] LoRa downlink task started", stack_id);
 
-    bool hex_mode = lora_stack_is_hex_mode(stack_id);
-
     while (g_lora_task.running[stack_id]) {
         /* Process command queue first (higher priority) */
         lora_command_request_t cmd_req;
         if (xQueueReceive(g_lora_task.command_queue[stack_id], &cmd_req, 0) == pdTRUE) {
             if (!g_lora_task.running[stack_id]) break;
 
-            if (hex_mode || cmd_req.func_config.is_hex) {
+            bool is_hex_cmd = cmd_req.func_config.is_hex;
+            if (is_hex_cmd) {
                 /* Parse hex string to actual bytes before logging to avoid
                  * printing ASCII byte-codes of the command characters. */
                 uint8_t parsed_cmd[256];
@@ -211,7 +225,7 @@ static void lora_downlink_task(void *pvParameters) {
             esp_err_t ret = lora_handler_execute_command_with_config(
                 stack_id, cmd_req.command, &cmd_req.func_config, &result);
 
-            bool is_hex_cmd = cmd_req.func_config.is_hex;
+            /* is_hex_cmd already set above */
             if (ret == ESP_OK) {
                 if (is_hex_cmd && result.response_len > 0) {
                     char hex_resp[512];
@@ -337,9 +351,6 @@ static void lora_listener_task(void *pvParameters) {
 
     ESP_LOGI(TAG, "[Stack %d] LoRa listener task started", stack_id);
 
-    bool hex_mode = lora_stack_is_hex_mode(stack_id);
-    ESP_LOGI(TAG, "[Stack %d] Listener: %s mode", stack_id, hex_mode ? "HEX" : "ASCII");
-
     /* hex_str is only needed in HEX mode but allocate regardless for simplicity */
     char *listen_buf = (char *)malloc(LORA_LISTEN_BUFFER_SIZE);
     char *clean_buf  = (char *)malloc(LORA_LISTEN_BUFFER_SIZE * 3);  /* larger for hex output */
@@ -353,7 +364,7 @@ static void lora_listener_task(void *pvParameters) {
         vTaskDelete(NULL);
         return;
     }
-
+    bool hex_mode = lora_stack_is_hex_mode(stack_id);
     while (g_lora_task.running[stack_id]) {
         memset(listen_buf, 0, LORA_LISTEN_BUFFER_SIZE);
         size_t    recv_len = 0;

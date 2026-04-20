@@ -263,24 +263,23 @@ static void handle_connect(uint8_t stack_id, const char *params) {
     /* Mark pending stack for scan callbacks (kept for compatibility) */
     ble_gatt_handler_set_pending_stack(stack_id);
 
-    ble_gatt_stack_config_t *cfg = ble_gatt_config_get(stack_id);
-    esp_err_t ret = esp_ble_gattc_open(gattc_if, addr,
-                                        BLE_ADDR_TYPE_PUBLIC, true);
+    /* Use the addr_type recorded during scan. Hardcoding BLE_ADDR_TYPE_PUBLIC
+     * causes intermittent failures for random-address devices once Bluedroid's
+     * internal scan cache expires (typically a few seconds after scan). */
+    esp_ble_addr_type_t addr_type = (connecting_dev)
+                                    ? connecting_dev->addr_type
+                                    : BLE_ADDR_TYPE_PUBLIC;
+
+    esp_err_t ret = esp_ble_gattc_open(gattc_if, addr, addr_type, true);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "gattc_open failed: %s", esp_err_to_name(ret));
         ble_gatt_uplink_send_fail(stack_id, "CONNECT:OPEN_FAILED");
         return;
     }
 
-    /* Set connection params from JSON config */
-    esp_ble_conn_update_params_t conn_params = {
-        .min_int  = cfg->connection.interval_min,
-        .max_int  = cfg->connection.interval_max,
-        .latency  = cfg->connection.latency,
-        .timeout  = cfg->connection.supervision_timeout,
-    };
-    memcpy(conn_params.bda, addr, ESP_BD_ADDR_LEN);
-    esp_ble_gap_update_conn_params(&conn_params);
+    /* Connection params are applied in OPEN_EVT success handler, after the
+     * link is established. Calling gap_update_conn_params here would fail
+     * because L2CAP does not know the BD_ADDR until the connection is up. */
     /* No CONNECTING ack here — OPEN_EVT will send CONNECTED once established */
 }
 

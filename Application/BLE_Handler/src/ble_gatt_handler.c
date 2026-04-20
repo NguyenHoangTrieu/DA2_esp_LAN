@@ -296,6 +296,19 @@ static void gattc_event_cb(esp_gattc_cb_event_t event,
         dev->conn_id  = param->open.conn_id;
         dev->gattc_if = gattc_if;
 
+        /* Apply connection parameters now that the link is established */
+        ble_gatt_stack_config_t *cfg = ble_gatt_config_get(dev->stack_id);
+        if (cfg) {
+            esp_ble_conn_update_params_t conn_params = {
+                .min_int  = cfg->connection.interval_min,
+                .max_int  = cfg->connection.interval_max,
+                .latency  = cfg->connection.latency,
+                .timeout  = cfg->connection.supervision_timeout,
+            };
+            memcpy(conn_params.bda, dev->addr, ESP_BD_ADDR_LEN);
+            esp_ble_gap_update_conn_params(&conn_params);
+        }
+
         char ok[80];
         snprintf(ok, sizeof(ok), "CONNECTED:%d:0x%04X:" MACSTR,
                  idx, dev->conn_id, MAC2STR(dev->addr));
