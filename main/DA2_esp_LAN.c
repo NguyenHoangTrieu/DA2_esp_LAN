@@ -30,13 +30,6 @@ void app_main(void) {
 
   ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-#if CONFIG_PM_ENABLE
-  esp_pm_config_t pm_config = {
-      .max_freq_mhz = 240, .min_freq_mhz = 40, .light_sleep_enable = true};
-  ESP_ERROR_CHECK(esp_pm_configure(&pm_config));
-  ESP_LOGI(TAG, "Automatic Light Sleep & Power Management ENABLED");
-#endif
-
   ESP_ERROR_CHECK(i2c_dev_support_init());
   ESP_ERROR_CHECK(tca_init());
 
@@ -99,6 +92,13 @@ void app_main(void) {
    * This replaces the old eager ble_gatt_handler_init() call — the handler
    * now self-initializes the BT stack so timing no longer matters. */
   config_restore_ble_from_nvs();
+
+#if CONFIG_PM_ENABLE
+  esp_pm_config_t pm_config = {
+      .max_freq_mhz = 240, .min_freq_mhz = 40, .light_sleep_enable = true};
+  ESP_ERROR_CHECK(esp_pm_configure(&pm_config));
+  ESP_LOGI(TAG, "Automatic Light Sleep & Power Management ENABLED");
+#endif
 
   while (1) {
     vTaskDelay(pdMS_TO_TICKS(1000));

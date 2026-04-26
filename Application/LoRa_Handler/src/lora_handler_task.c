@@ -54,6 +54,13 @@ static struct {
     QueueHandle_t uplink_queue[LORA_MAX_STACKS];
     QueueHandle_t downlink_queue[LORA_MAX_STACKS];
     QueueHandle_t command_queue[LORA_MAX_STACKS];
+    /* PSRAM-backed queues */
+    uint8_t       *ul_q_storage[LORA_MAX_STACKS];
+    StaticQueue_t *ul_q_tcb[LORA_MAX_STACKS];
+    uint8_t       *dl_q_storage[LORA_MAX_STACKS];
+    StaticQueue_t *dl_q_tcb[LORA_MAX_STACKS];
+    uint8_t       *cmd_q_storage[LORA_MAX_STACKS];
+    StaticQueue_t *cmd_q_tcb[LORA_MAX_STACKS];
 } g_lora_task = {0};
 
 typedef struct {
@@ -441,28 +448,46 @@ esp_err_t lora_handler_task_start(uint8_t stack_id) {
 
     /* Create queues */
     if (!g_lora_task.uplink_queue[stack_id]) {
-        g_lora_task.uplink_queue[stack_id] = xQueueCreate(LORA_UPLINK_QUEUE_SIZE,
-                                                           sizeof(lora_uplink_packet_t));
-        if (!g_lora_task.uplink_queue[stack_id]) {
-            ESP_LOGE(TAG, "[Stack %d] Failed to create uplink queue", stack_id);
+        g_lora_task.ul_q_storage[stack_id] = heap_caps_malloc(LORA_UPLINK_QUEUE_SIZE * sizeof(lora_uplink_packet_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        g_lora_task.ul_q_tcb[stack_id]     = heap_caps_malloc(sizeof(StaticQueue_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (!g_lora_task.ul_q_storage[stack_id] || !g_lora_task.ul_q_tcb[stack_id]) {
+            ESP_LOGE(TAG, "[Stack %d] Failed to alloc PSRAM for uplink queue", stack_id);
+            if (g_lora_task.ul_q_storage[stack_id]) heap_caps_free(g_lora_task.ul_q_storage[stack_id]);
+            if (g_lora_task.ul_q_tcb[stack_id]) heap_caps_free(g_lora_task.ul_q_tcb[stack_id]);
             return ESP_ERR_NO_MEM;
         }
+        g_lora_task.uplink_queue[stack_id] = xQueueCreateStatic(LORA_UPLINK_QUEUE_SIZE,
+                                                            sizeof(lora_uplink_packet_t),
+                                                            g_lora_task.ul_q_storage[stack_id],
+                                                            g_lora_task.ul_q_tcb[stack_id]);
     }
     if (!g_lora_task.downlink_queue[stack_id]) {
-        g_lora_task.downlink_queue[stack_id] = xQueueCreate(LORA_DOWNLINK_QUEUE_SIZE,
-                                                              sizeof(lora_downlink_packet_t));
-        if (!g_lora_task.downlink_queue[stack_id]) {
-            ESP_LOGE(TAG, "[Stack %d] Failed to create downlink queue", stack_id);
+        g_lora_task.dl_q_storage[stack_id] = heap_caps_malloc(LORA_DOWNLINK_QUEUE_SIZE * sizeof(lora_downlink_packet_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        g_lora_task.dl_q_tcb[stack_id]     = heap_caps_malloc(sizeof(StaticQueue_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (!g_lora_task.dl_q_storage[stack_id] || !g_lora_task.dl_q_tcb[stack_id]) {
+            ESP_LOGE(TAG, "[Stack %d] Failed to alloc PSRAM for downlink queue", stack_id);
+            if (g_lora_task.dl_q_storage[stack_id]) heap_caps_free(g_lora_task.dl_q_storage[stack_id]);
+            if (g_lora_task.dl_q_tcb[stack_id]) heap_caps_free(g_lora_task.dl_q_tcb[stack_id]);
             return ESP_ERR_NO_MEM;
         }
+        g_lora_task.downlink_queue[stack_id] = xQueueCreateStatic(LORA_DOWNLINK_QUEUE_SIZE,
+                                                              sizeof(lora_downlink_packet_t),
+                                                              g_lora_task.dl_q_storage[stack_id],
+                                                              g_lora_task.dl_q_tcb[stack_id]);
     }
     if (!g_lora_task.command_queue[stack_id]) {
-        g_lora_task.command_queue[stack_id] = xQueueCreate(LORA_COMMAND_QUEUE_SIZE,
-                                                             sizeof(lora_command_request_t));
-        if (!g_lora_task.command_queue[stack_id]) {
-            ESP_LOGE(TAG, "[Stack %d] Failed to create command queue", stack_id);
+        g_lora_task.cmd_q_storage[stack_id] = heap_caps_malloc(LORA_COMMAND_QUEUE_SIZE * sizeof(lora_command_request_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        g_lora_task.cmd_q_tcb[stack_id]     = heap_caps_malloc(sizeof(StaticQueue_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (!g_lora_task.cmd_q_storage[stack_id] || !g_lora_task.cmd_q_tcb[stack_id]) {
+            ESP_LOGE(TAG, "[Stack %d] Failed to alloc PSRAM for command queue", stack_id);
+            if (g_lora_task.cmd_q_storage[stack_id]) heap_caps_free(g_lora_task.cmd_q_storage[stack_id]);
+            if (g_lora_task.cmd_q_tcb[stack_id]) heap_caps_free(g_lora_task.cmd_q_tcb[stack_id]);
             return ESP_ERR_NO_MEM;
         }
+        g_lora_task.command_queue[stack_id] = xQueueCreateStatic(LORA_COMMAND_QUEUE_SIZE,
+                                                             sizeof(lora_command_request_t),
+                                                             g_lora_task.cmd_q_storage[stack_id],
+                                                             g_lora_task.cmd_q_tcb[stack_id]);
     }
 
     /* Init middleware once */
@@ -615,17 +640,22 @@ esp_err_t lora_handler_task_stop(uint8_t stack_id) {
         heap_caps_free(g_lora_task.listener_tcb[stack_id]);   g_lora_task.listener_tcb[stack_id]   = NULL;
     }
     if (g_lora_task.uplink_queue[stack_id]) {
-        vQueueDelete(g_lora_task.uplink_queue[stack_id]);
         g_lora_task.uplink_queue[stack_id] = NULL;
     }
     if (g_lora_task.downlink_queue[stack_id]) {
-        vQueueDelete(g_lora_task.downlink_queue[stack_id]);
         g_lora_task.downlink_queue[stack_id] = NULL;
     }
     if (g_lora_task.command_queue[stack_id]) {
-        vQueueDelete(g_lora_task.command_queue[stack_id]);
         g_lora_task.command_queue[stack_id] = NULL;
     }
+
+    /* Free PSRAM queues and internal TCBs */
+    heap_caps_free(g_lora_task.ul_q_storage[stack_id]); g_lora_task.ul_q_storage[stack_id] = NULL;
+    heap_caps_free(g_lora_task.ul_q_tcb[stack_id]);     g_lora_task.ul_q_tcb[stack_id] = NULL;
+    heap_caps_free(g_lora_task.dl_q_storage[stack_id]); g_lora_task.dl_q_storage[stack_id] = NULL;
+    heap_caps_free(g_lora_task.dl_q_tcb[stack_id]);     g_lora_task.dl_q_tcb[stack_id] = NULL;
+    heap_caps_free(g_lora_task.cmd_q_storage[stack_id]); g_lora_task.cmd_q_storage[stack_id] = NULL;
+    heap_caps_free(g_lora_task.cmd_q_tcb[stack_id]);    g_lora_task.cmd_q_tcb[stack_id] = NULL;
 
     ESP_LOGI(TAG, "[Stack %d] LoRa handler tasks stopped", stack_id);
     return ESP_OK;

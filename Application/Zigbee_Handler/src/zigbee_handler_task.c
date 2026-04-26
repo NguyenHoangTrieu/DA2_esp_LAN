@@ -49,6 +49,12 @@ static struct {
     TaskHandle_t listener_handle[ZIGBEE_MAX_STACKS];
     QueueHandle_t uplink_queue[ZIGBEE_MAX_STACKS];
     QueueHandle_t command_queue[ZIGBEE_MAX_STACKS];
+    /* PSRAM-backed queues */
+    uint8_t      *ul_q_storage[ZIGBEE_MAX_STACKS];
+    StaticQueue_t *ul_q_tcb[ZIGBEE_MAX_STACKS];
+    uint8_t      *cmd_q_storage[ZIGBEE_MAX_STACKS];
+    StaticQueue_t *cmd_q_tcb[ZIGBEE_MAX_STACKS];
+    
     /* PSRAM-backed stacks (avoids DRAM exhaustion) + internal-SRAM TCBs */
     StackType_t  *ul_stack[ZIGBEE_MAX_STACKS];
     StaticTask_t *ul_tcb[ZIGBEE_MAX_STACKS];
@@ -354,14 +360,32 @@ esp_err_t zigbee_handler_task_start(uint8_t stack_id) {
     }
 
     if (!g_zb_task.uplink_queue[stack_id]) {
-        g_zb_task.uplink_queue[stack_id] = xQueueCreate(ZIGBEE_UPLINK_QUEUE_SZ,
-                                                          sizeof(zigbee_uplink_packet_t));
-        if (!g_zb_task.uplink_queue[stack_id]) return ESP_ERR_NO_MEM;
+        g_zb_task.ul_q_storage[stack_id] = heap_caps_malloc(ZIGBEE_UPLINK_QUEUE_SZ * sizeof(zigbee_uplink_packet_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        g_zb_task.ul_q_tcb[stack_id] = heap_caps_malloc(sizeof(StaticQueue_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (!g_zb_task.ul_q_storage[stack_id] || !g_zb_task.ul_q_tcb[stack_id]) {
+            ESP_LOGE(TAG, "[Stack %d] Failed to alloc PSRAM for uplink queue", stack_id);
+            if (g_zb_task.ul_q_storage[stack_id]) heap_caps_free(g_zb_task.ul_q_storage[stack_id]);
+            if (g_zb_task.ul_q_tcb[stack_id]) heap_caps_free(g_zb_task.ul_q_tcb[stack_id]);
+            return ESP_ERR_NO_MEM;
+        }
+        g_zb_task.uplink_queue[stack_id] = xQueueCreateStatic(ZIGBEE_UPLINK_QUEUE_SZ,
+                                                          sizeof(zigbee_uplink_packet_t),
+                                                          g_zb_task.ul_q_storage[stack_id],
+                                                          g_zb_task.ul_q_tcb[stack_id]);
     }
     if (!g_zb_task.command_queue[stack_id]) {
-        g_zb_task.command_queue[stack_id] = xQueueCreate(ZIGBEE_COMMAND_QUEUE_SZ,
-                                                           sizeof(zigbee_command_request_t));
-        if (!g_zb_task.command_queue[stack_id]) return ESP_ERR_NO_MEM;
+        g_zb_task.cmd_q_storage[stack_id] = heap_caps_malloc(ZIGBEE_COMMAND_QUEUE_SZ * sizeof(zigbee_command_request_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        g_zb_task.cmd_q_tcb[stack_id] = heap_caps_malloc(sizeof(StaticQueue_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (!g_zb_task.cmd_q_storage[stack_id] || !g_zb_task.cmd_q_tcb[stack_id]) {
+            ESP_LOGE(TAG, "[Stack %d] Failed to alloc PSRAM for command queue", stack_id);
+            if (g_zb_task.cmd_q_storage[stack_id]) heap_caps_free(g_zb_task.cmd_q_storage[stack_id]);
+            if (g_zb_task.cmd_q_tcb[stack_id]) heap_caps_free(g_zb_task.cmd_q_tcb[stack_id]);
+            return ESP_ERR_NO_MEM;
+        }
+        g_zb_task.command_queue[stack_id] = xQueueCreateStatic(ZIGBEE_COMMAND_QUEUE_SZ,
+                                                           sizeof(zigbee_command_request_t),
+                                                           g_zb_task.cmd_q_storage[stack_id],
+                                                           g_zb_task.cmd_q_tcb[stack_id]);
     }
 
     static bool mw_init = false;
@@ -474,7 +498,21 @@ esp_err_t zigbee_handler_task_stop(uint8_t stack_id) {
         g_zb_task.listener_handle[stack_id] = NULL;
     }
 
-    /* Free PSRAM stacks and internal TCBs */
+    if (g_zb_task.uplink_queue[stack_id]) {
+        // Since we created statically, we don't strictly need to vQueueDelete, but it is safe.
+        // The memory is freed below.
+        g_zb_task.uplink_queue[stack_id] = NULL;
+    }
+    if (g_zb_task.command_queue[stack_id]) {
+        g_zb_task.command_queue[stack_id] = NULL;
+    }
+
+    /* Free PSRAM stacks/queues and internal TCBs */
+    heap_caps_free(g_zb_task.ul_q_storage[stack_id]); g_zb_task.ul_q_storage[stack_id] = NULL;
+    heap_caps_free(g_zb_task.ul_q_tcb[stack_id]);     g_zb_task.ul_q_tcb[stack_id] = NULL;
+    heap_caps_free(g_zb_task.cmd_q_storage[stack_id]); g_zb_task.cmd_q_storage[stack_id] = NULL;
+    heap_caps_free(g_zb_task.cmd_q_tcb[stack_id]);    g_zb_task.cmd_q_tcb[stack_id] = NULL;
+
     heap_caps_free(g_zb_task.ul_stack[stack_id]); g_zb_task.ul_stack[stack_id] = NULL;
     heap_caps_free(g_zb_task.ul_tcb[stack_id]);   g_zb_task.ul_tcb[stack_id]   = NULL;
     heap_caps_free(g_zb_task.dl_stack[stack_id]); g_zb_task.dl_stack[stack_id] = NULL;
