@@ -337,8 +337,18 @@ static void config_handler_task(void *arg) {
         if (config_parse_rs485_baud((const uint8_t *)cmd->raw_data,
                                     cmd->data_len) == ESP_OK) {
           ESP_LOGI(TAG, "RS485 baud rate updated from MCU WAN");
+          {
+            const char ack[] = "CFRS:BR:OK";
+            mcu_wan_enqueue_uplink(HANDLER_RS485, (uint8_t *)ack,
+                                   sizeof(ack) - 1);
+          }
         } else {
           ESP_LOGE(TAG, "Failed to parse RS485 baud rate command");
+          {
+            const char ack[] = "CFRS:BR:FAIL";
+            mcu_wan_enqueue_uplink(HANDLER_RS485, (uint8_t *)ack,
+                                   sizeof(ack) - 1);
+          }
         }
         break;
       }
@@ -348,6 +358,11 @@ static void config_handler_task(void *arg) {
           ESP_LOGI(TAG, "RS485 JSON GPIO config applied");
         } else {
           ESP_LOGE(TAG, "Failed to parse RS485 JSON config");
+          {
+            const char ack[] = "CFRS:JSON:FAIL";
+            mcu_wan_enqueue_uplink(HANDLER_RS485, (uint8_t *)ack,
+                                   sizeof(ack) - 1);
+          }
         }
         break;
       }
