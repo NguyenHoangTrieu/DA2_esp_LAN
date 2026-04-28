@@ -37,8 +37,11 @@ struct rs485_comm_handle_s {
  * @return uint8_t Stack ID (0 or 1), default to 0
  */
 static uint8_t get_active_rs485_stack(void) {
-  // Module Base Setting: RS485 stack determined by JSON config, not global type
-  return 0; // Default to Stack 0 for trial version
+  if (g_rs485_gpio_cfg.loaded && g_rs485_gpio_cfg.stack_id < 2) {
+    return g_rs485_gpio_cfg.stack_id;
+  }
+
+  return 0;
 }
 
 /**

@@ -33,6 +33,20 @@ extern "C" {
 esp_err_t config_parse_rs485_json(const uint8_t *data, uint16_t len);
 
 /**
+ * @brief Apply raw RS485 JSON GPIO configuration for a stack
+ *
+ * This helper is used both at runtime and when restoring RS485 JSON from NVS.
+ * The input is the JSON body only, without the "CFRS:JSON:<stack_id>:" prefix.
+ *
+ * @param stack_id Stack ID (0 or 1)
+ * @param json_data Raw JSON buffer
+ * @param json_len JSON length
+ * @return ESP_OK on success
+ */
+esp_err_t config_apply_rs485_json_config(uint8_t stack_id, const char *json_data,
+										 uint16_t json_len);
+
+/**
  * @brief Parse and send RS485 downlink data
  *
  * Format: "CFRS:<stack_id>:DATA:<hex_data>"

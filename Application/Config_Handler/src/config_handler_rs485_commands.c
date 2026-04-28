@@ -13,11 +13,88 @@
 #include "rs485_comm.h"
 #include "rs485_handler.h"
 #include "mcu_wan_handler.h"
+#include "module_monitor_task.h"
 #include "esp_log.h"
 #include <string.h>
 #include <stdlib.h>
 
 static const char *TAG = "rs485_cmd";
+
+static esp_err_t config_apply_rs485_json_config_internal(
+    uint8_t stack_id, const char *json_data, uint16_t json_len) {
+    if (!json_data || json_len < 2 || json_len > 4096) {
+        ESP_LOGE(TAG, "RS485 JSON: invalid raw JSON parameters (stack=%u len=%u)",
+                 stack_id, json_len);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ESP_LOGI(TAG, "RS485 JSON: applying stack=%u, len=%u", stack_id, json_len);
+
+    json_rs485_module_config_t rs485_cfg;
+    esp_err_t ret = json_rs485_config_parse(json_data, json_len, &rs485_cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "RS485 JSON: parse failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    rs485_cfg.stack_id = stack_id;
+
+    rs485_gpio_mode_config_t gpio_cfg;
+    memset(&gpio_cfg, 0, sizeof(gpio_cfg));
+    gpio_cfg.stack_id = stack_id;
+
+    const json_rs485_function_config_t *send_fn =
+        &rs485_cfg.functions[JSON_RS485_FUNC_SEND_MODE];
+    if (send_fn->available) {
+        uint8_t cnt = send_fn->gpio_start_count;
+        if (cnt > RS485_COMM_MAX_GPIO_ACTIONS) cnt = RS485_COMM_MAX_GPIO_ACTIONS;
+        for (uint8_t i = 0; i < cnt; i++) {
+            const char *pin_str = send_fn->gpio_start[i].pin;
+            if (strlen(pin_str) < 2) continue;
+            gpio_cfg.send_actions[i].pin_1indexed = (uint8_t)(pin_str[1] - '0');
+            gpio_cfg.send_actions[i].state = send_fn->gpio_start[i].state;
+        }
+        gpio_cfg.send_count = cnt;
+        gpio_cfg.send_delay_ms = send_fn->delay_start_ms;
+    }
+
+    const json_rs485_function_config_t *recv_fn =
+        &rs485_cfg.functions[JSON_RS485_FUNC_RECEIVE_MODE];
+    if (recv_fn->available) {
+        uint8_t cnt = recv_fn->gpio_start_count;
+        if (cnt > RS485_COMM_MAX_GPIO_ACTIONS) cnt = RS485_COMM_MAX_GPIO_ACTIONS;
+        for (uint8_t i = 0; i < cnt; i++) {
+            const char *pin_str = recv_fn->gpio_start[i].pin;
+            if (strlen(pin_str) < 2) continue;
+            gpio_cfg.recv_actions[i].pin_1indexed = (uint8_t)(pin_str[1] - '0');
+            gpio_cfg.recv_actions[i].state = recv_fn->gpio_start[i].state;
+        }
+        gpio_cfg.recv_count = cnt;
+        gpio_cfg.recv_delay_ms = recv_fn->delay_start_ms;
+    }
+
+    ret = rs485_comm_load_gpio_config(&gpio_cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "RS485 JSON: failed to load GPIO config: %s",
+                 esp_err_to_name(ret));
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "RS485 JSON config applied: SEND[%d actions, %dms], RECV[%d actions, %dms]",
+             gpio_cfg.send_count, gpio_cfg.send_delay_ms,
+             gpio_cfg.recv_count, gpio_cfg.recv_delay_ms);
+    return ESP_OK;
+}
+
+esp_err_t config_apply_rs485_json_config(uint8_t stack_id, const char *json_data,
+                                         uint16_t json_len) {
+    if (stack_id > 1) {
+        ESP_LOGE(TAG, "RS485 JSON: invalid stack_id %u", stack_id);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    return config_apply_rs485_json_config_internal(stack_id, json_data, json_len);
+}
 
 /* ============================================================================
  * Public API
@@ -57,79 +134,21 @@ esp_err_t config_parse_rs485_json(const uint8_t *data, uint16_t len) {
     const char *json_data = colon + 1;
     uint16_t json_len = (uint16_t)(len - (json_data - (const char *)data));
 
-    if (json_len < 2 || json_len > 4096) {
-        ESP_LOGE(TAG, "RS485 JSON: invalid length %u", json_len);
-        return ESP_FAIL;
-    }
-
-    ESP_LOGI(TAG, "RS485 JSON: parsing stack=%u, len=%u", stack_id, json_len);
-
-    /* Parse JSON into RS485 config struct */
-    json_rs485_module_config_t rs485_cfg;
-    esp_err_t ret = json_rs485_config_parse(json_data, json_len, &rs485_cfg);
+    esp_err_t ret = config_apply_rs485_json_config_internal(stack_id, json_data, json_len);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "RS485 JSON: parse failed: %s", esp_err_to_name(ret));
         return ret;
     }
 
-    /* Override stack_id from command prefix (more reliable than JSON body) */
-    rs485_cfg.stack_id = stack_id;
-
-    /* Convert parsed config → rs485_gpio_mode_config_t for BSP layer */
-    rs485_gpio_mode_config_t gpio_cfg;
-    memset(&gpio_cfg, 0, sizeof(gpio_cfg));
-    gpio_cfg.stack_id = stack_id;
-
-    /* SEND mode */
-    const json_rs485_function_config_t *send_fn =
-        &rs485_cfg.functions[JSON_RS485_FUNC_SEND_MODE];
-    if (send_fn->available) {
-        uint8_t cnt = send_fn->gpio_start_count;
-        if (cnt > RS485_COMM_MAX_GPIO_ACTIONS) cnt = RS485_COMM_MAX_GPIO_ACTIONS;
-        for (uint8_t i = 0; i < cnt; i++) {
-            /* JSON pin "XY": X=stack port, Y=pin_1indexed */
-            const char *pin_str = send_fn->gpio_start[i].pin;
-            if (strlen(pin_str) < 2) continue;
-            gpio_cfg.send_actions[i].pin_1indexed = (uint8_t)(pin_str[1] - '0');
-            gpio_cfg.send_actions[i].state        = send_fn->gpio_start[i].state;
-        }
-        gpio_cfg.send_count    = cnt;
-        gpio_cfg.send_delay_ms = send_fn->delay_start_ms;
-    }
-
-    /* RECEIVE mode */
-    const json_rs485_function_config_t *recv_fn =
-        &rs485_cfg.functions[JSON_RS485_FUNC_RECEIVE_MODE];
-    if (recv_fn->available) {
-        uint8_t cnt = recv_fn->gpio_start_count;
-        if (cnt > RS485_COMM_MAX_GPIO_ACTIONS) cnt = RS485_COMM_MAX_GPIO_ACTIONS;
-        for (uint8_t i = 0; i < cnt; i++) {
-            const char *pin_str = recv_fn->gpio_start[i].pin;
-            if (strlen(pin_str) < 2) continue;
-            gpio_cfg.recv_actions[i].pin_1indexed = (uint8_t)(pin_str[1] - '0');
-            gpio_cfg.recv_actions[i].state        = recv_fn->gpio_start[i].state;
-        }
-        gpio_cfg.recv_count    = cnt;
-        gpio_cfg.recv_delay_ms = recv_fn->delay_start_ms;
-    }
-
-    /* Load into RS485 comm driver */
-    ret = rs485_comm_load_gpio_config(&gpio_cfg);
+    ret = module_monitor_notify_rs485_configured(stack_id, json_data, json_len);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "RS485 JSON: failed to load GPIO config: %s",
+        ESP_LOGE(TAG, "RS485 JSON: failed to notify module_monitor: %s",
                  esp_err_to_name(ret));
+        const char ack[] = "CFRS:JSON:FAIL:QUEUE";
+        mcu_wan_enqueue_uplink(HANDLER_RS485, (uint8_t *)ack, sizeof(ack) - 1);
         return ret;
     }
 
-    ESP_LOGI(TAG, "RS485 JSON config applied: "
-             "SEND[%d actions, %dms], RECV[%d actions, %dms]",
-             gpio_cfg.send_count, gpio_cfg.send_delay_ms,
-             gpio_cfg.recv_count, gpio_cfg.recv_delay_ms);
-
-    /* Send ACK to WAN MCU / PC App */
-    const char ack[] = "CFRS:JSON:OK";
-    mcu_wan_enqueue_uplink(HANDLER_RS485, (uint8_t *)ack, sizeof(ack) - 1);
-
+    ESP_LOGI(TAG, "RS485 JSON: config forwarded to module_monitor_task");
     return ESP_OK;
 }
 
@@ -194,6 +213,20 @@ esp_err_t config_parse_rs485_downlink(const uint8_t *data, uint16_t len) {
         bin_data[bin_len++] = byte_val;
     }
 
+    rs485_gpio_mode_config_t gpio_cfg;
+    esp_err_t cfg_ret = rs485_comm_get_gpio_config(&gpio_cfg);
+    if (cfg_ret == ESP_OK) {
+        ESP_LOGI(TAG, "RS485 Downlink: requested stack=%u, configured stack=%u",
+                 stack_id, gpio_cfg.stack_id);
+        if (gpio_cfg.stack_id != stack_id) {
+            ESP_LOGW(TAG, "RS485 Downlink: stack mismatch, active RS485 config is stack=%u",
+                     gpio_cfg.stack_id);
+        }
+    } else {
+        ESP_LOGW(TAG, "RS485 Downlink: no RS485 JSON config loaded yet; send CFRS:JSON:%u:<json> first",
+                 stack_id);
+    }
+
     ESP_LOGI(TAG, "RS485 Downlink: stack=%u, hex_len=%u, bin_len=%u",
              stack_id, hex_len, bin_len);
     ESP_LOG_BUFFER_HEX(TAG, bin_data, bin_len);
@@ -208,7 +241,8 @@ esp_err_t config_parse_rs485_downlink(const uint8_t *data, uint16_t len) {
         mcu_wan_enqueue_uplink(HANDLER_RS485, (uint8_t *)ack, sizeof(ack) - 1);
         return ESP_OK;
     } else {
-        ESP_LOGE(TAG, "RS485 Downlink: handler queue full");
+        ESP_LOGE(TAG, "RS485 Downlink: enqueue failed for stack=%u, len=%u (see RS485_HANDLER logs)",
+                 stack_id, bin_len);
         return ESP_FAIL;
     }
 }

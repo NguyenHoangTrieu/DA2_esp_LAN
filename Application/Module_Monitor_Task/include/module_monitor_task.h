@@ -24,6 +24,7 @@ typedef enum {
     MODULE_TYPE_BLE = 1,       ///< BLE module
     MODULE_TYPE_ZIGBEE = 2,    ///< Zigbee module
     MODULE_TYPE_LORA = 3,      ///< LoRa module
+    MODULE_TYPE_RS485 = 4,     ///< RS485 module
     MODULE_TYPE_UNKNOWN = 0xFF ///< Unknown module type
 } module_type_t;
 
@@ -94,6 +95,20 @@ esp_err_t module_monitor_task_stop(void);
  * @return esp_err_t
  */
 esp_err_t module_monitor_send_config(uint8_t stack_id, const char *json_str, uint16_t json_len);
+
+/**
+ * @brief Notify module monitor that RS485 JSON config has been applied
+ *
+ * This is used for RS485 because its GPIO mode JSON is parsed outside the
+ * generic module JSON pipeline, but handler startup should still be managed by
+ * module_monitor_task.
+ *
+ * @param stack_id Stack ID (0 or 1)
+ * @return esp_err_t
+ */
+esp_err_t module_monitor_notify_rs485_configured(uint8_t stack_id,
+                                                 const char *json_str,
+                                                 uint16_t json_len);
 
 #ifdef __cplusplus
 }

@@ -8,7 +8,9 @@
 #include "config_global.h"
 #include "stack_handler.h"
 #include "ble_handler_task.h"
+#include "config_handler_rs485_commands.h"
 #include "lora_handler_task.h"
+#include "rs485_handler.h"
 #include "zigbee_handler_task.h"
 #include "mcu_wan_handler.h"
 #include "cJSON.h"
@@ -29,6 +31,11 @@ static const char *TAG = "MODULE_MONITOR";
 #define MODULE_MONITOR_CONFIG_QUEUE_SIZE 10
 #define MODULE_MONITOR_MAX_STACKS 2
 
+typedef enum {
+  MODULE_CONFIG_MSG_JSON = 0,
+  MODULE_CONFIG_MSG_RS485_READY = 1,
+} module_config_msg_type_t;
+
 /* ===== Global State ===== */
 
 static struct {
@@ -45,6 +52,7 @@ static struct {
 /* ===== Module Config Queue Types ===== */
 
 typedef struct {
+  module_config_msg_type_t msg_type;
   uint8_t stack_id;
   char *json_str; // Allocated string
   uint16_t json_len;
@@ -260,6 +268,7 @@ esp_err_t module_monitor_send_config(uint8_t stack_id, const char *json_str, uin
 
   // Create config message
   module_config_msg_t msg = {
+    .msg_type = MODULE_CONFIG_MSG_JSON,
     .stack_id = stack_id,
     .json_str = json_copy,
     .json_len = json_len
@@ -273,6 +282,51 @@ esp_err_t module_monitor_send_config(uint8_t stack_id, const char *json_str, uin
   }
 
   ESP_LOGI(TAG, "Config enqueued for Stack %u (%u bytes)", stack_id, json_len);
+  return ESP_OK;
+}
+
+esp_err_t module_monitor_notify_rs485_configured(uint8_t stack_id,
+                                                 const char *json_str,
+                                                 uint16_t json_len) {
+  if (stack_id >= MODULE_MONITOR_MAX_STACKS) {
+    ESP_LOGE(TAG, "Invalid RS485 stack_id %u", stack_id);
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  if (!json_str || json_len == 0) {
+    ESP_LOGE(TAG, "Invalid RS485 JSON payload");
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  if (!g_monitor_state.initialized || !g_monitor_state.config_queue) {
+    ESP_LOGE(TAG, "Monitor task not running");
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  char *json_copy = malloc(json_len + 1);
+  if (!json_copy) {
+    ESP_LOGE(TAG, "Failed to allocate memory for RS485 JSON config");
+    return ESP_ERR_NO_MEM;
+  }
+
+  memcpy(json_copy, json_str, json_len);
+  json_copy[json_len] = '\0';
+
+  module_config_msg_t msg = {
+    .msg_type = MODULE_CONFIG_MSG_RS485_READY,
+    .stack_id = stack_id,
+    .json_str = json_copy,
+    .json_len = json_len,
+  };
+
+  if (xQueueSend(g_monitor_state.config_queue, &msg, pdMS_TO_TICKS(5000)) != pdTRUE) {
+    ESP_LOGE(TAG, "Failed to enqueue RS485 start for Stack %u", stack_id);
+    free(json_copy);
+    return ESP_FAIL;
+  }
+
+  ESP_LOGI(TAG, "RS485 start enqueued for Stack %u (%u bytes)", stack_id,
+           json_len);
   return ESP_OK;
 }
 
@@ -425,6 +479,8 @@ static esp_err_t module_detect_type_from_json(const char *json_str,
     *module_type = MODULE_TYPE_ZIGBEE;
   } else if (strcmp(type_str, "LORA") == 0) {
     *module_type = MODULE_TYPE_LORA;
+  } else if (strcmp(type_str, "RS485") == 0) {
+    *module_type = MODULE_TYPE_RS485;
   } else {
     ESP_LOGW(TAG, "Unknown module_type: %s", type_str);
     *module_type = MODULE_TYPE_UNKNOWN;
@@ -454,6 +510,10 @@ static esp_err_t module_start_handler_task(uint8_t stack_id,
     ESP_LOGI(TAG, "Starting LoRa handler for Stack %d", stack_id);
     return lora_handler_task_start(stack_id);
 
+  case MODULE_TYPE_RS485:
+    ESP_LOGI(TAG, "Starting RS485 handler for Stack %d", stack_id);
+    return rs485_handler_start();
+
   default:
     ESP_LOGE(TAG, "Unknown module type: %d", module_type);
     return ESP_FAIL;
@@ -478,6 +538,9 @@ static esp_err_t module_stop_handler_task(uint8_t stack_id) {
 
   case MODULE_TYPE_LORA:
     return lora_handler_task_stop(stack_id);
+
+  case MODULE_TYPE_RS485:
+    return rs485_handler_stop();
 
   default:
     return ESP_FAIL;
@@ -507,12 +570,26 @@ static void module_monitor_task_impl(void *pvParameters) {
       ESP_LOGI(TAG, "Loaded saved config for Stack %d from NVS", i);
       if (module_parse_json_config(i, json_str, json_len) == ESP_OK) {
         g_monitor_state.module_info[i].is_configured = true;
+
+        module_info_t *info = &g_monitor_state.module_info[i];
+        if (info->module_type == MODULE_TYPE_RS485) {
+          esp_err_t rs485_ret = config_apply_rs485_json_config(
+              i, info->json_config_str, info->json_config_len);
+          if (rs485_ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to apply RS485 config for Stack %d after NVS restore: %s",
+                     i, esp_err_to_name(rs485_ret));
+            free(json_str);
+            continue;
+          }
+
+          ESP_LOGI(TAG, "RS485 GPIO config applied after NVS restore (Stack %d)", i);
+        }
+
         free(json_str);
 
         esp_err_t start_ret = module_monitor_start_handler(i);
         if (start_ret == ESP_OK) {
           ESP_LOGI(TAG, "Handler auto-started for Stack %d (NVS restore)", i);
-          module_info_t *info = &g_monitor_state.module_info[i];
           if (info->module_type == MODULE_TYPE_BLE) {
             esp_err_t cfg_ret = ble_handler_task_load_config(i,
                                                              info->json_config_str,
@@ -537,6 +614,8 @@ static void module_monitor_task_impl(void *pvParameters) {
               ESP_LOGE(TAG, "Failed to load Zigbee config for Stack %d after NVS restore", i);
             else
               ESP_LOGI(TAG, "Zigbee handler config loaded after NVS restore (Stack %d)", i);
+          } else if (info->module_type == MODULE_TYPE_RS485) {
+            ESP_LOGI(TAG, "RS485 handler config loaded after NVS restore (Stack %d)", i);
           }
         } else {
           ESP_LOGW(TAG, "Handler start failed for Stack %d: %s", i,
@@ -555,6 +634,61 @@ static void module_monitor_task_impl(void *pvParameters) {
     // Wait for config message (timeout 5 seconds for periodic checks)
     if (xQueueReceive(g_monitor_state.config_queue, &msg,
                       pdMS_TO_TICKS(5000)) == pdTRUE) {
+      if (msg.msg_type == MODULE_CONFIG_MSG_RS485_READY) {
+        ESP_LOGI(TAG, "Received RS485 start request for Stack %d", msg.stack_id);
+
+        esp_err_t parse_ret =
+            module_parse_json_config(msg.stack_id, msg.json_str, msg.json_len);
+        if (parse_ret != ESP_OK) {
+          ESP_LOGE(TAG, "Failed to parse RS485 config for Stack %d", msg.stack_id);
+          uint8_t error_resp[] = "CFRS:JSON:FAIL:PARSE";
+          mcu_wan_enqueue_uplink(HANDLER_RS485, error_resp,
+                                 sizeof(error_resp) - 1);
+          free(msg.json_str);
+          continue;
+        }
+
+        esp_err_t save_ret =
+            config_save_module_json_to_nvs(msg.stack_id, msg.json_str, msg.json_len);
+        if (save_ret != ESP_OK) {
+          ESP_LOGE(TAG, "Failed to save RS485 config to NVS for Stack %d: %s",
+                   msg.stack_id, esp_err_to_name(save_ret));
+          uint8_t error_resp[] = "CFRS:JSON:FAIL:SAVE";
+          mcu_wan_enqueue_uplink(HANDLER_RS485, error_resp,
+                                 sizeof(error_resp) - 1);
+          free(msg.json_str);
+          continue;
+        }
+
+        bool handler_already_running = false;
+        if (xSemaphoreTake(g_monitor_state.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+          module_info_t *info = &g_monitor_state.module_info[msg.stack_id];
+          handler_already_running = info->is_running;
+          xSemaphoreGive(g_monitor_state.mutex);
+        }
+
+        if (!handler_already_running) {
+          esp_err_t start_ret = module_monitor_start_handler(msg.stack_id);
+          if (start_ret == ESP_ERR_INVALID_STATE) {
+            handler_already_running = true;
+          } else if (start_ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to start RS485 handler for Stack %d", msg.stack_id);
+            uint8_t error_resp[] = "CFRS:JSON:FAIL:START";
+            mcu_wan_enqueue_uplink(HANDLER_RS485, error_resp, sizeof(error_resp) - 1);
+            free(msg.json_str);
+            continue;
+          }
+        }
+
+        ESP_LOGI(TAG, "RS485 handler %s for Stack %d",
+                 handler_already_running ? "already running" : "started",
+                 msg.stack_id);
+        uint8_t ok_resp[] = "CFRS:JSON:OK";
+        mcu_wan_enqueue_uplink(HANDLER_RS485, ok_resp, sizeof(ok_resp) - 1);
+        free(msg.json_str);
+        continue;
+      }
+
       ESP_LOGI(TAG, "Received config for Stack %d (%u bytes)", msg.stack_id, msg.json_len);
 
       // Parse and apply config

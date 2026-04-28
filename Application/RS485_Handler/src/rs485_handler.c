@@ -157,8 +157,32 @@ esp_err_t rs485_handler_stop(void) {
 }
 
 bool rs485_handler_enqueue_downlink(uint8_t *data, uint16_t len) {
-  if (!g_rs485_ctx.is_running || !data || len == 0) {
-    ESP_LOGW(TAG, "Invalid downlink request");
+  if (!data || len == 0) {
+    ESP_LOGW(TAG, "Invalid downlink request: data=%p len=%u", (void *)data,
+             len);
+    g_rs485_ctx.stats.downlink_dropped++;
+    return false;
+  }
+
+  if (!g_rs485_ctx.is_running) {
+    rs485_gpio_mode_config_t gpio_cfg;
+    esp_err_t cfg_ret = rs485_comm_get_gpio_config(&gpio_cfg);
+    if (cfg_ret == ESP_OK) {
+      ESP_LOGW(TAG,
+               "Downlink rejected: handler not running yet (configured stack=%u). "
+               "Ensure module_monitor_task started RS485 after JSON apply.",
+               gpio_cfg.stack_id);
+    } else {
+      ESP_LOGW(TAG,
+               "Downlink rejected: no RS485 JSON config loaded and handler not running. "
+               "Send CFRS:JSON:<stack_id>:<json> first.");
+    }
+    g_rs485_ctx.stats.downlink_dropped++;
+    return false;
+  }
+
+  if (!g_rs485_ctx.downlink_queue) {
+    ESP_LOGW(TAG, "Downlink rejected: handler queue not created");
     g_rs485_ctx.stats.downlink_dropped++;
     return false;
   }
@@ -175,7 +199,7 @@ bool rs485_handler_enqueue_downlink(uint8_t *data, uint16_t len) {
   rs485_downlink_msg_t msg = {.data = msg_data, .len = len};
 
   if (xQueueSend(g_rs485_ctx.downlink_queue, &msg, 0) != pdTRUE) {
-    ESP_LOGW(TAG, "Downlink queue full");
+    ESP_LOGW(TAG, "Downlink queue full (len=%u)", len);
     free(msg_data);
     g_rs485_ctx.stats.downlink_dropped++;
     return false;
