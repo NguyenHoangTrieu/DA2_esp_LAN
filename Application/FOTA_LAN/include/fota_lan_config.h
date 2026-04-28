@@ -14,8 +14,8 @@
  *   http://<host>:<port>/api/v1/<token>/firmware?title=<title>&version=<ver>
  *
  * Examples:
- *   Local: http://192.168.1.100:8080/api/v1/TOKEN/firmware?title=DA2_esp_LAN&version=1.1.2
- *   Cloud: https://demo.thingsboard.io/api/v1/TOKEN/firmware?title=DA2_esp_LAN&version=1.1.2
+ *   Local: http://192.168.1.100:8080/api/v1/TOKEN/firmware?title=DA2_esp_LAN&version=<current-version>
+ *   Cloud: https://demo.thingsboard.io/api/v1/TOKEN/firmware?title=DA2_esp_LAN&version=<current-version>
  * ============================================================ */
 
 /* Full firmware download URL — override via web config or Python app at runtime */

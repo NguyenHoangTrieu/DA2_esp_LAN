@@ -755,6 +755,11 @@ esp_err_t ble_gatt_handler_deinit(void) {
 
     ESP_LOGI(TAG, "Deinitializing BLE GATT handler...");
 
+    /* Stop worker tasks first so their task stacks/TCBs are released before
+     * we start tearing down the GATT/GAP registrations. */
+    ble_gatt_downlink_task_stop();
+    ble_gatt_uplink_task_stop();
+
     /* Stop advertising */
     ESP_LOGI(TAG, "Stopping BLE advertisement");
     esp_ble_gap_stop_advertising();
@@ -787,6 +792,11 @@ esp_err_t ble_gatt_handler_deinit(void) {
         esp_ble_gattc_register_callback(NULL);
         s_bt_registered = false;
         vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    if (s_devices) {
+        heap_caps_free(s_devices);
+        s_devices = NULL;
     }
 
     s_initialized = false;

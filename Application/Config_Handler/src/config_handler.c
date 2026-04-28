@@ -20,10 +20,13 @@
 #include "fota_lan_handler.h"
 #include "led_strip.h"
 #include "mcu_wan_handler.h"
+#include "module_monitor_task.h"
 #include "rs485_handler.h"
 #include "stack_handler.h"
+#include "esp_heap_caps.h"
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 
 static const char *TAG = "config_handler";
 
@@ -38,6 +41,64 @@ static esp_err_t config_parse_fota(const char *data, uint16_t len,
                                    fota_lan_command_t *cfg);
 static void mcu_wan_config_callback(const uint8_t *data, uint16_t len,
                                     bool is_fota);
+
+static void config_log_fota_heap(const char *stage) {
+  size_t internal_free =
+      heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  size_t internal_largest =
+      heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  size_t dma_free = heap_caps_get_free_size(MALLOC_CAP_DMA);
+  size_t dma_largest = heap_caps_get_largest_free_block(MALLOC_CAP_DMA);
+  size_t psram_free =
+      heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  size_t psram_largest =
+      heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+
+  ESP_LOGI(TAG,
+           "[FOTA] Heap %s: total=%d internal=%d internal_largest=%d dma=%d dma_largest=%d psram=%d psram_largest=%d",
+           stage, esp_get_free_heap_size(), internal_free, internal_largest,
+           dma_free, dma_largest, psram_free, psram_largest);
+}
+
+static void config_prepare_for_fota(void) {
+  config_log_fota_heap("before cleanup");
+
+  esp_err_t ret = module_monitor_task_stop();
+  if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+    ESP_LOGW(TAG, "[FOTA] module_monitor_task_stop: %s", esp_err_to_name(ret));
+  }
+
+  ret = rs485_handler_stop();
+  if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+    ESP_LOGW(TAG, "[FOTA] rs485_handler_stop: %s", esp_err_to_name(ret));
+  }
+
+  switch (config_ble_mode_get()) {
+  case BLE_MODE_GATT:
+    ret = ble_gatt_handler_deinit();
+    if (ret != ESP_OK) {
+      ESP_LOGW(TAG, "[FOTA] ble_gatt_handler_deinit: %s", esp_err_to_name(ret));
+    }
+    break;
+  case BLE_MODE_NATIVE:
+    ret = ble_native_handler_deinit();
+    if (ret != ESP_OK) {
+      ESP_LOGW(TAG, "[FOTA] ble_native_handler_deinit: %s",
+               esp_err_to_name(ret));
+    }
+    break;
+  default:
+    break;
+  }
+
+  ret = mcu_wan_handler_stop();
+  if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+    ESP_LOGW(TAG, "[FOTA] mcu_wan_handler_stop: %s", esp_err_to_name(ret));
+  }
+
+  vTaskDelay(pdMS_TO_TICKS(500));
+  config_log_fota_heap("after cleanup");
+}
 
 config_type_t config_parse_type(const char *cmd, uint16_t len) {
   if (len < 4 || cmd[0] != 'C' || cmd[1] != 'F') {
@@ -60,8 +121,12 @@ config_type_t config_parse_type(const char *cmd, uint16_t len) {
     // RS485 commands - check subcommand
     if (len >= 10 && strncmp(cmd + 5, "JSON:", 5) == 0) {
       return CONFIG_UPDATE_RS485_JSON;
-    } else {
+    } else if (len >= 8 && strncmp(cmd + 5, "BR:", 3) == 0) {
       return CONFIG_UPDATE_RS485; // CFRS:BR:<baud>
+    } else if (len >= 8 && isdigit((unsigned char)cmd[5])) {
+      return CONFIG_UPDATE_RS485_CMD; // CFRS:<stack>:DATA:<hex_data>
+    } else {
+      return CONFIG_UPDATE_RS485; // Default RS485
     }
   } else if (cmd[2] == 'B' && cmd[3] == 'L') {
     // BLE AT commands (CFBL = CF + BLE) - check subcommand
@@ -325,8 +390,7 @@ static void config_handler_task(void *arg) {
           ESP_LOGI(TAG, "Starting FOTA process...");
           /* Apply the URL parsed from the command (may be default or overridden). */
           fota_lan_handler_set_url(fota_cfg.url);
-          // Start FOTA handler task — WiFi AP connect happens inside the task
-          mcu_wan_handler_stop();
+          config_prepare_for_fota();
           fota_lan_handler_task_start();
         } else {
           ESP_LOGE(TAG, "Failed to parse FOTA command");
@@ -360,6 +424,20 @@ static void config_handler_task(void *arg) {
           ESP_LOGE(TAG, "Failed to parse RS485 JSON config");
           {
             const char ack[] = "CFRS:JSON:FAIL";
+            mcu_wan_enqueue_uplink(HANDLER_RS485, (uint8_t *)ack,
+                                   sizeof(ack) - 1);
+          }
+        }
+        break;
+      }
+      case CONFIG_UPDATE_RS485_CMD: {
+        if (config_parse_rs485_downlink((const uint8_t *)cmd->raw_data,
+                                        cmd->data_len) == ESP_OK) {
+          ESP_LOGI(TAG, "RS485 downlink data sent");
+        } else {
+          ESP_LOGE(TAG, "Failed to parse/send RS485 downlink data");
+          {
+            const char ack[] = "CFRS:DATA:FAIL";
             mcu_wan_enqueue_uplink(HANDLER_RS485, (uint8_t *)ack,
                                    sizeof(ack) - 1);
           }

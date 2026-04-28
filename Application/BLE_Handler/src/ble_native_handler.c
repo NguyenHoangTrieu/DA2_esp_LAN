@@ -687,6 +687,16 @@ esp_err_t ble_native_handler_execute(const uint8_t *data, uint16_t len) {
 esp_err_t ble_native_handler_deinit(void) {
     ESP_LOGI(TAG, "BLE Native handler deinitializing...");
 
+    /* These tasks are created independently from the mesh stack and must be
+     * stopped explicitly to release their stacks/TCBs before FOTA. */
+    ble_native_downlink_task_stop();
+    ble_native_uplink_task_stop();
+
+    if (!s_mesh_initialized) {
+        ESP_LOGI(TAG, "BLE Native mesh stack not initialized, tasks stopped only");
+        return ESP_OK;
+    }
+
     /* Disable mesh provisioner — disable all bearers (PB-ADV + PB-GATT) */
     esp_err_t ret = esp_ble_mesh_provisioner_prov_disable(
         ESP_BLE_MESH_PROV_ADV | ESP_BLE_MESH_PROV_GATT);
@@ -702,6 +712,7 @@ esp_err_t ble_native_handler_deinit(void) {
         return ret;
     }
 
+    s_mesh_initialized = false;
     ESP_LOGI(TAG, "BLE Native handler deinitialized successfully");
     return ESP_OK;
 }

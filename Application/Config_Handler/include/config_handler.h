@@ -49,6 +49,7 @@ typedef enum {
   CONFIG_UPDATE_BLE_NATIVE_JSON = 12, // "CFBN:JSON" - BLE Native (ESP32 direct mesh) JSON config
   CONFIG_UPDATE_BLE_NATIVE_CMD  = 13, // "CFBN:<stack>:<verb>" - BLE Native command
   CONFIG_UPDATE_RS485_JSON = 14,      // "CFRS:JSON:" - RS485 GPIO mode config
+  CONFIG_UPDATE_RS485_CMD  = 18,      // "CFRS:<stack>:DATA:<hex>" - RS485 downlink data
   CONFIG_UPDATE_BLE_GATT_JSON  = 15, // "CFBG:JSON" - BLE GATT Central JSON config
   CONFIG_UPDATE_BLE_GATT_CMD   = 16, // "CFBG:<stack>:<verb>" - BLE GATT Central command
   CONFIG_TYPE_UNKNOWN = 0xFF

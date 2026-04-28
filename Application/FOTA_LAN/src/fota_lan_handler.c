@@ -17,6 +17,8 @@
 #include "esp_heap_caps.h"
 #include "esp_wifi.h"
 #include "freertos/event_groups.h"
+#include "freertos/idf_additions.h"
+#include "freertos/task.h"
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
 #include "lwip/dns.h"
@@ -32,6 +34,8 @@ static const char *TAG = "lan_advanced_ota";
 
 /* Download buffer for esp_http_client streaming */
 #define OTA_DL_BUF_SIZE 4096
+#define OTA_MAIN_TASK_STACK_SIZE  (20 * 1024)
+#define OTA_FLASH_TASK_STACK_SIZE (12 * 1024)
 
 /* ------------------------------------------------------------------ */
 /*  FOTA WiFi AP connect / disconnect                                   */
@@ -98,6 +102,7 @@ static esp_err_t fota_wifi_start(void)
             .ssid     = FOTA_CONFIG_LAN_WIFI_AP_SSID,
             .password = FOTA_CONFIG_LAN_WIFI_AP_PASS,
             .threshold.authmode = WIFI_AUTH_WPA2_PSK,
+        .listen_interval = 1,
         },
     };
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
@@ -105,6 +110,16 @@ static esp_err_t fota_wifi_start(void)
     /* esp_wifi_start() fires WIFI_EVENT_STA_START in the esp_event_loop
      * task (internal RAM stack) → our handler calls esp_wifi_connect(). */
     ESP_ERROR_CHECK(esp_wifi_start());
+
+    /* OTA is throughput-sensitive; keep the STA awake while pulling the image
+     * through the WAN MCU's SoftAP instead of using the default modem sleep. */
+    esp_err_t ps_ret = esp_wifi_set_ps(WIFI_PS_NONE);
+    if (ps_ret != ESP_OK) {
+      ESP_LOGW(TAG, "[WiFi] Failed to disable power save for OTA: %s",
+           esp_err_to_name(ps_ret));
+    } else {
+      ESP_LOGI(TAG, "[WiFi] WiFi power save disabled for OTA download");
+    }
 
     ESP_LOGI(TAG, "[WiFi] WiFi started, FOTA AP association in progress...");
     return ESP_OK;
@@ -605,6 +620,14 @@ static bool internet_reachable(void) {
 /*  Event handler to capture redirect Location header                   */
 /* ------------------------------------------------------------------ */
 static char s_lan_location_header[2048];
+
+typedef struct {
+  TaskHandle_t waiter;
+  uint8_t *fw_buf;
+  size_t total;
+  esp_err_t result;
+} ota_flash_task_args_t;
+
 static esp_err_t lan_ota_http_event_handler(esp_http_client_event_t *evt)
 {
     if (evt->event_id == HTTP_EVENT_ON_HEADER) {
@@ -616,12 +639,69 @@ static esp_err_t lan_ota_http_event_handler(esp_http_client_event_t *evt)
     return ESP_OK;
 }
 
+static esp_err_t flash_from_psram_buffer(uint8_t *fw_buf, size_t total)
+{
+  const esp_partition_t *update = esp_ota_get_next_update_partition(NULL);
+  if (!update) {
+    ESP_LOGE(TAG, "[OTA] No OTA partition available");
+    return ESP_FAIL;
+  }
+
+  esp_ota_handle_t ota_handle = 0;
+  ESP_LOGI(TAG, "[OTA] HTTP closed. Erasing OTA partition on internal-RAM helper task...");
+  esp_err_t err = esp_ota_begin(update, total, &ota_handle);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "[OTA] esp_ota_begin: %s", esp_err_to_name(err));
+    return err;
+  }
+
+  ESP_LOGI(TAG, "[OTA] Writing %u bytes from PSRAM to flash...", (unsigned int)total);
+  for (size_t offset = 0; offset < total; offset += OTA_DL_BUF_SIZE) {
+    size_t chunk = MIN((size_t)OTA_DL_BUF_SIZE, total - offset);
+    err = esp_ota_write(ota_handle, fw_buf + offset, chunk);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "[OTA] esp_ota_write @%u: %s", (unsigned int)offset,
+               esp_err_to_name(err));
+      esp_ota_abort(ota_handle);
+      return err;
+    }
+    if ((offset % (256 * 1024)) < OTA_DL_BUF_SIZE) {
+      ESP_LOGI(TAG, "[OTA] Flash: %u / %u B", (unsigned int)(offset + chunk),
+               (unsigned int)total);
+    }
+  }
+
+  err = esp_ota_end(ota_handle);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "[OTA] esp_ota_end: %s", esp_err_to_name(err));
+    return err;
+  }
+
+  err = esp_ota_set_boot_partition(update);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "[OTA] set_boot_partition: %s", esp_err_to_name(err));
+    return err;
+  }
+
+  ESP_LOGI(TAG, "[OTA] Flash complete! Rebooting into new firmware...");
+  return ESP_OK;
+}
+
+static void ota_flash_task(void *pvParameter)
+{
+  ota_flash_task_args_t *args = (ota_flash_task_args_t *)pvParameter;
+  args->result = flash_from_psram_buffer(args->fw_buf, args->total);
+  xTaskNotifyGive(args->waiter);
+  vTaskDelete(NULL);
+}
+
 static esp_err_t manual_ota_download(void) {
   const char *fw_url = fota_lan_handler_get_url();
   ESP_LOGI(TAG, "[OTA] Downloading firmware from: %s", fw_url);
 
   esp_err_t ret = ESP_FAIL;
   uint8_t *fw_buf = NULL;
+  ota_flash_task_args_t *flash_args = NULL;
 
   /* Resolve redirects first (GitHub → CDN) */
   static char s_final_url[2048];
@@ -737,49 +817,42 @@ static esp_err_t manual_ota_download(void) {
   esp_http_client_cleanup(client);
   client = NULL;
 
-  /* ---- Phase 2: erase + flash from PSRAM (network idle, disruption harmless) ---- */
-  const esp_partition_t *update = esp_ota_get_next_update_partition(NULL);
-  if (!update) {
-    ESP_LOGE(TAG, "[OTA] No OTA partition available");
+  /* ---- Phase 2: erase + flash from PSRAM on a small internal-RAM stack ---- */
+  flash_args = (ota_flash_task_args_t *)heap_caps_malloc(
+      sizeof(*flash_args), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (!flash_args) {
+    ESP_LOGE(TAG, "[OTA] Failed to allocate flash task args");
     goto cleanup_buf;
   }
+  flash_args->waiter = xTaskGetCurrentTaskHandle();
+  flash_args->fw_buf = fw_buf;
+  flash_args->total = (size_t)total;
+  flash_args->result = ESP_FAIL;
 
-  esp_ota_handle_t ota_handle = 0;
-  ESP_LOGI(TAG, "[OTA] HTTP closed. Erasing OTA partition (PPP disruption harmless now)...");
-  err = esp_ota_begin(update, (size_t)total, &ota_handle);
+  size_t internal_largest =
+      heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  ESP_LOGI(TAG,
+           "[OTA] Spawning internal flash helper (internal_largest=%u, stack=%u)",
+           (unsigned int)internal_largest, (unsigned int)OTA_FLASH_TASK_STACK_SIZE);
+  BaseType_t flash_task_ret = xTaskCreate(ota_flash_task, "ota_flash_task",
+                                          OTA_FLASH_TASK_STACK_SIZE, flash_args,
+                                          uxTaskPriorityGet(NULL), NULL);
+  if (flash_task_ret != pdPASS) {
+    ESP_LOGE(TAG, "[OTA] Failed to create flash helper task (internal largest=%u)",
+             (unsigned int)internal_largest);
+    goto cleanup_flash_args;
+  }
+
+  ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+  err = flash_args->result;
   if (err != ESP_OK) {
-    ESP_LOGE(TAG, "[OTA] esp_ota_begin: %s", esp_err_to_name(err));
-    goto cleanup_buf;
-  }
-  ESP_LOGI(TAG, "[OTA] Writing %d bytes from PSRAM to flash...", total);
-
-  for (int offset = 0; offset < total; offset += OTA_DL_BUF_SIZE) {
-    int chunk = MIN(OTA_DL_BUF_SIZE, total - offset);
-    err = esp_ota_write(ota_handle, fw_buf + offset, chunk);
-    if (err != ESP_OK) {
-      ESP_LOGE(TAG, "[OTA] esp_ota_write @%d: %s", offset, esp_err_to_name(err));
-      esp_ota_abort(ota_handle);
-      goto cleanup_buf;
-    }
-    if (offset % (256 * 1024) < OTA_DL_BUF_SIZE) {
-      ESP_LOGI(TAG, "[OTA] Flash: %d / %d B", offset + chunk, total);
-    }
+    goto cleanup_flash_args;
   }
 
-  err = esp_ota_end(ota_handle);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "[OTA] esp_ota_end: %s", esp_err_to_name(err));
-    goto cleanup_buf;
-  }
-
-  err = esp_ota_set_boot_partition(update);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "[OTA] set_boot_partition: %s", esp_err_to_name(err));
-    goto cleanup_buf;
-  }
-
-  ESP_LOGI(TAG, "[OTA] Flash complete! Rebooting into new firmware...");
   ret = ESP_OK;
+
+cleanup_flash_args:
+  free(flash_args);
 
 cleanup_buf:
   free(fw_buf);
@@ -801,12 +874,6 @@ cleanup_http:
 void advanced_ota_task(void *pvParameter) {
   ESP_LOGI(TAG, "Starting Advanced OTA (ThingsBoard via FOTA WiFi AP) - V4.0.0");
   ESP_LOGI(TAG, "[OTA] Target: %s", fota_lan_handler_get_url());
-
-  /* BLE must be off before using WiFi — they share the RF radio.
-   * fota_wifi_start() was already called by fota_lan_handler_task_start()
-   * (on an internal-RAM stack) before this task was created, so WiFi init
-   * and association are already in progress.  We just wait for the IP. */
-  ble_disable_sync();
 
   /* Wait for WiFi association + DHCP lease (started in task_start). */
   ESP_LOGI(TAG, "[OTA] Waiting for WiFi connection to FOTA AP \"%s\"...",
@@ -868,14 +935,24 @@ void advanced_ota_task(void *pvParameter) {
 void fota_lan_handler_task_start(void) {
   ota_task_close = false;
   get_sha256_of_partitions();
-
+  /* BLE must be off before using WiFi — they share the RF radio.
+  * fota_wifi_start() was already called by fota_lan_handler_task_start()
+  * (on an internal-RAM stack) before this task was created, so WiFi init
+  * and association are already in progress.  We just wait for the IP. */
+  ble_disable_sync();
+  
   size_t internal_free =
       heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   size_t internal_largest =
       heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    size_t psram_free =
+      heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    size_t psram_largest =
+      heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   ESP_LOGI(TAG,
-           "Heap before OTA task: total=%d, internal=%d, internal_largest=%d",
-           esp_get_free_heap_size(), internal_free, internal_largest);
+         "Heap before OTA task: total=%d, internal=%d, internal_largest=%d, psram=%d, psram_largest=%d",
+         esp_get_free_heap_size(), internal_free, internal_largest,
+         psram_free, psram_largest);
 
   /* Start WiFi on THIS stack (config_handler task, internal RAM) before
    * creating the OTA task.  esp_wifi_init() reads NVS via spi_flash and
@@ -888,20 +965,23 @@ void fota_lan_handler_task_start(void) {
     return;
   }
 
-  /* 20KB stack fits comfortably in internal RAM (typical largest free block
-   * at FOTA trigger time is ~28-32KB).  Avoid PSRAM stack entirely — any
-   * task whose stack is in PSRAM will crash if it (or code it calls)
-   * disables the flash cache (e.g. via NVS, OTA write, WiFi init). */
+  /* Keep the main OTA task in PSRAM to avoid large internal-RAM stack
+   * allocation failures. Flash erase/write still run on a separate internal-
+   * RAM helper task because esp_ota_begin/write can disable flash cache. */
   const UBaseType_t ota_prio = 5;
-  BaseType_t ret = xTaskCreate(&advanced_ota_task, "advanced_ota_task",
-                               20 * 1024, NULL, ota_prio, NULL);
+  BaseType_t ret = xTaskCreateWithCaps(&advanced_ota_task, "advanced_ota_task",
+                                       OTA_MAIN_TASK_STACK_SIZE, NULL,
+                                       ota_prio, NULL,
+                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (ret != pdPASS) {
-    ESP_LOGE(TAG, "Failed to create OTA task (internal largest=%d) — aborting",
-             internal_largest);
+    ESP_LOGE(TAG,
+             "Failed to create OTA task in PSRAM (internal largest=%d, psram largest=%d) — aborting",
+             internal_largest, psram_largest);
     fota_wifi_disconnect();
     return;
   }
-  ESP_LOGI(TAG, "OTA task created (20KB internal-RAM stack)");
+  ESP_LOGI(TAG, "OTA task created (%uB PSRAM stack + internal flash helper)",
+           (unsigned int)OTA_MAIN_TASK_STACK_SIZE);
 }
 
 void fota_lan_handler_task_stop(void) { ota_task_close = true; }

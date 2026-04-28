@@ -53,11 +53,10 @@ static uint32_t g_dq_fail_count = 0;
 
 static void downlink_poll_task(void *pvParameters);
 static bool poll_wan_with_retry(uint8_t *rx_buffer, size_t buffer_size);
-static void dispatch_downlink_to_handler(handler_id_t target_id,
-                                         const uint8_t *data, uint16_t length);
 static void send_ack_to_wan(ack_type_t ack_type);
 static void send_lan_config_response(void);
-static handler_id_t string_to_handler_id(const uint8_t *type_str);
+// NOTE: dispatch_downlink_to_handler and string_to_handler_id removed
+// RS485 downlink now uses CFRS:... format through Config Handler
 
 //
 // GPIO ISR CALLBACK
@@ -260,25 +259,9 @@ static bool poll_wan_with_retry(uint8_t *rx_buffer, size_t buffer_size) {
 
     if (comm_status == WAN_COMM_OK) {
 
-      // Check for DATA packet: [D][T][handler_type(3)][length(2)][payload]
-      if (rx_buffer[0] == 'D' && rx_buffer[1] == 'T') {
-
-        uint8_t handler_type[4] = {rx_buffer[2], rx_buffer[3], rx_buffer[4], 0};
-        uint16_t payload_len = (rx_buffer[5] << 8) | rx_buffer[6];
-        handler_id_t target_id = string_to_handler_id(handler_type);
-
-        ESP_LOGI(TAG, "Downlink DATA: handler=%s, len=%u", handler_type,
-                 payload_len);
-
-        send_ack_to_wan(ACK_TYPE_RECEIVED_OK);
-        dispatch_downlink_to_handler(
-            target_id, &rx_buffer[DATA_PACKET_HEADER_SIZE], payload_len);
-
-        got_valid_response = true;
-
-      }
       // Check for CONFIG packet: [C][F][...]
-      else if (rx_buffer[0] == 'C' && rx_buffer[1] == 'F') {
+      // Note: RS485 downlink data now uses CFRS:... format through Config Handler
+      if (rx_buffer[0] == 'C' && rx_buffer[1] == 'F') {
 
         // Config query request: [C][F][C][Q]
         if (rx_buffer[2] == 'C' && rx_buffer[3] == 'Q') {
@@ -430,45 +413,5 @@ static void send_lan_config_response(void) {
   }
 }
 
-/**
- * @brief Dispatch downlink data to appropriate handler
- * 
- * For Module Base Setting trial (BLE-only), only RS485 and BLE handlers supported.
- */
-static void dispatch_downlink_to_handler(handler_id_t target_id,
-                                         const uint8_t *data, uint16_t length) {
-  bool success = false;
-
-  switch (target_id) {
-  case HANDLER_RS485:
-    success = rs485_handler_enqueue_downlink((uint8_t *)data, length);
-    break;
-
-    // case HANDLER_BLE:
-    //   success = ble_handler_task_enqueue_downlink(data, length);
-    //   break;
-
-  default:
-    ESP_LOGW(TAG, "Unsupported or unknown target handler: %d (CAN/LoRa/Zigbee not supported in trial)", target_id);
-    return;
-  }
-
-  if (success) {
-    ESP_LOGI(TAG, "Downlink dispatched to handler %s: %u bytes",
-             handler_id_to_string(target_id), length);
-  } else {
-    ESP_LOGW(TAG, "Failed to dispatch downlink to handler %s",
-             handler_id_to_string(target_id));
-  }
-}
-// HELPER FUNCTIONS
-
-static handler_id_t string_to_handler_id(const uint8_t *type_str) {
-  if (memcmp(type_str, "RS4", 3) == 0)
-    return HANDLER_RS485;
-  // if (memcmp(type_str, "BLE", 3) == 0)
-  //   return HANDLER_BLE;
-  
-  // CAN, LoRa, Zigbee not supported in Module Base Setting trial
-  return HANDLER_UNKNOWN;
-}
+// NOTE: dispatch_downlink_to_handler and string_to_handler_id functions removed
+// RS485 downlink now uses CFRS:... format through Config Handler instead of DT binary format

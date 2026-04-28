@@ -12,10 +12,22 @@
 #include <stdint.h>
 
 // ===== Firmware Version =====
-#define LAN_FW_VERSION_MAJOR 1
-#define LAN_FW_VERSION_MINOR 1
-#define LAN_FW_VERSION_PATCH 1
-#define LAN_FW_VERSION_BUILD 2 // Increment after FOTA
+#define DA2_VERSION_MAJOR 2
+#define DA2_VERSION_MINOR 1
+#define DA2_VERSION_PATCH 1
+#define DA2_VERSION_BUILD 0 // Increment after FOTA
+
+#define DA2_STR_HELPER(x) #x
+#define DA2_STR(x) DA2_STR_HELPER(x)
+
+#define DA2_CURRENT_VERSION_STR                                                \
+  DA2_STR(DA2_VERSION_MAJOR) "." DA2_STR(DA2_VERSION_MINOR) "."            \
+      DA2_STR(DA2_VERSION_PATCH)
+
+#define LAN_FW_VERSION_MAJOR DA2_VERSION_MAJOR
+#define LAN_FW_VERSION_MINOR DA2_VERSION_MINOR
+#define LAN_FW_VERSION_PATCH DA2_VERSION_PATCH
+#define LAN_FW_VERSION_BUILD DA2_VERSION_BUILD
 
 #define LAN_FW_VERSION                                                         \
   FW_VERSION_MAKE(LAN_FW_VERSION_MAJOR, LAN_FW_VERSION_MINOR,                  \

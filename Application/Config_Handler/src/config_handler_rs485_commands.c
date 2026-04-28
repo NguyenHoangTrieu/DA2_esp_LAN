@@ -11,6 +11,7 @@
 #include "config_handler_rs485_commands.h"
 #include "json_rs485_config_parser.h"
 #include "rs485_comm.h"
+#include "rs485_handler.h"
 #include "mcu_wan_handler.h"
 #include "esp_log.h"
 #include <string.h>
@@ -130,4 +131,84 @@ esp_err_t config_parse_rs485_json(const uint8_t *data, uint16_t len) {
     mcu_wan_enqueue_uplink(HANDLER_RS485, (uint8_t *)ack, sizeof(ack) - 1);
 
     return ESP_OK;
+}
+
+/**
+ * @brief Parse and send RS485 downlink data
+ *
+ * Format: "CFRS:<stack_id>:DATA:<hex_data>"
+ * Example: "CFRS:0:DATA:010306000A" → sends hex bytes 01 03 06 00 0A
+ */
+esp_err_t config_parse_rs485_downlink(const uint8_t *data, uint16_t len) {
+    if (!data || len < 14) { /* Minimum: "CFRS:0:DATA:" */
+        ESP_LOGE(TAG, "RS485 Downlink: invalid parameters (len=%u)", len);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* Check prefix */
+    if (strncmp((const char *)data, "CFRS:", 5) != 0) {
+        ESP_LOGE(TAG, "RS485 Downlink: invalid prefix");
+        return ESP_FAIL;
+    }
+
+    /* Parse: CFRS:<stack_id>:DATA:<hex_data> */
+    const char *ptr = (const char *)(data + 5);
+    const char *colon = strchr(ptr, ':');
+    if (!colon) {
+        ESP_LOGE(TAG, "RS485 Downlink: missing stack_id separator");
+        return ESP_FAIL;
+    }
+
+    uint8_t stack_id = (uint8_t)atoi(ptr);
+    if (stack_id > 1) {
+        ESP_LOGE(TAG, "RS485 Downlink: invalid stack_id %u", stack_id);
+        return ESP_FAIL;
+    }
+
+    /* Check DATA prefix */
+    const char *data_part = colon + 1;
+    if (strncmp(data_part, "DATA:", 5) != 0) {
+        ESP_LOGE(TAG, "RS485 Downlink: missing DATA: prefix");
+        return ESP_FAIL;
+    }
+
+    const char *hex_str = data_part + 5;
+    uint16_t hex_len = (uint16_t)(len - (hex_str - (const char *)data));
+
+    if (hex_len == 0 || hex_len > 1024 || hex_len % 2 != 0) {
+        ESP_LOGE(TAG, "RS485 Downlink: invalid hex length %u (must be even)", hex_len);
+        return ESP_FAIL;
+    }
+
+    /* Convert hex string to binary */
+    uint8_t *bin_data = (uint8_t *)malloc(hex_len / 2);
+    if (!bin_data) {
+        ESP_LOGE(TAG, "RS485 Downlink: malloc failed");
+        return ESP_ERR_NO_MEM;
+    }
+
+    uint16_t bin_len = 0;
+    for (uint16_t i = 0; i < hex_len; i += 2) {
+        char hex_byte[3] = {hex_str[i], hex_str[i + 1], '\0'};
+        uint8_t byte_val = (uint8_t)strtol(hex_byte, NULL, 16);
+        bin_data[bin_len++] = byte_val;
+    }
+
+    ESP_LOGI(TAG, "RS485 Downlink: stack=%u, hex_len=%u, bin_len=%u",
+             stack_id, hex_len, bin_len);
+    ESP_LOG_BUFFER_HEX(TAG, bin_data, bin_len);
+
+    /* Send to RS485 handler */
+    bool success = rs485_handler_enqueue_downlink(bin_data, bin_len);
+    free(bin_data);
+
+    if (success) {
+        ESP_LOGI(TAG, "RS485 Downlink: sent %u bytes to handler", bin_len);
+        const char ack[] = "CFRS:DATA:OK";
+        mcu_wan_enqueue_uplink(HANDLER_RS485, (uint8_t *)ack, sizeof(ack) - 1);
+        return ESP_OK;
+    } else {
+        ESP_LOGE(TAG, "RS485 Downlink: handler queue full");
+        return ESP_FAIL;
+    }
 }

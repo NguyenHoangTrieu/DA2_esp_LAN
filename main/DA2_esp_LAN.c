@@ -16,7 +16,7 @@ TaskHandle_t main_task_handle = NULL;
  * @brief Main application entry point
  */
 void app_main(void) {
-  ESP_LOGI(TAG, "LAN MCU Application Starting... V1.0.1");
+  ESP_LOGI(TAG, "LAN MCU Application Starting... V%s", DA2_CURRENT_VERSION_STR);
   main_task_handle = xTaskGetCurrentTaskHandle();
 
   // Initialize NVS

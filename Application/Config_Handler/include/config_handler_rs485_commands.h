@@ -32,6 +32,20 @@ extern "C" {
  */
 esp_err_t config_parse_rs485_json(const uint8_t *data, uint16_t len);
 
+/**
+ * @brief Parse and send RS485 downlink data
+ *
+ * Format: "CFRS:<stack_id>:DATA:<hex_data>"
+ * Example: "CFRS:0:DATA:010306000A" → sends hex bytes 01 03 06 00 0A
+ *
+ * Converts hex string to binary and enqueues for RS485 transmission.
+ *
+ * @param data   Command buffer (starts at 'C')
+ * @param len    Buffer length
+ * @return ESP_OK on success
+ */
+esp_err_t config_parse_rs485_downlink(const uint8_t *data, uint16_t len);
+
 #ifdef __cplusplus
 }
 #endif
