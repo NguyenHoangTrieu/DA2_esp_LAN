@@ -22,6 +22,7 @@
 #include "ble_gatt_config.h"
 #include "ble_gatt_uplink.h"
 #include "ble_gatt_downlink.h"
+#include "bench_counter.h"
 #include "esp_log.h"
 #include "esp_bt.h"
 #include "esp_bt_main.h"
@@ -561,8 +562,10 @@ static void gattc_event_cb(esp_gattc_cb_event_t event,
         char ok[320];
         snprintf(ok, sizeof(ok), "%s:%d:0x%04X:%s",
                  type, idx, param->notify.handle, hex);
+#if !BENCH_QUIET_LOG
         ESP_LOGI(TAG, "[NOTIFY] dev[%d] handle=0x%04X len=%u data=%s",
                  idx, param->notify.handle, param->notify.value_len, hex);
+#endif
         ble_gatt_uplink_send_ok(dev->stack_id, ok);
         break;
     }

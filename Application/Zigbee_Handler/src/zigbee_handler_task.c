@@ -14,6 +14,7 @@
 #include "frame_types.h"
 #include "mcu_wan_handler.h"
 #include "esp_heap_caps.h"
+#include "bench_counter.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -304,8 +305,10 @@ static void zigbee_listener_task(void *pv) {
                 /* HEX mode: format bytes as space-separated hex, log & forward */
                 bytes_to_hex_str(listen_buf, recv_len, hex_str,
                                  ZIGBEE_LISTEN_BUFFER_SIZE * 3 + 8);
+#if !BENCH_QUIET_LOG
                 ESP_LOGI(TAG, "[Stack %d] Listener RX %u bytes (HEX): %s",
                          sid, (unsigned)recv_len, hex_str);
+#endif
                 int pkt_len = snprintf(evt_pkt,
                                        ZIGBEE_LISTEN_BUFFER_SIZE * 3 + 32,
                                        "CFZB:%d:EVT:%s", sid, hex_str);
@@ -313,23 +316,39 @@ static void zigbee_listener_task(void *pv) {
                     if (!mcu_wan_enqueue_uplink(HANDLER_ZIGBEE,
                                                  (uint8_t *)evt_pkt,
                                                  (uint16_t)pkt_len)) {
+#if !BENCH_QUIET_LOG
                         ESP_LOGW(TAG, "[Stack %d] EVT enqueue failed", sid);
+#endif
+                        bench_count_zb_drop();
+                    } else {
+                        /* HEX mode: count every forwarded listener event as ZB bench event */
+                        bench_count_zb((uint16_t)recv_len);
                     }
                 }
             } else {
                 /* ASCII/AT mode: forward as-is text */
                 listen_buf[recv_len < ZIGBEE_LISTEN_BUFFER_SIZE
                             ? recv_len : ZIGBEE_LISTEN_BUFFER_SIZE - 1] = '\0';
+#if !BENCH_QUIET_LOG
                 ESP_LOGI(TAG, "[Stack %d] Listener RX %u bytes (ASCII): %s",
                          sid, (unsigned)recv_len, (char *)listen_buf);
+#endif
                 int pkt_len = snprintf(evt_pkt,
                                        ZIGBEE_LISTEN_BUFFER_SIZE * 3 + 32,
                                        "CFZB:%d:EVT:%s", sid, (char *)listen_buf);
                 if (pkt_len > 0) {
+                    /* Count only attribute report events for ZB bench throughput */
+                    bool is_rpt = (strstr((char *)listen_buf, "RPT:") != NULL ||
+                                   strstr((char *)listen_buf, "+ATTRREPORT") != NULL);
                     if (!mcu_wan_enqueue_uplink(HANDLER_ZIGBEE,
                                                  (uint8_t *)evt_pkt,
                                                  (uint16_t)pkt_len)) {
+#if !BENCH_QUIET_LOG
                         ESP_LOGW(TAG, "[Stack %d] EVT enqueue failed", sid);
+#endif
+                        if (is_rpt) bench_count_zb_drop();
+                    } else {
+                        if (is_rpt) bench_count_zb((uint16_t)recv_len);
                     }
                 }
             }

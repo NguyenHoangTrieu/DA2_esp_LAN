@@ -6,6 +6,7 @@
 #include "ble_gatt_uplink.h"
 #include "frame_types.h"
 #include "mcu_wan_handler.h"
+#include "bench_counter.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
@@ -42,8 +43,10 @@ static void uplink_task(void *arg) {
                                                (uint8_t *)item->msg,
                                                item->len);
             if (!sent) {
+#if !BENCH_QUIET_LOG
                 ESP_LOGW(TAG, "WAN uplink queue full, dropped: %.*s",
                          (int)item->len, item->msg);
+#endif
             } else {
                 ESP_LOGD(TAG, "Uplink sent (%u B): %.*s",
                          item->len, (int)item->len, item->msg);
@@ -133,10 +136,17 @@ esp_err_t ble_gatt_uplink_send_ok(uint8_t stack_id, const char *payload) {
     item->len = (uint16_t)n;
 
     if (xQueueSend(s_uplink_queue, &item, pdMS_TO_TICKS(50)) != pdTRUE) {
+#if !BENCH_QUIET_LOG
         ESP_LOGW(TAG, "Uplink queue full (OK)");
+#endif
         free(item->msg); free(item);
+        /* Count the dropped NOTIFY event for benchmark drop tracking */
+        if (strstr(payload, "NOTIFY:") == payload) bench_count_ble_drop();
         return ESP_ERR_NO_MEM;
     }
+    /* Count each forwarded NOTIFY as a benchmark BLE event.  payload_bytes is
+     * the full CFBG:OK:NOTIFY:... string length — good proxy for uplink cost. */
+    if (strstr(payload, "NOTIFY:") == payload) bench_count_ble((uint16_t)item->len);
     return ESP_OK;
 }
 
@@ -153,7 +163,9 @@ esp_err_t ble_gatt_uplink_send_fail(uint8_t stack_id, const char *reason) {
     item->len = (uint16_t)n;
 
     if (xQueueSend(s_uplink_queue, &item, pdMS_TO_TICKS(50)) != pdTRUE) {
+#if !BENCH_QUIET_LOG
         ESP_LOGW(TAG, "Uplink queue full (FAIL)");
+#endif
         free(item->msg); free(item);
         return ESP_ERR_NO_MEM;
     }
@@ -172,7 +184,9 @@ esp_err_t ble_gatt_uplink_send_raw(const char *msg, uint16_t msg_len) {
     item->len = msg_len;
 
     if (xQueueSend(s_uplink_queue, &item, pdMS_TO_TICKS(50)) != pdTRUE) {
+#if !BENCH_QUIET_LOG
         ESP_LOGW(TAG, "Uplink queue full (raw)");
+#endif
         free(item->msg); free(item);
         return ESP_ERR_NO_MEM;
     }

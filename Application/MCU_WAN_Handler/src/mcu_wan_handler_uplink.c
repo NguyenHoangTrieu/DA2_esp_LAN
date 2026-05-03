@@ -1,5 +1,6 @@
 #include "esp_log.h"
 #include "frame_types.h"
+#include "bench_counter.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
@@ -192,12 +193,16 @@ bool mcu_wan_enqueue_uplink(handler_id_t source_id, uint8_t *data,
   }
 
   if (xQueueSend(g_uplink_queue, &item, pdMS_TO_TICKS(100)) != pdTRUE) {
+#if !BENCH_QUIET_LOG
     ESP_LOGW(TAG, "Uplink queue full");
+#endif
     return false;
   }
 
+#if !BENCH_QUIET_LOG
   ESP_LOGI(TAG, "Uplink queued from handler %s: %u bytes",
            handler_id_to_string(source_id), len);
+#endif
   return true;
 }
 
@@ -288,9 +293,11 @@ static void uplink_handler_task(void *pvParameters) {
 
       if (xQueueReceive(g_uplink_queue, &uplink_item, 0) == pdTRUE) {
 
+#if !BENCH_QUIET_LOG
         ESP_LOGI(TAG, "Processing uplink from handler %s: %u bytes",
                  handler_id_to_string(uplink_item.source_id),
                  uplink_item.length);
+#endif
 
         uint8_t packet[MAX_PAYLOAD_SIZE + DATA_PACKET_HEADER_SIZE + 20];
         uint16_t packet_len = 0;
@@ -304,8 +311,10 @@ static void uplink_handler_task(void *pvParameters) {
           if (send_result == ESP_OK) {
             if (ack_result == ACK_TYPE_INTERNET_OK) {
               g_uplink_sent_count++;
+#if !BENCH_QUIET_LOG
               ESP_LOGI(TAG, "Uplink sent successfully (#%lu)",
                        g_uplink_sent_count);
+#endif
             } else if (ack_result == ACK_TYPE_NO_INTERNET) {
               ESP_LOGW(TAG, "ACK received but NO_INTERNET, saving to SD");
               g_internet_status = INTERNET_STATUS_OFFLINE;
@@ -572,7 +581,9 @@ static esp_err_t send_data_to_wan(const uint8_t *data, uint16_t length,
 
   for (int retry = 0; retry < MAX_RETRY_COUNT; retry++) {
 
+#if !BENCH_QUIET_LOG
     ESP_LOGI(TAG, "Transmit attempt %d/%d", retry + 1, MAX_RETRY_COUNT);
+#endif
 
     wan_comm_status_t status = wan_comm_send_data(g_wan_handle, data, length);
     if (status != WAN_COMM_OK) {
@@ -606,9 +617,11 @@ static esp_err_t send_data_to_wan(const uint8_t *data, uint16_t length,
               *ack_out = (ack_response[i + 2] != 0) ? ACK_TYPE_INTERNET_OK
                                                      : ACK_TYPE_NO_INTERNET;
             }
+#if !BENCH_QUIET_LOG
             ESP_LOGI(TAG, "ACK received: %s (ack=0x%02X internet=0x%02X)",
                      (*ack_out == ACK_TYPE_INTERNET_OK) ? "INTERNET_OK" : "NO_INTERNET",
                      ack_response[i + 1], ack_response[i + 2]);
+#endif
             return ESP_OK;
           }
         }

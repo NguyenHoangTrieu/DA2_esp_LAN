@@ -12,6 +12,7 @@
 #include "lora_handler.h"
 #include "frame_types.h"
 #include "mcu_wan_handler.h"
+#include "bench_counter.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -383,8 +384,10 @@ static void lora_listener_task(void *pvParameters) {
             if (hex_mode) {
                 lora_bytes_to_hex_str((const uint8_t *)listen_buf, recv_len,
                                       clean_buf, LORA_LISTEN_BUFFER_SIZE * 3);
+#if !BENCH_QUIET_LOG
                 ESP_LOGI(TAG, "[Stack %d] Listener RX %u bytes (HEX): %s",
                          stack_id, (unsigned)recv_len, clean_buf);
+#endif
                 pkt_len = snprintf(evt_packet, LORA_LISTEN_BUFFER_SIZE * 3 + 32,
                                    "CFLR:%d:EVT:%s", stack_id, clean_buf);
             } else {
@@ -402,8 +405,10 @@ static void lora_listener_task(void *pvParameters) {
                 }
                 while (ci > 0 && clean_buf[ci - 1] == '\x1E') ci--;
                 clean_buf[ci] = '\0';
+#if !BENCH_QUIET_LOG
                 ESP_LOGI(TAG, "[Stack %d] Listener RX %u bytes (ASCII): %s",
                          stack_id, (unsigned)recv_len, clean_buf);
+#endif
                 pkt_len = (ci > 0)
                     ? snprintf(evt_packet, LORA_LISTEN_BUFFER_SIZE * 3 + 32,
                                "CFLR:%d:EVT:%s", stack_id, clean_buf)
@@ -413,9 +418,15 @@ static void lora_listener_task(void *pvParameters) {
                 if (!mcu_wan_enqueue_uplink(HANDLER_LORA,
                                              (uint8_t *)evt_packet,
                                              (uint16_t)pkt_len)) {
+#if !BENCH_QUIET_LOG
                     ESP_LOGW(TAG, "[Stack %d] Failed to enqueue EVT to WAN", stack_id);
+#endif
+                    /* Count drop for any RXLRPKT event that was discarded */
+                    if (strstr(clean_buf, "RXLRPKT")) bench_count_lr_drop();
                 } else {
                     ESP_LOGD(TAG, "[Stack %d] EVT forwarded: %s", stack_id, evt_packet);
+                    /* Count forwarded RXLRPKT events for firmware-side throughput */
+                    if (strstr(clean_buf, "RXLRPKT")) bench_count_lr((uint16_t)recv_len);
                 }
             }
         } else if (ret == ESP_ERR_TIMEOUT) {
