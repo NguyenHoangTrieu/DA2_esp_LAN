@@ -51,11 +51,20 @@ void bench_task_stop(void);
 /** Call when a BLE GATT NOTIFY message is successfully forwarded upstream. */
 void bench_count_ble(uint16_t payload_bytes);
 
+/** Call when a BLE GATT NOTIFY/INDICATE is received from peer (raw DLE side). */
+void bench_count_ble_rx(uint16_t payload_bytes);
+
 /** Call when a Zigbee RPT:/ATTRREPORT event is successfully forwarded upstream. */
-void bench_count_zb(uint16_t payload_bytes);
+void bench_count_zb_fwd(uint16_t payload_bytes);
+
+/** Call when a Zigbee benchmark event is received from the module before uplink formatting. */
+void bench_count_zb_rx(uint16_t payload_bytes);
 
 /** Call when a LoRa RXLRPKT event is successfully forwarded upstream. */
-void bench_count_lr(uint16_t payload_bytes);
+void bench_count_lr_fwd(uint16_t payload_bytes);
+
+/** Call when a LoRa RXLRPKT event is received from the module before uplink formatting. */
+void bench_count_lr_rx(uint16_t payload_bytes);
 
 /** Call when a BLE GATT uplink packet is dropped (queue full). */
 void bench_count_ble_drop(void);

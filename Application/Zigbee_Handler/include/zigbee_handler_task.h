@@ -21,6 +21,8 @@
 extern "C" {
 #endif
 
+#define ZIGBEE_UPLINK_PAYLOAD_MAX_LEN 1024
+
 /* ===== Type Definitions ===== */
 
 /**
@@ -29,7 +31,7 @@ extern "C" {
 typedef struct {
     uint8_t  stack_id;
     uint32_t timestamp_ms;
-    uint8_t  payload[256];
+    uint8_t  payload[ZIGBEE_UPLINK_PAYLOAD_MAX_LEN];
     uint16_t payload_len;
 } zigbee_uplink_packet_t;
 

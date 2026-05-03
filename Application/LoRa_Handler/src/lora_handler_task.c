@@ -37,7 +37,8 @@ static const char *TAG = "LORA_TASK";
 #define LORA_MAX_STACKS                2
 #define LORA_UPLINK_BATCH_MAX          8
 #define LORA_UPLINK_BATCH_FLUSH_MS     50
-#define LORA_LISTEN_BUFFER_SIZE        512  // Unsolicited event receive buffer
+#define LORA_LISTEN_BUFFER_SIZE        2048  // Unsolicited event receive buffer
+#define LORA_WAN_UPLINK_MAX            2048
 
 /* ===== Static Data ===== */
 
@@ -72,6 +73,41 @@ typedef struct {
 
 static inline bool lora_is_valid_stack(uint8_t stack_id) {
     return (stack_id < LORA_MAX_STACKS);
+}
+
+static bool lora_enqueue_evt_chunks(uint8_t stack_id, const char *payload) {
+    char packet[LORA_WAN_UPLINK_MAX];
+    size_t payload_len = strlen(payload);
+    int one_shot_hdr = snprintf(packet, sizeof(packet), "CFLR:%d:EVT:", stack_id);
+    if (one_shot_hdr <= 0 || one_shot_hdr >= (int)sizeof(packet)) return false;
+
+    if ((size_t)one_shot_hdr + payload_len < sizeof(packet)) {
+        int pkt_len = snprintf(packet, sizeof(packet), "CFLR:%d:EVT:%s", stack_id, payload);
+        return (pkt_len > 0)
+            ? mcu_wan_enqueue_uplink(HANDLER_LORA, (uint8_t *)packet, (uint16_t)pkt_len)
+            : false;
+    }
+
+    size_t max_chunk = sizeof(packet) - (size_t)one_shot_hdr - 24;
+    if (max_chunk == 0) return false;
+    size_t total = (payload_len + max_chunk - 1) / max_chunk;
+    for (size_t index = 0; index < total; index++) {
+        size_t offset = index * max_chunk;
+        size_t chunk_len = payload_len - offset;
+        if (chunk_len > max_chunk) chunk_len = max_chunk;
+        int pkt_len = snprintf(packet, sizeof(packet),
+                               "CFLR:%d:EVT:%u/%u:%.*s",
+                               stack_id,
+                               (unsigned)(index + 1),
+                               (unsigned)total,
+                               (int)chunk_len,
+                               payload + offset);
+        if (pkt_len <= 0 || pkt_len >= (int)sizeof(packet)) return false;
+        if (!mcu_wan_enqueue_uplink(HANDLER_LORA, (uint8_t *)packet, (uint16_t)pkt_len)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool lora_handler_is_running(uint8_t stack_id) {
@@ -180,7 +216,7 @@ static void lora_uplink_task(void *pvParameters) {
              batch_count >= LORA_UPLINK_BATCH_MAX)) {
 
             for (uint8_t i = 0; i < batch_count; i++) {
-                uint8_t packet[1 + 256];
+                uint8_t packet[1 + LORA_UPLINK_PAYLOAD_MAX_LEN];
                 packet[0] = stack_id;
                 memcpy(&packet[1], batch[i].payload, batch[i].payload_len);
 
@@ -259,8 +295,8 @@ static void lora_downlink_task(void *pvParameters) {
             /* Forward response to WAN MCU → PC App
              * Format: "CFLR:<stack_id>:<OK|FAIL>:<response>" */
             {
-                char *resp_packet = (char *)malloc(3072);
-                char *clean_resp  = (char *)malloc(2048);
+                char *resp_packet = (char *)malloc(4096);
+                char *clean_resp  = (char *)malloc(4096);
                 if (!resp_packet || !clean_resp) {
                     ESP_LOGE(TAG, "[Stack %d] Failed to alloc response buffers", stack_id);
                     free(resp_packet);
@@ -274,15 +310,15 @@ static void lora_downlink_task(void *pvParameters) {
                     if (is_hex_cmd && actual_resp_len > 0) {
                         /* HEX mode: send binary response as hex string */
                         lora_bytes_to_hex_str((const uint8_t *)result.response,
-                                              actual_resp_len, clean_resp, 2048);
+                                              actual_resp_len, clean_resp, 4096);
                         resp_len = (ret == ESP_OK)
-                            ? snprintf(resp_packet, 3072, "CFLR:%d:OK:%s", stack_id, clean_resp)
-                            : snprintf(resp_packet, 3072, "CFLR:%d:FAIL:%s:%s",
+                            ? snprintf(resp_packet, 4096, "CFLR:%d:OK:%s", stack_id, clean_resp)
+                            : snprintf(resp_packet, 4096, "CFLR:%d:FAIL:%s:%s",
                                        stack_id, esp_err_to_name(ret), clean_resp);
                     } else {
                         /* ASCII/AT mode: normalise \r\n to \x1E record-separator */
                         int ci = 0;
-                        for (int i = 0; i < actual_resp_len && ci < 2047; i++) {
+                        for (int i = 0; i < actual_resp_len && ci < 4095; i++) {
                             char c = result.response[i];
                             if (c == '\r') continue;
                             if (c == '\n') {
@@ -295,22 +331,22 @@ static void lora_downlink_task(void *pvParameters) {
                         while (ci > 0 && clean_resp[ci - 1] == '\x1E') ci--;
                         clean_resp[ci] = '\0';
                         if (ret == ESP_OK) {
-                            resp_len = snprintf(resp_packet, 3072,
+                            resp_len = snprintf(resp_packet, 4096,
                                                 "CFLR:%d:OK:%s", stack_id, clean_resp);
                         } else {
                             if (ci > 0) {
-                                resp_len = snprintf(resp_packet, 3072,
+                                resp_len = snprintf(resp_packet, 4096,
                                                     "CFLR:%d:FAIL:%s:%s",
                                                     stack_id, esp_err_to_name(ret), clean_resp);
                             } else {
-                                resp_len = snprintf(resp_packet, 3072,
+                                resp_len = snprintf(resp_packet, 4096,
                                                     "CFLR:%d:FAIL:%s:NOREPLY",
                                                     stack_id, esp_err_to_name(ret));
                             }
                         }
                     }
 
-                    if (resp_len > 0 && resp_len < 3072) {
+                    if (resp_len > 0 && resp_len < 4096) {
                         if (!mcu_wan_enqueue_uplink(HANDLER_LORA,
                                                      (uint8_t *)resp_packet,
                                                      (uint16_t)resp_len)) {
@@ -415,18 +451,16 @@ static void lora_listener_task(void *pvParameters) {
                     : 0;
             }
             if (pkt_len > 0) {
-                if (!mcu_wan_enqueue_uplink(HANDLER_LORA,
-                                             (uint8_t *)evt_packet,
-                                             (uint16_t)pkt_len)) {
+                bool is_rxlrpkt = (strstr(clean_buf, "RXLRPKT") != NULL);
+                if (is_rxlrpkt) bench_count_lr_rx((uint16_t)recv_len);
+                if (!lora_enqueue_evt_chunks(stack_id, clean_buf)) {
 #if !BENCH_QUIET_LOG
                     ESP_LOGW(TAG, "[Stack %d] Failed to enqueue EVT to WAN", stack_id);
 #endif
-                    /* Count drop for any RXLRPKT event that was discarded */
-                    if (strstr(clean_buf, "RXLRPKT")) bench_count_lr_drop();
+                    if (is_rxlrpkt) bench_count_lr_drop();
                 } else {
                     ESP_LOGD(TAG, "[Stack %d] EVT forwarded: %s", stack_id, evt_packet);
-                    /* Count forwarded RXLRPKT events for firmware-side throughput */
-                    if (strstr(clean_buf, "RXLRPKT")) bench_count_lr((uint16_t)recv_len);
+                    if (is_rxlrpkt) bench_count_lr_fwd((uint16_t)recv_len);
                 }
             }
         } else if (ret == ESP_ERR_TIMEOUT) {
@@ -724,7 +758,8 @@ bool lora_handler_task_enqueue_uplink(uint8_t stack_id,
     lora_uplink_packet_t packet = {
         .stack_id     = stack_id,
         .timestamp_ms = xTaskGetTickCount() * portTICK_PERIOD_MS,
-        .payload_len  = (len > sizeof(packet.payload)) ? sizeof(packet.payload) : len,
+        .payload_len  = (len > LORA_UPLINK_PAYLOAD_MAX_LEN)
+                          ? LORA_UPLINK_PAYLOAD_MAX_LEN : len,
     };
     memcpy(packet.payload, data, packet.payload_len);
 
@@ -749,8 +784,8 @@ bool lora_handler_task_enqueue_downlink(const uint8_t *data, uint16_t len) {
     lora_downlink_packet_t packet = {
         .stack_id    = stack_id,
         .timeout_ms  = 1000,
-        .payload_len = ((uint16_t)(len - 1) > sizeof(packet.payload))
-                            ? sizeof(packet.payload) : (uint16_t)(len - 1),
+        .payload_len = ((uint16_t)(len - 1) > LORA_DOWNLINK_PAYLOAD_MAX_LEN)
+                            ? LORA_DOWNLINK_PAYLOAD_MAX_LEN : (uint16_t)(len - 1),
     };
     memcpy(packet.payload, &data[1], packet.payload_len);
 

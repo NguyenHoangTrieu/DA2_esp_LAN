@@ -10,6 +10,7 @@
 #include "stack_handler.h"
 #include "storage_handler.h"
 #include "wan_comm.h"
+#include "esp_heap_caps.h"
 #include <string.h>
 
 static const char *TAG = "WAN_UL";
@@ -18,11 +19,11 @@ static const char *TAG = "WAN_UL";
 
 #define UPLINK_TASK_STACK_SIZE 1024 * 16
 #define UPLINK_TASK_PRIORITY 5 // Lower than downlink
-/* Queue depth: each item is ~2 KB inline, so 50 items = ~103 KB of internal
- * RAM.  On NVS-restore boots module handlers allocate ~40+ KB before this
- * queue is created, causing xQueueCreate to fail.  5 items (~10 KB) is more
- * than sufficient — the SPI link can only transfer one packet per ~200 ms. */
-#define UPLINK_QUEUE_SIZE 5
+/* Queue item is ~2 KB inline. We keep control block in internal RAM but move
+ * queue storage to PSRAM via xQueueCreateStatic, allowing a deeper queue
+ * without exhausting internal heap during boot. */
+#define UPLINK_QUEUE_SIZE 32
+#define UPLINK_QUEUE_SEND_WAIT_MS 20
 #define MAX_PAYLOAD_SIZE 2048
 #define ACK_TIMEOUT_MS 2000  /* STM32 forwards DT to ThingsBoard via MQTT before ACKing; 200ms was too short */
 #define RTC_REQUEST_INTERVAL_MS 1000
@@ -61,6 +62,8 @@ extern bool g_handler_running;
 // MODULE STATE
 
 static QueueHandle_t g_uplink_queue = NULL;
+static StaticQueue_t *g_uplink_queue_tcb = NULL;
+static uint8_t *g_uplink_queue_storage = NULL;
 static TaskHandle_t g_uplink_task_handle = NULL;
 static StackType_t *g_uplink_stack = NULL;
 static StaticTask_t *g_uplink_tcb = NULL;
@@ -73,6 +76,8 @@ static uint32_t g_uplink_sent_count = 0;
 static uint32_t g_uplink_fail_count = 0;
 static uint32_t g_sd_backup_count = 0;
 static uint32_t g_sd_retry_success_count = 0;
+static uint32_t g_uplink_queue_drop_count = 0;
+static uint32_t g_uplink_queue_max_depth = 0;
 
 /* Shared with downlink task: tick when last CF command was dispatched.
  * Uplink task suppresses SD retry for CF_SD_SUPPRESS_MS after each CF dispatch
@@ -106,12 +111,34 @@ esp_err_t mcu_wan_handler_start_uplink_task(void) {
            UPLINK_TASK_PRIORITY);
   ESP_LOGI(TAG, "============================================");
 
-  // Create uplink queue
-  g_uplink_queue = xQueueCreate(UPLINK_QUEUE_SIZE, sizeof(uplink_item_t));
+  // Create uplink queue (storage in PSRAM, control block in internal RAM)
+  size_t q_bytes = UPLINK_QUEUE_SIZE * sizeof(uplink_item_t);
+  g_uplink_queue_storage = (uint8_t *)heap_caps_malloc(q_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  g_uplink_queue_tcb = (StaticQueue_t *)heap_caps_malloc(sizeof(StaticQueue_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+
+  if (g_uplink_queue_storage && g_uplink_queue_tcb) {
+    g_uplink_queue = xQueueCreateStatic(
+        UPLINK_QUEUE_SIZE,
+        sizeof(uplink_item_t),
+        g_uplink_queue_storage,
+        g_uplink_queue_tcb);
+  }
+
   if (!g_uplink_queue) {
+    if (g_uplink_queue_storage) {
+      heap_caps_free(g_uplink_queue_storage);
+      g_uplink_queue_storage = NULL;
+    }
+    if (g_uplink_queue_tcb) {
+      heap_caps_free(g_uplink_queue_tcb);
+      g_uplink_queue_tcb = NULL;
+    }
     ESP_LOGE(TAG, "Failed to create uplink queue");
     return ESP_FAIL;
   }
+
+  g_uplink_queue_drop_count = 0;
+  g_uplink_queue_max_depth = 0;
 
   // Stack shifted to PSRAM
   g_uplink_stack = (StackType_t *)heap_caps_malloc(UPLINK_TASK_STACK_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -122,6 +149,15 @@ esp_err_t mcu_wan_handler_start_uplink_task(void) {
       if (g_uplink_stack) heap_caps_free(g_uplink_stack);
       if (g_uplink_tcb) heap_caps_free(g_uplink_tcb);
       vQueueDelete(g_uplink_queue);
+      g_uplink_queue = NULL;
+      if (g_uplink_queue_storage) {
+        heap_caps_free(g_uplink_queue_storage);
+        g_uplink_queue_storage = NULL;
+      }
+      if (g_uplink_queue_tcb) {
+        heap_caps_free(g_uplink_queue_tcb);
+        g_uplink_queue_tcb = NULL;
+      }
       return ESP_FAIL;
   }
 
@@ -154,14 +190,23 @@ void mcu_wan_handler_stop_uplink_task(void) {
 
     ESP_LOGI(TAG, "Uplink task stopped");
     ESP_LOGI(TAG,
-             "Statistics: TX=%lu, FAIL=%lu, SD_BACKUP=%lu, SD_RETRY_OK=%lu",
+             "Statistics: TX=%lu, FAIL=%lu, SD_BACKUP=%lu, SD_RETRY_OK=%lu, Q_DROP=%lu, Q_MAX=%lu/%d",
              g_uplink_sent_count, g_uplink_fail_count, g_sd_backup_count,
-             g_sd_retry_success_count);
+             g_sd_retry_success_count,
+             g_uplink_queue_drop_count, g_uplink_queue_max_depth, UPLINK_QUEUE_SIZE);
   }
 
   if (g_uplink_queue) {
     vQueueDelete(g_uplink_queue);
     g_uplink_queue = NULL;
+  }
+  if (g_uplink_queue_storage) {
+    heap_caps_free(g_uplink_queue_storage);
+    g_uplink_queue_storage = NULL;
+  }
+  if (g_uplink_queue_tcb) {
+    heap_caps_free(g_uplink_queue_tcb);
+    g_uplink_queue_tcb = NULL;
   }
 }
 
@@ -192,11 +237,19 @@ bool mcu_wan_enqueue_uplink(handler_id_t source_id, uint8_t *data,
     xSemaphoreGive(g_rtc_mutex);
   }
 
-  if (xQueueSend(g_uplink_queue, &item, pdMS_TO_TICKS(100)) != pdTRUE) {
+  if (xQueueSend(g_uplink_queue, &item, pdMS_TO_TICKS(UPLINK_QUEUE_SEND_WAIT_MS)) != pdTRUE) {
+    g_uplink_queue_drop_count++;
 #if !BENCH_QUIET_LOG
     ESP_LOGW(TAG, "Uplink queue full");
 #endif
     return false;
+  }
+
+  {
+    UBaseType_t q_now = uxQueueMessagesWaiting(g_uplink_queue);
+    if ((uint32_t)q_now > g_uplink_queue_max_depth) {
+      g_uplink_queue_max_depth = (uint32_t)q_now;
+    }
   }
 
 #if !BENCH_QUIET_LOG
@@ -333,6 +386,13 @@ static void uplink_handler_task(void *pvParameters) {
           ESP_LOGW(TAG, "Internet offline, saving to SD card");
           storage_handler_save(packet, packet_len);
           g_sd_backup_count++;
+        }
+      }
+
+      {
+        UBaseType_t q_now = uxQueueMessagesWaiting(g_uplink_queue);
+        if ((uint32_t)q_now > g_uplink_queue_max_depth) {
+          g_uplink_queue_max_depth = (uint32_t)q_now;
         }
       }
 

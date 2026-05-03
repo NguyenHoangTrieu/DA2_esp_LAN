@@ -15,6 +15,9 @@
 extern "C" {
 #endif
 
+#define LORA_UPLINK_PAYLOAD_MAX_LEN 1024
+#define LORA_DOWNLINK_PAYLOAD_MAX_LEN 1024
+
 /* ===== Type Definitions ===== */
 
 /**
@@ -23,7 +26,7 @@ extern "C" {
 typedef struct {
     uint8_t  stack_id;          ///< Stack ID (0 or 1)
     uint32_t timestamp_ms;      ///< Timestamp (ms since boot)
-    uint8_t  payload[256];      ///< Sensor data or command response
+    uint8_t  payload[LORA_UPLINK_PAYLOAD_MAX_LEN];      ///< Sensor data or command response
     uint16_t payload_len;       ///< Payload length
 } lora_uplink_packet_t;
 
@@ -33,7 +36,7 @@ typedef struct {
 typedef struct {
     uint8_t  stack_id;          ///< Stack ID (0 or 1)
     uint32_t timeout_ms;        ///< Send timeout
-    uint8_t  payload[256];      ///< Command or binary data
+    uint8_t  payload[LORA_DOWNLINK_PAYLOAD_MAX_LEN];      ///< Command or binary data
     uint16_t payload_len;       ///< Payload length
 } lora_downlink_packet_t;
 

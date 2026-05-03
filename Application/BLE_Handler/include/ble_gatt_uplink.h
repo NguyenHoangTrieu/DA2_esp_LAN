@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-#define BLE_GATT_UPLINK_QUEUE_DEPTH  16
+#define BLE_GATT_UPLINK_QUEUE_DEPTH  64
 #define BLE_GATT_UPLINK_MSG_MAX      2048
 
 /**

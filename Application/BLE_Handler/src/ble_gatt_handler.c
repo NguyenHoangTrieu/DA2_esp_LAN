@@ -551,22 +551,49 @@ static void gattc_event_cb(esp_gattc_cb_event_t event,
         if (idx < 0) break;
         ble_gatt_device_t *dev = &s_devices[idx];
 
+        /* Raw BLE side metric (DLE throughput): count full payload as received
+         * from peer before uplink formatting/queue bottlenecks are applied. */
+        bench_count_ble_rx((uint16_t)param->notify.value_len);
+
         const char *type = param->notify.is_notify ? "NOTIFY" : "INDICATE";
-        /* Encode first 64 bytes as hex */
-        char hex[256] = {0};
+        /* Build uplink payload in heap (PSRAM) to avoid large stack use in BTC_TASK. */
+        char head[32];
+        int head_len = snprintf(head, sizeof(head), "%s:%d:0x%04X:",
+                                type, idx, param->notify.handle);
+        if (head_len < 0 || head_len >= (int)sizeof(head)) break;
+
+        uint16_t max_copy_len = (uint16_t)((BLE_GATT_UPLINK_MSG_MAX - 1 - head_len) / 2);
         uint16_t copy_len = param->notify.value_len;
-        if (copy_len > 64) copy_len = 64;
+        if (copy_len > max_copy_len) copy_len = max_copy_len;
+
+        size_t msg_len = (size_t)head_len + ((size_t)copy_len * 2);
+        char *ok = (char *)heap_caps_malloc(msg_len + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!ok) {
+#if !BENCH_QUIET_LOG
+            ESP_LOGW(TAG, "[NOTIFY] alloc failed, len=%u", (unsigned)copy_len);
+#endif
+            bench_count_ble_drop();
+            break;
+        }
+
+        memcpy(ok, head, (size_t)head_len);
+        char *hex = ok + head_len;
         for (uint16_t i = 0; i < copy_len; i++) {
             snprintf(&hex[i * 2], 3, "%02X", param->notify.value[i]);
         }
-        char ok[320];
-        snprintf(ok, sizeof(ok), "%s:%d:0x%04X:%s",
-                 type, idx, param->notify.handle, hex);
+        ok[msg_len] = '\0';
 #if !BENCH_QUIET_LOG
-        ESP_LOGI(TAG, "[NOTIFY] dev[%d] handle=0x%04X len=%u data=%s",
-                 idx, param->notify.handle, param->notify.value_len, hex);
+        ESP_LOGI(TAG, "[NOTIFY] dev[%d] handle=0x%04X raw_len=%u enc_len=%u",
+                 idx, param->notify.handle,
+                 (unsigned)param->notify.value_len,
+                 (unsigned)copy_len);
 #endif
-        ble_gatt_uplink_send_ok(dev->stack_id, ok);
+        if (ble_gatt_uplink_send_ok(dev->stack_id, ok) == ESP_OK) {
+            /* Forwarded-side metric in raw payload bytes (not ASCII frame size)
+             * so BLE_FWD is directly comparable with BLE_RX. */
+            bench_count_ble(copy_len);
+        }
+        heap_caps_free(ok);
         break;
     }
 
