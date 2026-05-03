@@ -395,16 +395,13 @@ static void lora_listener_task(void *pvParameters) {
 
     ESP_LOGI(TAG, "[Stack %d] LoRa listener task started", stack_id);
 
-    /* hex_str is only needed in HEX mode but allocate regardless for simplicity */
     char *listen_buf = (char *)malloc(LORA_LISTEN_BUFFER_SIZE);
-    char *clean_buf  = (char *)malloc(LORA_LISTEN_BUFFER_SIZE * 3);  /* larger for hex output */
-    char *evt_packet = (char *)malloc(LORA_LISTEN_BUFFER_SIZE * 3 + 32);
+    char *clean_buf  = (char *)malloc(LORA_LISTEN_BUFFER_SIZE * 3);
 
-    if (!listen_buf || !clean_buf || !evt_packet) {
+    if (!listen_buf || !clean_buf) {
         ESP_LOGE(TAG, "[Stack %d] Failed to alloc listener buffers", stack_id);
         free(listen_buf);
         free(clean_buf);
-        free(evt_packet);
         vTaskDelete(NULL);
         return;
     }
@@ -416,16 +413,18 @@ static void lora_listener_task(void *pvParameters) {
                                              LORA_LISTEN_BUFFER_SIZE - 1, &recv_len);
 
         if (ret == ESP_OK && recv_len > 0) {
-            int pkt_len;
+            const char *fwd_str;
+            int fwd_len;
+
             if (hex_mode) {
                 lora_bytes_to_hex_str((const uint8_t *)listen_buf, recv_len,
                                       clean_buf, LORA_LISTEN_BUFFER_SIZE * 3);
+                fwd_str = clean_buf;
+                fwd_len = (int)strlen(clean_buf);
 #if !BENCH_QUIET_LOG
                 ESP_LOGI(TAG, "[Stack %d] Listener RX %u bytes (HEX): %s",
                          stack_id, (unsigned)recv_len, clean_buf);
 #endif
-                pkt_len = snprintf(evt_packet, LORA_LISTEN_BUFFER_SIZE * 3 + 32,
-                                   "CFLR:%d:EVT:%s", stack_id, clean_buf);
             } else {
                 /* ASCII/AT mode: normalise \r\n to \x1E */
                 int ci = 0;
@@ -441,26 +440,23 @@ static void lora_listener_task(void *pvParameters) {
                 }
                 while (ci > 0 && clean_buf[ci - 1] == '\x1E') ci--;
                 clean_buf[ci] = '\0';
+                fwd_str = clean_buf;
+                fwd_len = ci;
 #if !BENCH_QUIET_LOG
                 ESP_LOGI(TAG, "[Stack %d] Listener RX %u bytes (ASCII): %s",
                          stack_id, (unsigned)recv_len, clean_buf);
 #endif
-                pkt_len = (ci > 0)
-                    ? snprintf(evt_packet, LORA_LISTEN_BUFFER_SIZE * 3 + 32,
-                               "CFLR:%d:EVT:%s", stack_id, clean_buf)
-                    : 0;
             }
-            if (pkt_len > 0) {
-                bool is_rxlrpkt = (strstr(clean_buf, "RXLRPKT") != NULL);
-                if (is_rxlrpkt) bench_count_lr_rx((uint16_t)recv_len);
-                if (!lora_enqueue_evt_chunks(stack_id, clean_buf)) {
+
+            if (fwd_len > 0) {
+                bench_count_lr_rx((uint16_t)recv_len);
+                if (!lora_enqueue_evt_chunks(stack_id, fwd_str)) {
 #if !BENCH_QUIET_LOG
                     ESP_LOGW(TAG, "[Stack %d] Failed to enqueue EVT to WAN", stack_id);
 #endif
-                    if (is_rxlrpkt) bench_count_lr_drop();
+                    bench_count_lr_drop();
                 } else {
-                    ESP_LOGD(TAG, "[Stack %d] EVT forwarded: %s", stack_id, evt_packet);
-                    if (is_rxlrpkt) bench_count_lr_fwd((uint16_t)recv_len);
+                    bench_count_lr_fwd((uint16_t)recv_len);
                 }
             }
         } else if (ret == ESP_ERR_TIMEOUT) {
@@ -475,7 +471,6 @@ static void lora_listener_task(void *pvParameters) {
     ESP_LOGI(TAG, "[Stack %d] LoRa listener task exiting", stack_id);
     free(listen_buf);
     free(clean_buf);
-    free(evt_packet);
     vTaskDelete(NULL);
 }
 

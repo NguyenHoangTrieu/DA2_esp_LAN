@@ -1283,16 +1283,20 @@ esp_err_t lora_handler_listen(uint8_t stack_id, char *buf, size_t max,
         return ESP_ERR_INVALID_STATE;
     }
 
-    /* Non-blocking trylock – if command task holds the bus, yield immediately */
-    if (xSemaphoreTake(g_lora_bus_mutex[stack_id], pdMS_TO_TICKS(50)) != pdTRUE) {
+    /* Trylock with a generous window so the listener does not starve.
+     * The downlink task holds the mutex only during command execution
+     * (~640 ms for RXLRPKT). Between commands the bus is free. */
+    if (xSemaphoreTake(g_lora_bus_mutex[stack_id], pdMS_TO_TICKS(200)) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
     }
 
     uint8_t   chunk[LORA_RESPONSE_CHUNK];
     size_t    chunk_len = 0;
-    /* 100 ms read window (wider than BLE's 50 ms for slower LoRa bus) */
+    /* 200 ms window: wide enough to capture the Wio-E5 unsolicited
+     * "+TEST: RX\"...\"" line which arrives ~Time-on-Air (~97 ms for
+     * 50-byte payload at SF7/125 kHz) after the transmitted packet. */
     esp_err_t ret = module_bus_read(stack_id, port_type, chunk,
-                                    sizeof(chunk) - 1, 100, &chunk_len);
+                                    sizeof(chunk) - 1, 200, &chunk_len);
 
     if (chunk_len > 0) {
         size_t copy_len = (chunk_len < max - 1) ? chunk_len : max - 1;

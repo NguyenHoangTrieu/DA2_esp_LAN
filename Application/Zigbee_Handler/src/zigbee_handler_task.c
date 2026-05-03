@@ -354,48 +354,39 @@ static void zigbee_listener_task(void *pv) {
                                           ZIGBEE_LISTEN_BUFFER_SIZE, &recv_len);
 
     if (ret == ESP_OK && recv_len > 0) {
+      /* Determine the string to forward — HEX-encode binary frames,
+       * null-terminate ASCII frames. No content filtering: everything
+       * the module sends is transparently forwarded to the WAN MCU.
+       * This keeps the listener protocol-agnostic across all module types. */
+      const char *fwd_str;
       if (hex_mode) {
-        /* HEX mode: format bytes as space-separated hex, log & forward */
         bytes_to_hex_str(listen_buf, recv_len, hex_str,
                          ZIGBEE_LISTEN_BUFFER_SIZE * 3 + 8);
+        fwd_str = hex_str;
 #if !BENCH_QUIET_LOG
         ESP_LOGI(TAG, "[Stack %d] Listener RX %u bytes (HEX): %s", sid,
-                 (unsigned)recv_len, hex_str);
+                 (unsigned)recv_len, fwd_str);
 #endif
-        bench_count_zb_rx((uint16_t)recv_len);
-        if (!zigbee_enqueue_evt_chunks(sid, hex_str)) {
-#if !BENCH_QUIET_LOG
-          ESP_LOGW(TAG, "[Stack %d] EVT enqueue failed", sid);
-#endif
-          bench_count_zb_drop();
-        } else {
-          bench_count_zb_fwd((uint16_t)recv_len);
-        }
       } else {
-        /* ASCII/AT mode: forward as-is text */
         listen_buf[recv_len < ZIGBEE_LISTEN_BUFFER_SIZE
                        ? recv_len
                        : ZIGBEE_LISTEN_BUFFER_SIZE - 1] = '\0';
+        fwd_str = (const char *)listen_buf;
 #if !BENCH_QUIET_LOG
         ESP_LOGI(TAG, "[Stack %d] Listener RX %u bytes (ASCII): %s", sid,
-                 (unsigned)recv_len, (char *)listen_buf);
+                 (unsigned)recv_len, fwd_str);
 #endif
-        if (recv_len > 0) {
-          bool is_rpt = (strstr((char *)listen_buf, "RPT:") != NULL ||
-                         strstr((char *)listen_buf, "+ATTRREPORT") != NULL);
-          if (is_rpt)
-            bench_count_zb_rx((uint16_t)recv_len);
-          if (!zigbee_enqueue_evt_chunks(sid, (char *)listen_buf)) {
+      }
+
+      /* Count all received data, then forward unconditionally */
+      bench_count_zb_rx((uint16_t)recv_len);
+      if (!zigbee_enqueue_evt_chunks(sid, fwd_str)) {
 #if !BENCH_QUIET_LOG
-            ESP_LOGW(TAG, "[Stack %d] EVT enqueue failed", sid);
+        ESP_LOGW(TAG, "[Stack %d] EVT enqueue failed", sid);
 #endif
-            if (is_rpt)
-              bench_count_zb_drop();
-          } else {
-            if (is_rpt)
-              bench_count_zb_fwd((uint16_t)recv_len);
-          }
-        }
+        bench_count_zb_drop();
+      } else {
+        bench_count_zb_fwd((uint16_t)recv_len);
       }
     } else if (ret == ESP_ERR_TIMEOUT) {
       vTaskDelay(pdMS_TO_TICKS(20));
