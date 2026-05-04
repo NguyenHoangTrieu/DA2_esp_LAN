@@ -126,6 +126,42 @@ uint8_t ble_gatt_handler_max_connections(void) {
     return limit;
 }
 
+static void report_connected_state(int idx,
+                                   ble_gatt_device_t *dev,
+                                   esp_gatt_if_t gattc_if,
+                                   uint16_t conn_id,
+                                   bool force_report)
+{
+    bool newly_connected = (dev->conn_id != conn_id) || (dev->gattc_if != gattc_if);
+
+    dev->conn_id  = conn_id;
+    dev->gattc_if = gattc_if;
+
+    if (newly_connected) {
+        ble_gatt_stack_config_t *cfg = ble_gatt_config_get(dev->stack_id);
+        if (cfg) {
+            esp_ble_conn_update_params_t conn_params = {
+                .min_int  = cfg->connection.interval_min,
+                .max_int  = cfg->connection.interval_max,
+                .latency  = cfg->connection.latency,
+                .timeout  = cfg->connection.supervision_timeout,
+            };
+            memcpy(conn_params.bda, dev->addr, ESP_BD_ADDR_LEN);
+            esp_ble_gap_update_conn_params(&conn_params);
+        }
+
+        /* Request MTU negotiation (optional, up to 512 bytes) */
+        esp_ble_gattc_send_mtu_req(gattc_if, dev->conn_id);
+    }
+
+    if (newly_connected || force_report) {
+        char ok[80];
+        snprintf(ok, sizeof(ok), "CONNECTED:%d:0x%04X:" MACSTR,
+                 idx, dev->conn_id, MAC2STR(dev->addr));
+        ble_gatt_uplink_send_ok(dev->stack_id, ok);
+    }
+}
+
 void ble_gatt_handler_clear_devices(void) {
     for (int i = 0; i < BLE_GATT_MAX_DEVICES; i++) {
         /* Skip slots that have an active BLE connection.
@@ -336,6 +372,21 @@ static void gattc_event_cb(esp_gattc_cb_event_t event,
         }
         break;
 
+    case ESP_GATTC_CONNECT_EVT: {
+        int idx = find_by_addr(param->connect.remote_bda);
+        if (idx < 0) {
+            ESP_LOGW(TAG, "CONNECT_EVT: unknown device " MACSTR,
+                     MAC2STR(param->connect.remote_bda));
+            break;
+        }
+
+        ESP_LOGI(TAG, "CONNECT_EVT: idx=%d connId=0x%04X",
+                 idx, param->connect.conn_id);
+        report_connected_state(idx, &s_devices[idx], gattc_if,
+                               param->connect.conn_id, false);
+        break;
+    }
+
     case ESP_GATTC_OPEN_EVT: {
         int idx = find_by_addr(param->open.remote_bda);
         if (idx < 0) {
@@ -354,12 +405,8 @@ static void gattc_event_cb(esp_gattc_cb_event_t event,
             if (param->open.status == ESP_GATT_ALREADY_OPEN) {
                 ESP_LOGW(TAG, "OPEN_EVT: already open idx=%d — recovering connId=0x%04X",
                          idx, param->open.conn_id);
-                dev->conn_id  = param->open.conn_id;
-                dev->gattc_if = gattc_if;
-                char ok[80];
-                snprintf(ok, sizeof(ok), "CONNECTED:%d:0x%04X:" MACSTR,
-                         idx, dev->conn_id, MAC2STR(dev->addr));
-                ble_gatt_uplink_send_ok(dev->stack_id, ok);
+                report_connected_state(idx, dev, gattc_if,
+                                       param->open.conn_id, true);
             } else {
                 ESP_LOGE(TAG, "Connect failed: status=%d", param->open.status);
                 char fail[48];
@@ -369,29 +416,7 @@ static void gattc_event_cb(esp_gattc_cb_event_t event,
             }
             break;
         }
-        dev->conn_id  = param->open.conn_id;
-        dev->gattc_if = gattc_if;
-
-        /* Apply connection parameters now that the link is established */
-        ble_gatt_stack_config_t *cfg = ble_gatt_config_get(dev->stack_id);
-        if (cfg) {
-            esp_ble_conn_update_params_t conn_params = {
-                .min_int  = cfg->connection.interval_min,
-                .max_int  = cfg->connection.interval_max,
-                .latency  = cfg->connection.latency,
-                .timeout  = cfg->connection.supervision_timeout,
-            };
-            memcpy(conn_params.bda, dev->addr, ESP_BD_ADDR_LEN);
-            esp_ble_gap_update_conn_params(&conn_params);
-        }
-
-        char ok[80];
-        snprintf(ok, sizeof(ok), "CONNECTED:%d:0x%04X:" MACSTR,
-                 idx, dev->conn_id, MAC2STR(dev->addr));
-        ble_gatt_uplink_send_ok(dev->stack_id, ok);
-
-        /* Request MTU negotiation (optional, up to 512 bytes) */
-        esp_ble_gattc_send_mtu_req(gattc_if, dev->conn_id);
+        report_connected_state(idx, dev, gattc_if, param->open.conn_id, false);
         break;
     }
 

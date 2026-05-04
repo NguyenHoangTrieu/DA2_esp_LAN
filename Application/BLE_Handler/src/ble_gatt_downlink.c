@@ -244,6 +244,14 @@ static void handle_connect(uint8_t stack_id, const char *params) {
     if (ble_gatt_handler_find_by_addr(addr, &existing_idx) == ESP_OK) {
         ble_gatt_device_t *existing = ble_gatt_handler_get_device(existing_idx);
         already_connected = (existing && existing->conn_id != 0xFFFF);
+        if (already_connected && existing) {
+            existing->stack_id = stack_id;
+            char ok[80];
+            snprintf(ok, sizeof(ok), "CONNECTED:%d:0x%04X:" MACSTR,
+                     existing_idx, existing->conn_id, MAC2STR(existing->addr));
+            ble_gatt_uplink_send_ok(stack_id, ok);
+            return;
+        }
     }
 
     if (!already_connected) {
@@ -308,10 +316,13 @@ static void handle_connect(uint8_t stack_id, const char *params) {
         return;
     }
 
-    /* Connection params are applied in OPEN_EVT success handler, after the
-     * link is established. Calling gap_update_conn_params here would fail
-     * because L2CAP does not know the BD_ADDR until the connection is up. */
-    /* No CONNECTING ack here — OPEN_EVT will send CONNECTED once established */
+    /* Connection params are applied in CONNECT_EVT/OPEN_EVT after the link is
+     * established. Send an immediate CONNECTING ack so the widget can stop
+     * waiting on the RPC transport while the BLE controller finishes opening. */
+    char ok[64];
+    snprintf(ok, sizeof(ok), "CONNECTING:%d:" MACSTR,
+             slot_idx, MAC2STR(addr));
+    ble_gatt_uplink_send_ok(stack_id, ok);
 }
 
 /* CFBG:<slot>:DISCONNECT:<idx> */
