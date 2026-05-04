@@ -28,6 +28,8 @@ static const char *TAG = "bench_ctr";
 
 #define BENCH_TASK_STACK_WORDS  (4096 / sizeof(StackType_t))
 
+#if BENCH_ENABLE
+
 /* ---------- Counters (portMUX protected) ---------- */
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -156,8 +158,8 @@ static void bench_reporter_task(void *arg) {
             const float ble_pps  = interval_s > 0.0f ? ((float)ble_pkt) / interval_s : 0.0f;
             const float zb_rx_pps = interval_s > 0.0f ? ((float)zb_rx_pkt) / interval_s : 0.0f;
             const float zb_pps   = interval_s > 0.0f ? ((float)zb_pkt) / interval_s : 0.0f;
-            const float lr_rx_pps = interval_s > 0.0f ? ((float)lr_rx_pkt) / interval_s : 0.0f;
-            const float lr_pps   = interval_s > 0.0f ? ((float)lr_pkt) / interval_s : 0.0f;
+            const float lr_rx_cps = interval_s > 0.0f ? ((float)lr_rx_pkt) / interval_s : 0.0f;
+            const float lr_cps   = interval_s > 0.0f ? ((float)lr_pkt) / interval_s : 0.0f;
             const float ble_fwd_ratio = (ble_rx_b > 0) ? (((float)ble_b * 100.0f) / (float)ble_rx_b) : 0.0f;
             const float ble_drop_ratio = (ble_rx_pkt > 0) ? (((float)ble_drop * 100.0f) / (float)ble_rx_pkt) : 0.0f;
             const float zb_fwd_ratio = (zb_rx_b > 0) ? (((float)zb_b * 100.0f) / (float)zb_rx_b) : 0.0f;
@@ -174,8 +176,8 @@ static void bench_reporter_task(void *arg) {
                      "BLE_FWD pkt=%lu b=%lu drop=%lu pps=%.1f kbps=%.1f fwd=%.1f%% drop=%.1f%% | "
                      "ZB_RX pkt=%lu b=%lu pps=%.1f kbps=%.1f | "
                      "ZB_FWD pkt=%lu b=%lu drop=%lu pps=%.1f kbps=%.1f fwd=%.1f%% drop=%.1f%% | "
-                     "LR_RX pkt=%lu b=%lu pps=%.1f kbps=%.1f | "
-                     "LR_FWD pkt=%lu b=%lu drop=%lu pps=%.1f kbps=%.1f fwd=%.1f%% drop=%.1f%% | "
+                     "LR_RX chunk=%lu b=%lu cps=%.1f kbps_raw=%.1f | "
+                     "LR_FWD chunk=%lu b=%lu drop=%lu cps=%.1f kbps_raw=%.1f fwd=%.1f%% drop=%.1f%% | "
                      "AGG pkt=%lu b=%lu drop=%lu kbps=%.1f",
                      BENCH_REPORT_INTERVAL_MS,
                      (unsigned long)ble_rx_pkt, (unsigned long)ble_rx_b, ble_rx_pps, ble_rx_kbps,
@@ -184,9 +186,9 @@ static void bench_reporter_task(void *arg) {
                      (unsigned long)zb_rx_pkt, (unsigned long)zb_rx_b, zb_rx_pps, zb_rx_kbps,
                      (unsigned long)zb_pkt,  (unsigned long)zb_b,  (unsigned long)zb_drop,
                      zb_pps,  zb_kbps, zb_fwd_ratio, zb_drop_ratio,
-                     (unsigned long)lr_rx_pkt, (unsigned long)lr_rx_b, lr_rx_pps, lr_rx_kbps,
+                     (unsigned long)lr_rx_pkt, (unsigned long)lr_rx_b, lr_rx_cps, lr_rx_kbps,
                      (unsigned long)lr_pkt,  (unsigned long)lr_b,  (unsigned long)lr_drop,
-                     lr_pps,  lr_kbps, lr_fwd_ratio, lr_drop_ratio,
+                     lr_cps,  lr_kbps, lr_fwd_ratio, lr_drop_ratio,
                      (unsigned long)agg_pkt, (unsigned long)agg_b, (unsigned long)agg_drop, agg_kbps);
         }
     }
@@ -238,3 +240,24 @@ esp_err_t bench_task_start(void) {
 void bench_task_stop(void) {
     s_running = false;
 }
+
+#else
+
+void bench_count_ble(uint16_t payload_bytes) { (void)payload_bytes; }
+void bench_count_ble_rx(uint16_t payload_bytes) { (void)payload_bytes; }
+void bench_count_zb_rx(uint16_t payload_bytes) { (void)payload_bytes; }
+void bench_count_zb_fwd(uint16_t payload_bytes) { (void)payload_bytes; }
+void bench_count_lr_rx(uint16_t payload_bytes) { (void)payload_bytes; }
+void bench_count_lr_fwd(uint16_t payload_bytes) { (void)payload_bytes; }
+void bench_count_ble_drop(void) {}
+void bench_count_zb_drop(void) {}
+void bench_count_lr_drop(void) {}
+
+esp_err_t bench_task_start(void) {
+    ESP_LOGI(TAG, "Benchmark disabled (BENCH_ENABLE=0)");
+    return ESP_OK;
+}
+
+void bench_task_stop(void) {}
+
+#endif

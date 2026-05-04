@@ -28,6 +28,13 @@ extern "C" {
 #define BENCH_REPORT_INTERVAL_MS 2000
 
 /**
+ * @brief Master switch for benchmark counters/reporter.
+ *        1 = enable benchmark counting + periodic BENCH log.
+ *        0 = compile benchmark API as no-op (similar to disabling logs).
+ */
+#define BENCH_ENABLE 1
+
+/**
  * @brief Set to 1 to suppress high-frequency data-path log spam during
  *        benchmark runs (NOTIFY dumps, "Transmit attempt", "ACK received",
  *        "Uplink queued/processing", listener RX dumps, queue-full warnings).
@@ -60,10 +67,10 @@ void bench_count_zb_fwd(uint16_t payload_bytes);
 /** Call when a Zigbee benchmark event is received from the module before uplink formatting. */
 void bench_count_zb_rx(uint16_t payload_bytes);
 
-/** Call when a LoRa RXLRPKT event is successfully forwarded upstream. */
+/** Call when LoRa listener data chunk is successfully forwarded upstream. */
 void bench_count_lr_fwd(uint16_t payload_bytes);
 
-/** Call when a LoRa RXLRPKT event is received from the module before uplink formatting. */
+/** Call when LoRa listener data chunk is received from module ingress. */
 void bench_count_lr_rx(uint16_t payload_bytes);
 
 /** Call when a BLE GATT uplink packet is dropped (queue full). */
