@@ -3,7 +3,7 @@
  * @brief BLE GATT Central — GAP + GATTC stack init and event callbacks.
  *
  * Implements the full BLE GATT Central role using ESP-IDF Bluedroid APIs.
- * Manages a 8-slot device table for scanned and connected devices.
+ * Manages a configurable device table for scanned and connected devices.
  * All operation results are forwarded to WAN MCU via ble_gatt_uplink.
  *
  * Coexistence note: This module uses esp_ble_gap_register_callback() and
@@ -22,6 +22,7 @@
 #include "ble_gatt_config.h"
 #include "ble_gatt_uplink.h"
 #include "ble_gatt_downlink.h"
+#include "sdkconfig.h"
 #include "bench_counter.h"
 #include "esp_log.h"
 #include "esp_bt.h"
@@ -91,6 +92,38 @@ static int find_by_conn_id(uint16_t conn_id) {
         if (s_devices[i].valid && s_devices[i].conn_id == conn_id) return i;
     }
     return -1;
+}
+
+static uint8_t count_connected_devices(void) {
+    uint8_t count = 0;
+    for (int i = 0; i < BLE_GATT_MAX_DEVICES; i++) {
+        if (s_devices[i].valid && s_devices[i].conn_id != 0xFFFF) {
+            count++;
+        }
+    }
+    return count;
+}
+
+uint8_t ble_gatt_handler_count_connected(void) {
+    return count_connected_devices();
+}
+
+uint8_t ble_gatt_handler_max_connections(void) {
+    uint8_t limit = BLE_GATT_MAX_DEVICES;
+
+#if defined(CONFIG_BT_ACL_CONNECTIONS)
+    if ((uint8_t)CONFIG_BT_ACL_CONNECTIONS < limit) {
+        limit = (uint8_t)CONFIG_BT_ACL_CONNECTIONS;
+    }
+#endif
+
+#if defined(CONFIG_BT_CTRL_BLE_MAX_ACT)
+    if ((uint8_t)CONFIG_BT_CTRL_BLE_MAX_ACT < limit) {
+        limit = (uint8_t)CONFIG_BT_CTRL_BLE_MAX_ACT;
+    }
+#endif
+
+    return limit;
 }
 
 void ble_gatt_handler_clear_devices(void) {
@@ -696,6 +729,25 @@ esp_err_t ble_gatt_handler_init(void) {
 
     ret = ble_gatt_downlink_task_start();
     if (ret != ESP_OK) return ret;
+
+#if defined(CONFIG_BT_ACL_CONNECTIONS)
+    const unsigned acl_limit = CONFIG_BT_ACL_CONNECTIONS;
+#else
+    const unsigned acl_limit = 0;
+#endif
+
+#if defined(CONFIG_BT_CTRL_BLE_MAX_ACT)
+    const unsigned ctrl_limit = CONFIG_BT_CTRL_BLE_MAX_ACT;
+#else
+    const unsigned ctrl_limit = 0;
+#endif
+
+    ESP_LOGI(TAG,
+             "BLE GATT capacity: slots=%u acl=%u ctrl_act=%u usable_conn=%u",
+             (unsigned)BLE_GATT_MAX_DEVICES,
+             acl_limit,
+             ctrl_limit,
+             (unsigned)ble_gatt_handler_max_connections());
 
     s_initialized = true;
     ESP_LOGI(TAG, "BLE GATT Central initialized (CFBG: prefix ready)");

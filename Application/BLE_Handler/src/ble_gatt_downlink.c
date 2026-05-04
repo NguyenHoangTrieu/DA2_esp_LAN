@@ -239,6 +239,28 @@ static void handle_connect(uint8_t stack_id, const char *params) {
         return;
     }
 
+    bool already_connected = false;
+    uint8_t existing_idx = 0;
+    if (ble_gatt_handler_find_by_addr(addr, &existing_idx) == ESP_OK) {
+        ble_gatt_device_t *existing = ble_gatt_handler_get_device(existing_idx);
+        already_connected = (existing && existing->conn_id != 0xFFFF);
+    }
+
+    if (!already_connected) {
+        uint8_t connected_count = ble_gatt_handler_count_connected();
+        uint8_t max_connections = ble_gatt_handler_max_connections();
+        if (connected_count >= max_connections) {
+            char fail[48];
+            ESP_LOGW(TAG,
+                     "Rejecting connect " MACSTR ": connected=%u limit=%u",
+                     MAC2STR(addr), connected_count, max_connections);
+            snprintf(fail, sizeof(fail), "CONNECT:MAX_CONN_REACHED:%u",
+                     max_connections);
+            ble_gatt_uplink_send_fail(stack_id, fail);
+            return;
+        }
+    }
+
     /* Find or create device slot */
     uint8_t slot_idx;
     if (ble_gatt_handler_find_by_addr(addr, &slot_idx) != ESP_OK) {

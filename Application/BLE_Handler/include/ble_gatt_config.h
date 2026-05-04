@@ -27,7 +27,7 @@ extern "C" {
  * Sizing constants
  * -------------------------------------------------------------------------- */
 #define BLE_GATT_MAX_STACKS      2   /**< Parallel GATT Central stacks */
-#define BLE_GATT_MAX_DEVICES     32  /**< Scanned / connected device slots (PSRAM) */
+#define BLE_GATT_MAX_DEVICES     32  /**< App-side scan/cache slots, not controller link budget */
 #define BLE_GATT_MAX_CHARS       32  /**< Per-device characteristic cache */
 #define BLE_GATT_DEV_NAME_LEN    32  /**< Max device name length          */
 #define BLE_GATT_MAX_SERVICES    12  /**< Per-device service cache         */
@@ -84,7 +84,7 @@ typedef struct {
 } ble_gatt_svc_entry_t;
 
 /* --------------------------------------------------------------------------
- * Per-device entry (index 0-7, mirroring AT+LIST from STM32 module)
+ * Per-device entry in the scan/cache table.
  * -------------------------------------------------------------------------- */
 typedef struct {
     esp_bd_addr_t       addr;

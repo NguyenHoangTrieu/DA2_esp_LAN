@@ -3,7 +3,7 @@
  * @brief BLE GATT Central handler — public interface.
  *
  * Owns the ESP Bluedroid GAP + GATTC stack initialization.
- * Manages a device table (up to 8 entries) for scanned/connected devices.
+ * Manages a device table sized by BLE_GATT_MAX_DEVICES for scanned/connected devices.
  * Delegates config parsing to ble_gatt_config, command execution to
  * ble_gatt_downlink, and response reporting to ble_gatt_uplink.
  *
@@ -101,6 +101,16 @@ ble_gatt_device_t *ble_gatt_handler_get_device(uint8_t idx);
  * @brief Get the GATTC interface (filled after esp_ble_gattc_app_register).
  */
 esp_gatt_if_t ble_gatt_handler_get_if(void);
+
+/**
+ * @brief Count active BLE GATT connections currently tracked in the device table.
+ */
+uint8_t ble_gatt_handler_count_connected(void);
+
+/**
+ * @brief Return the effective concurrent connection limit from firmware config.
+ */
+uint8_t ble_gatt_handler_max_connections(void);
 
 /**
  * @brief Report scan results to server — called from GAP callback.
