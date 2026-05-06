@@ -40,7 +40,7 @@ extern "C" {
  *        "Uplink queued/processing", listener RX dumps, queue-full warnings).
  *        Set to 0 to restore full verbose output for debugging.
  */
-#define BENCH_QUIET_LOG  1
+#define BENCH_QUIET_LOG  0
 
 /**
  * @brief Start the periodic benchmark reporter task.
