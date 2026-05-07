@@ -165,7 +165,7 @@ esp_err_t tca_set_pin_verified_inst(tca6416a_inst_t *inst, tca_port_t port,
         if (ret != ESP_OK) return ret;
         bool got = (readback & (1u << pin)) != 0;
         if (got == level) {
-            ESP_LOGI(TAG, "[0x%02X] P%d_%d = %d VERIFIED (reg=0x%02X)",
+            ESP_LOGD(TAG, "[0x%02X] P%d_%d = %d VERIFIED (reg=0x%02X)",
                      inst->i2c_addr, port, pin, level, readback);
         } else {
             ESP_LOGE(TAG, "[0x%02X] P%d_%d VERIFY FAILED: expected %d got %d (reg=0x%02X)",
