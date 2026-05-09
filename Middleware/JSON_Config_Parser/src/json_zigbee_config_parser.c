@@ -1,0 +1,261 @@
+/**
+ * @file json_zigbee_config_parser.c
+ * @brief Zigbee-specific JSON configuration parser implementation
+ *
+ * Unified format identical to BLE/LoRa parsers.  No cmd_type / cmd_code /
+ * response_format – all commands are ASCII AT strings; is_hex flag indicates
+ * binary vs ASCII; expect_response is an ASCII prefix string.
+ */
+
+#include "json_zigbee_config_parser.h"
+#include "cJSON.h"
+#include "esp_log.h"
+#include <string.h>
+#include <stdlib.h>
+
+static const char *TAG = "ZIGBEE_PARSER";
+
+/* ============================================================================
+ * Hardcoded Function Name Table
+ * ========================================================================== */
+
+/**
+ * @brief Ordered function name table – index MUST match json_zigbee_function_id_t.
+ */
+static const char *ZIGBEE_FUNCTION_NAMES[JSON_ZIGBEE_FUNC_MAX] = {
+    // Group 1 – Lifecycle (0-4)
+    "MODULE_HW_RESET",                  // 0
+    "MODULE_SW_RESET",                  // 1
+    "MODULE_FACTORY_RESET",             // 2
+    "MODULE_GET_INFO",                  // 3
+    "MODULE_ENTER_HEX_MODE",            // 4
+    // Group 2 – Network Management (5-11)
+    "MODULE_START_NETWORK",             // 5
+    "MODULE_STOP_NETWORK",              // 6
+    "MODULE_GET_NET_STATUS",            // 7
+    "MODULE_SET_CHANNEL",               // 8
+    "MODULE_SET_PANID",                 // 9
+    "MODULE_SET_TX_POWER",              // 10
+    "MODULE_SET_PERMIT_JOIN",           // 11
+    // Group 3 – Node Discovery (12-17)
+    "MODULE_NODE_JOIN_NOTIFY",          // 12
+    "MODULE_NODE_LEAVE_NOTIFY",         // 13
+    "MODULE_NODE_ANNOUNCE_NOTIFY",      // 14
+    "MODULE_QUERY_SHORT_ADDR",          // 15
+    "MODULE_QUERY_NODE_PORT_INFO",      // 16
+    "MODULE_DELETE_NODE",               // 17
+    // Group 4 – ZCL Control (18-23)
+    "MODULE_ZCL_READ_ATTR",             // 18
+    "MODULE_ZCL_WRITE_ATTR",            // 19
+    "MODULE_ZCL_SEND_CONTROL_CMD",      // 20
+    "MODULE_ZCL_RECV_CONTROL_CMD",      // 21
+    "MODULE_ZCL_RECV_ATTR_REPORT",      // 22
+    "MODULE_ZCL_SET_REPORT_RULE",       // 23
+    // Group 5 – Data TX (24-25)
+    "MODULE_SEND_UNICAST",              // 24
+    "MODULE_SEND_BROADCAST",            // 25
+    // Group 6 – Lifecycle extras P1 (26-29)
+    "MODULE_SET_COMM_CONFIG",           // 26
+    "MODULE_ENTER_BOOTLOADER",          // 27
+    "MODULE_LEAVE_NETWORK",             // 28
+    "MODULE_SET_DEVICE_TYPE",           // 29
+    // Group 7 – Node extras P1 (30-33)
+    "MODULE_QUERY_IEEE_ADDR",           // 30
+    "MODULE_ZCL_BIND",                  // 31
+    "MODULE_ZCL_UNBIND",                // 32
+    "MODULE_SEND_MULTICAST",            // 33
+    // Group 8 – Optional P2 (34-44)
+    "MODULE_ENTER_AT_MODE",             // 34
+    "MODULE_AUTO_FIND_TARGET",          // 35
+    "MODULE_ZCL_DISCOVER_ATTR",         // 36
+    "MODULE_ZCL_IDENTIFY",              // 37
+    "MODULE_ZCL_GET_BIND_TABLE",        // 38
+    "MODULE_ENTER_TRANSPARENT_MODE",    // 39
+    "MODULE_SET_DEST_ADDR",             // 40
+    "MODULE_SET_DEST_EP",               // 41
+    "MODULE_SET_LP_LEVEL",              // 42
+    "MODULE_ENTER_SLEEP",               // 43
+    "MODULE_WAKEUP",                    // 44
+    // Group 9: Mode switching
+    "MODULE_EXIT_SEND_MODE",            // 45
+    // Group 10: Boot/misc events
+    "MODULE_BOOT_NOTIFY",               // 46
+    "MODULE_NET_STATUS_NOTIFY",         // 47
+    "MODULE_FIND_BIND_NOTIFY",          // 48
+    "MODULE_SEND_CONFIRM",              // 49
+    "MODULE_ZCL_DEFAULT_RSP",           // 50
+};
+
+/* ============================================================================
+ * Internal Helpers
+ * ========================================================================== */
+
+static json_zigbee_function_id_t get_function_id(const char *name) {
+    for (int i = 0; i < JSON_ZIGBEE_FUNC_MAX; i++) {
+        if (strcmp(name, ZIGBEE_FUNCTION_NAMES[i]) == 0) {
+            return (json_zigbee_function_id_t)i;
+        }
+    }
+    return JSON_ZIGBEE_FUNC_MAX;
+}
+
+/**
+ * @brief Parse GPIO control array from a JSON array node.
+ */
+static esp_err_t parse_gpio_array(cJSON *arr, gpio_control_t *out, uint8_t *count) {
+    if (!cJSON_IsArray(arr)) { *count = 0; return ESP_OK; }
+    int n = cJSON_GetArraySize(arr);
+    if (n > MAX_GPIO_ACTIONS) {
+        ESP_LOGE(TAG, "Too many GPIO actions: %d", n);
+        return ESP_ERR_INVALID_ARG;
+    }
+    *count = 0;
+    cJSON *item = NULL;
+    cJSON_ArrayForEach(item, arr) {
+        cJSON *pin   = cJSON_GetObjectItem(item, "pin");
+        cJSON *state = cJSON_GetObjectItem(item, "state");
+        if (!cJSON_IsString(pin) || !cJSON_IsString(state)) {
+            ESP_LOGE(TAG, "Invalid GPIO entry");
+            return ESP_ERR_INVALID_ARG;
+        }
+        strncpy(out[*count].pin, pin->valuestring, MAX_PIN_ID_LEN - 1);
+        out[*count].state = (strcmp(state->valuestring, "HIGH") == 0);
+        (*count)++;
+    }
+    return ESP_OK;
+}
+
+/**
+ * @brief Parse a single function JSON object into a function config struct.
+ *        Unified format: identical to BLE/LoRa parsers.
+ */
+static esp_err_t parse_function(cJSON *func_json,
+                                json_zigbee_function_config_t *out) {
+    memset(out, 0, sizeof(*out));
+
+    // function_name (required)
+    cJSON *fn = cJSON_GetObjectItem(func_json, "function_name");
+    if (!cJSON_IsString(fn)) {
+        ESP_LOGE(TAG, "Missing 'function_name'");
+        return ESP_ERR_INVALID_ARG;
+    }
+    json_zigbee_function_id_t fid = get_function_id(fn->valuestring);
+    if (fid == JSON_ZIGBEE_FUNC_MAX) {
+        ESP_LOGE(TAG, "Unknown Zigbee function: %s", fn->valuestring);
+        return ESP_ERR_INVALID_ARG;
+    }
+    out->function_id = fid;
+    out->available   = true;
+
+    // command (AT command string, may be empty for GPIO-only or async events)
+    cJSON *cmd = cJSON_GetObjectItem(func_json, "command");
+    if (cJSON_IsString(cmd)) {
+        strncpy(out->command, cmd->valuestring, ZIGBEE_COMMAND_LEN - 1);
+    }
+
+    // is_prefix
+    cJSON *isp = cJSON_GetObjectItem(func_json, "is_prefix");
+    out->is_prefix = cJSON_IsBool(isp) && cJSON_IsTrue(isp);
+
+    // is_hex (false = ASCII/AT, true = binary/hex)
+    cJSON *ihx = cJSON_GetObjectItem(func_json, "is_hex");
+    out->is_hex = cJSON_IsBool(ihx) && cJSON_IsTrue(ihx);
+
+
+
+    // gpio_start_control
+    cJSON *gstart = cJSON_GetObjectItem(func_json, "gpio_start_control");
+    esp_err_t ret = parse_gpio_array(gstart, out->gpio_start, &out->gpio_start_count);
+    if (ret != ESP_OK) return ret;
+
+    // delay_start
+    cJSON *ds = cJSON_GetObjectItem(func_json, "delay_start");
+    out->delay_start_ms = cJSON_IsNumber(ds) ? (uint16_t)ds->valueint : 0;
+
+    // expect_response (ASCII prefix string)
+    cJSON *er = cJSON_GetObjectItem(func_json, "expect_response");
+    if (cJSON_IsString(er)) {
+        strncpy(out->expect_response, er->valuestring, ZIGBEE_RESPONSE_LEN - 1);
+    }
+
+    // timeout
+    cJSON *to = cJSON_GetObjectItem(func_json, "timeout");
+    out->timeout_ms = cJSON_IsNumber(to) ? (uint16_t)to->valueint : 500;
+
+    // gpio_end_control
+    cJSON *gend = cJSON_GetObjectItem(func_json, "gpio_end_control");
+    ret = parse_gpio_array(gend, out->gpio_end, &out->gpio_end_count);
+    if (ret != ESP_OK) return ret;
+
+    // delay_end
+    cJSON *de = cJSON_GetObjectItem(func_json, "delay_end");
+    out->delay_end_ms = cJSON_IsNumber(de) ? (uint16_t)de->valueint : 0;
+
+    ESP_LOGI(TAG, "Parsed: %s (id=%d)",
+             fn->valuestring, fid);
+    return ESP_OK;
+}
+
+/* ============================================================================
+ * Public API
+ * ========================================================================== */
+
+esp_err_t json_zigbee_config_parse(const char *json_str,
+                                   json_zigbee_module_config_t *config) {
+    if (!json_str || !config) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // Parse common metadata
+    esp_err_t ret = json_config_parse_metadata(json_str, &config->metadata);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to parse metadata");
+        return ret;
+    }
+
+    if (strcmp(config->metadata.module_type, "ZIGBEE") != 0) {
+        ESP_LOGE(TAG, "module_type is not ZIGBEE: '%s'",
+                 config->metadata.module_type);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    cJSON *root = cJSON_Parse(json_str);
+    if (!root) {
+        ESP_LOGE(TAG, "cJSON_Parse failed");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    cJSON *functions = cJSON_GetObjectItem(root, "functions");
+    if (!cJSON_IsArray(functions)) {
+        ESP_LOGE(TAG, "Missing 'functions' array");
+        cJSON_Delete(root);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    int n = cJSON_GetArraySize(functions);
+    if (n > ZIGBEE_MAX_FUNCTIONS) {
+        ESP_LOGE(TAG, "Too many functions: %d (max %d)", n, ZIGBEE_MAX_FUNCTIONS);
+        cJSON_Delete(root);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    memset(config->functions, 0, sizeof(config->functions));
+    config->function_count = 0;
+
+    cJSON *fj = NULL;
+    cJSON_ArrayForEach(fj, functions) {
+        json_zigbee_function_config_t tmp;
+        ret = parse_function(fj, &tmp);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to parse function entry");
+            cJSON_Delete(root);
+            return ret;
+        }
+        config->functions[tmp.function_id] = tmp;
+        config->function_count++;
+    }
+
+    ESP_LOGI(TAG, "Zigbee config parsed OK: %d functions", config->function_count);
+    cJSON_Delete(root);
+    return ESP_OK;
+}

@@ -1,0 +1,337 @@
+{
+    "module_id": "010",
+    "module_type": "LORA",
+    "module_name": "RAK3172",
+    "is_crlf_terminated": true,
+    "module_communication": {
+        "port_type": "uart",
+        "parameters": {
+            "baudrate": 115200,
+            "parity": "none",
+            "stopbit": 1
+        }
+    },
+    "functions": [
+        {
+            "function_name": "MODULE_HW_RESET",
+            "command": "",
+            "is_prefix": false,
+            "is_hex": false,
+            "gpio_start_control": [
+                {
+                    "pin": "01",
+                    "state": "LOW"
+                }
+            ],
+            "delay_start": 100,
+            "expect_response": "",
+            "timeout": 0,
+            "gpio_end_control": [
+                {
+                    "pin": "01",
+                    "state": "HIGH"
+                }
+            ],
+            "delay_end": 500
+        },
+        {
+            "function_name": "MODULE_SW_RESET",
+            "command": "ATZ\r\n",
+            "is_prefix": false,
+            "is_hex": false,
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "OK",
+            "timeout": 2000,
+            "gpio_end_control": [],
+            "delay_end": 1000
+        },
+        {
+            "function_name": "MODULE_GET_INFO",
+            "command": "AT+VER=?\r\n",
+            "is_prefix": false,
+            "is_hex": false,
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "OK",
+            "timeout": 1000,
+            "gpio_end_control": [],
+            "delay_end": 0
+        },
+        {
+            "function_name": "MODULE_FACTORY_RESET",
+            "command": "ATR\r\n",
+            "is_prefix": false,
+            "is_hex": false,
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "OK",
+            "timeout": 5000,
+            "gpio_end_control": [],
+            "delay_end": 2000
+        },
+        {
+            "function_name": "MODULE_SET_REGION",
+            "command": "AT+BAND=",
+            "is_prefix": true,
+            "is_hex": false,
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "OK",
+            "timeout": 1000,
+            "gpio_end_control": [],
+            "delay_end": 0
+        },
+        {
+            "function_name": "MODULE_SET_CLASS",
+            "command": "AT+CLASS=",
+            "is_prefix": true,
+            "is_hex": false,
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "OK",
+            "timeout": 1000,
+            "gpio_end_control": [],
+            "delay_end": 0
+        },
+        {
+            "function_name": "MODULE_SET_JOIN_MODE",
+            "command": "AT+NJM=",
+            "is_prefix": true,
+            "is_hex": false,
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "OK",
+            "timeout": 500,
+            "gpio_end_control": [],
+            "delay_end": 0
+        },
+        {
+            "function_name": "MODULE_SET_DEVEUI",
+            "command": "AT+DEVEUI=",
+            "is_prefix": true,
+            "is_hex": false,
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "OK",
+            "timeout": 500,
+            "gpio_end_control": [],
+            "delay_end": 0
+        },
+        {
+            "function_name": "MODULE_GET_DEVEUI",
+            "command": "AT+DEVEUI=?\r\n",
+            "is_prefix": false,
+            "is_hex": false,
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "+DEVEUI:",
+            "timeout": 1000,
+            "gpio_end_control": [],
+            "delay_end": 0
+        },
+        {
+            "function_name": "MODULE_SET_APPEUI",
+            "command": "AT+APPEUI=",
+            "is_prefix": true,
+            "is_hex": false,
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "OK",
+            "timeout": 500,
+            "gpio_end_control": [],
+            "delay_end": 0
+        },
+        {
+            "function_name": "MODULE_SET_APPKEY",
+            "command": "AT+APPKEY=",
+            "is_prefix": true,
+            "is_hex": false,
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "OK",
+            "timeout": 500,
+            "gpio_end_control": [],
+            "delay_end": 0
+        },
+        {
+            "function_name": "MODULE_JOIN",
+            "command": "AT+JOIN=1:0:10:8\r\n",
+            "is_prefix": false,
+            "is_hex": false,
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "OK",
+            "timeout": 30000,
+            "gpio_end_control": [],
+            "delay_end": 0
+        },
+        {
+            "function_name": "MODULE_GET_JOIN_STATUS",
+            "command": "AT+NJS=?\r\n",
+            "is_prefix": false,
+            "is_hex": false,
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "+NJS:",
+            "timeout": 1000,
+            "gpio_end_control": [],
+            "delay_end": 0
+        },
+        {
+            "function_name": "MODULE_SET_DEVADDR",
+            "command": "AT+DEVADDR=",
+            "is_prefix": true,
+            "is_hex": false,
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "OK",
+            "timeout": 500,
+            "gpio_end_control": [],
+            "delay_end": 0
+        },
+        {
+            "function_name": "MODULE_SET_NWKSKEY",
+            "command": "AT+NWKSKEY=",
+            "is_prefix": true,
+            "is_hex": false,
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "OK",
+            "timeout": 500,
+            "gpio_end_control": [],
+            "delay_end": 0
+        },
+        {
+            "function_name": "MODULE_SET_APPSKEY",
+            "command": "AT+APPSKEY=",
+            "is_prefix": true,
+            "is_hex": false,
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "OK",
+            "timeout": 500,
+            "gpio_end_control": [],
+            "delay_end": 0
+        },
+        {
+            "function_name": "MODULE_SET_DR",
+            "command": "AT+DR=",
+            "is_prefix": true,
+            "is_hex": false,
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "OK",
+            "timeout": 500,
+            "gpio_end_control": [],
+            "delay_end": 0
+        },
+        {
+            "function_name": "MODULE_SET_ADR",
+            "command": "AT+ADR=",
+            "is_prefix": true,
+            "is_hex": false,
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "OK",
+            "timeout": 500,
+            "gpio_end_control": [],
+            "delay_end": 0
+        },
+        {
+            "function_name": "MODULE_SET_TXP",
+            "command": "AT+TXP=",
+            "is_prefix": true,
+            "is_hex": false,
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "OK",
+            "timeout": 500,
+            "gpio_end_control": [],
+            "delay_end": 0
+        },
+        {
+            "function_name": "MODULE_SET_CHANNEL",
+            "command": "AT+MASK=",
+            "is_prefix": true,
+            "is_hex": false,
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "OK",
+            "timeout": 500,
+            "gpio_end_control": [],
+            "delay_end": 0
+        },
+        {
+            "function_name": "MODULE_SET_CONFIRM",
+            "command": "AT+CFM=",
+            "is_prefix": true,
+            "is_hex": false,
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "OK",
+            "timeout": 500,
+            "gpio_end_control": [],
+            "delay_end": 0
+        },
+        {
+            "function_name": "MODULE_SET_PUBLIC_NET",
+            "command": "AT+PUBLIC=",
+            "is_prefix": true,
+            "is_hex": false,
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "OK",
+            "timeout": 500,
+            "gpio_end_control": [],
+            "delay_end": 0
+        },
+        {
+            "function_name": "MODULE_SEND_UNCONFIRMED",
+            "command": "AT+SEND=",
+            "is_prefix": true,
+            "is_hex": false,
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "+EVT:SEND_CONFIRMED",
+            "timeout": 30000,
+            "gpio_end_control": [],
+            "delay_end": 0
+        },
+        {
+            "function_name": "MODULE_SEND_CONFIRMED",
+            "command": "AT+SEND=",
+            "is_prefix": true,
+            "is_hex": false,
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "+EVT:SEND_CONFIRMED",
+            "timeout": 30000,
+            "gpio_end_control": [],
+            "delay_end": 0
+        },
+        {
+            "function_name": "MODULE_READ_RECV",
+            "command": "AT+RECV=?\r\n",
+            "is_prefix": false,
+            "is_hex": false,
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "+RECV:",
+            "timeout": 2000,
+            "gpio_end_control": [],
+            "delay_end": 0
+        },
+        {
+            "function_name": "MODULE_SET_PORT",
+            "command": "AT+APPPORT=",
+            "is_prefix": true,
+            "gpio_start_control": [],
+            "delay_start": 0,
+            "expect_response": "+APPPORT:",
+            "timeout": 1500,
+            "gpio_end_control": [],
+            "delay_end": 0
+        }
+    ]
+}

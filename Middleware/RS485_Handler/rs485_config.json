@@ -1,0 +1,39 @@
+{
+    "module_id": "RS485",
+    "module_type": "RS485",
+    "stack_id": 0,
+    "functions": [
+        {
+            "function_name": "RS485_SEND_MODE",
+            "gpio_start_control": [
+                {
+                    "pin": "03",
+                    "state": "HIGH"
+                },
+                {
+                    "pin": "02",
+                    "state": "HIGH"
+                }
+            ],
+            "delay_start": 1,
+            "gpio_end_control": [],
+            "delay_end": 0
+        },
+        {
+            "function_name": "RS485_RECEIVE_MODE",
+            "gpio_start_control": [
+                {
+                    "pin": "03",
+                    "state": "LOW"
+                },
+                {
+                    "pin": "02",
+                    "state": "LOW"
+                }
+            ],
+            "delay_start": 1,
+            "gpio_end_control": [],
+            "delay_end": 0
+        }
+    ]
+}

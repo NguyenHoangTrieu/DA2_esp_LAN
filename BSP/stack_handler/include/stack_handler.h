@@ -1,9 +1,14 @@
 /**
  * @file stack_handler.h
- * @brief Communication Stack Manager with GPIO Port Management
+ * @brief LAN Communication Stack Manager — two adapter slots (LAN1 & LAN2)
  *
- * Manages 2 communication stacks with dedicated GPIO ports from TCA6424A.
- * Each stack has access to 9 GPIO pins mapped to specific TCA ports.
+ * Each slot has a dedicated TCA6416A. Pin mapping is flat:
+ *   P00-P07 → PORT_0 bits 0-7 (enum 0-7)
+ *   P10-P17 → PORT_1 bits 0-7 (enum 8-15)
+ *
+ * Special pins on every adapter board:
+ *   P00-P03 : 4-bit adapter module ID (input, factory-programmed)
+ *   P17     : IOX_SLOTDET — 0=LAN1 slot, 1=LAN2 slot (input)
  */
 
 #ifndef STACK_HANDLER_H
@@ -19,50 +24,29 @@ extern "C" {
 #endif
 
 /* ===== Constants ===== */
-#define STACK_HANDLER_MAX_STACKS 2
-#define STACK_GPIO_PIN_COUNT 9
+#define STACK_HANDLER_MAX_STACKS 2     /**< LAN MCU supports 2 adapter slots       */
+#define STACK_GPIO_PIN_COUNT     16    /**< Full TCA6416A 16-pin direct mapping     */
+#define STACK_GPIO_PIN_NONE      0xFF  /**< Sentinel: no pin assigned               */
 
-/* ===== Stack Port Definitions ===== */
+/* ===== GPIO Pin Identifiers ===== */
 typedef enum {
-  STACK_PORT_1 = TCA_PORT_0,
-  STACK_PORT_2 = TCA_PORT_1
-} stack_port_t;
-
-/* ===== GPIO Pin Numbers ===== */
-typedef enum {
-  STACK_GPIO_PIN_1 = 0,
-  STACK_GPIO_PIN_2 = 1,
-  STACK_GPIO_PIN_3 = 2,
-  STACK_GPIO_PIN_4 = 3,
-  STACK_GPIO_PIN_5 = 4,
-  STACK_GPIO_PIN_6 = 5,
-  STACK_GPIO_PIN_7 = 6,
-  STACK_GPIO_PIN_8 = 7,
-  STACK_GPIO_PIN_9 = 8
+    STACK_GPIO_PIN_00 = 0,   /* P00 — adapter ID bit 0 (input) */
+    STACK_GPIO_PIN_01 = 1,   /* P01 — adapter ID bit 1 (input) */
+    STACK_GPIO_PIN_02 = 2,   /* P02 — adapter ID bit 2 (input) */
+    STACK_GPIO_PIN_03 = 3,   /* P03 — adapter ID bit 3 (input) */
+    STACK_GPIO_PIN_04 = 4,   /* P04                            */
+    STACK_GPIO_PIN_05 = 5,   /* P05                            */
+    STACK_GPIO_PIN_06 = 6,   /* P06                            */
+    STACK_GPIO_PIN_07 = 7,   /* P07                            */
+    STACK_GPIO_PIN_10 = 8,   /* P10                            */
+    STACK_GPIO_PIN_11 = 9,   /* P11                            */
+    STACK_GPIO_PIN_12 = 10,  /* P12                            */
+    STACK_GPIO_PIN_13 = 11,  /* P13                            */
+    STACK_GPIO_PIN_14 = 12,  /* P14                            */
+    STACK_GPIO_PIN_15 = 13,  /* P15                            */
+    STACK_GPIO_PIN_16 = 14,  /* P16                            */
+    STACK_GPIO_PIN_17 = 15,  /* P17 — IOX_SLOTDET (input)     */
 } stack_gpio_pin_num_t;
-
-/* ===== Communication Types ===== */
-typedef enum {
-  STACK_COMM_TYPE_NONE = 0,
-  STACK_COMM_TYPE_LORA,
-  STACK_COMM_TYPE_RS485,
-  STACK_COMM_TYPE_ZIGBEE,
-  STACK_COMM_TYPE_CAN
-} stack_comm_type_t;
-
-/* ===== Stack Configuration ===== */
-typedef struct {
-  stack_comm_type_t comm_type;
-  stack_port_t gpio_port;
-  uint8_t uart_port;
-  int tx_pin;
-  int rx_pin;
-  bool enabled;
-} stack_config_t;
-
-/* ===== Global Variables ===== */
-extern stack_comm_type_t g_stack_1_type;
-extern stack_comm_type_t g_stack_2_type;
 
 /* ===== API Functions ===== */
 
@@ -72,14 +56,7 @@ extern stack_comm_type_t g_stack_2_type;
  */
 esp_err_t stack_handler_init(void);
 
-/**
- * @brief Configure a communication stack
- * @param stack_id Stack ID (0 = Stack 1, 1 = Stack 2)
- * @param config Stack configuration
- * @return esp_err_t ESP_OK on success
- */
-esp_err_t stack_handler_set_config(uint8_t stack_id,
-                                   const stack_config_t *config);
+
 
 /**
  * @brief Write a value to a GPIO pin on a stack port
@@ -112,12 +89,69 @@ esp_err_t stack_handler_gpio_set_direction(uint8_t stack_id,
                                            stack_gpio_pin_num_t pin,
                                            bool is_output);
 
+
+
+/* ===== New APIs for Module Controller Support ===== */
+
 /**
- * @brief Convert stack communication type to string
- * @param type Communication type
- * @return const char* String representation
+ * @brief GPIO action structure for batch operations
  */
-const char *stack_handler_type_to_string(stack_comm_type_t type);
+typedef struct {
+  stack_gpio_pin_num_t pin;
+  bool level;
+} gpio_action_t;
+
+/**
+ * @brief Write multiple GPIO pins at once (batched operation)
+ *
+ * Optimizes I2C transactions by grouping GPIO writes by TCA port.
+ *
+ * @param stack_id Stack ID (0 = Stack 1, 1 = Stack 2)
+ * @param actions Array of GPIO actions
+ * @param count Number of actions
+ * @return esp_err_t ESP_OK on success
+ */
+esp_err_t stack_handler_gpio_write_multi(uint8_t stack_id,
+                                         const gpio_action_t *actions,
+                                         size_t count);
+
+/**
+ * @brief Get current state of a GPIO pin
+ *
+ * @param stack_id Stack ID (0 = Stack 1, 1 = Stack 2)
+ * @param pin GPIO pin number
+ * @param state Output: current pin state
+ * @return esp_err_t ESP_OK on success
+ */
+esp_err_t stack_handler_gpio_get_state(uint8_t stack_id,
+                                       stack_gpio_pin_num_t pin, bool *state);
+
+/**
+ * @brief Lock stack for exclusive access (thread-safe)
+ *
+ * @param stack_id Stack ID (0 = Stack 1, 1 = Stack 2)
+ * @return esp_err_t ESP_OK on success, ESP_ERR_TIMEOUT if mutex not acquired
+ */
+esp_err_t stack_handler_lock(uint8_t stack_id);
+
+/**
+ * @brief Unlock stack after exclusive access
+ *
+ * @param stack_id Stack ID (0 = Stack 1, 1 = Stack 2)
+ * @return esp_err_t ESP_OK on success
+ */
+esp_err_t stack_handler_unlock(uint8_t stack_id);
+
+/**
+ * @brief Get adapter module ID detected during init.
+ *
+ * The ID is read from P00-P03 of the adapter's TCA6416A at boot.
+ * Returns "000" if the slot is empty (no TCA6416A responded).
+ *
+ * @param stack_id  0 = LAN1 adapter slot, 1 = LAN2 adapter slot.
+ * @return Null-terminated string, e.g. "002", "006", "000".
+ */
+const char* stack_handler_get_module_id(uint8_t stack_id);
 
 #ifdef __cplusplus
 }

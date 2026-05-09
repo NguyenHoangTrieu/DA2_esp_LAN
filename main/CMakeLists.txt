@@ -1,28 +1,59 @@
 file(GLOB I2C_DEVICES "../BSP/i2c_dev_support/src/*.c")
 idf_component_register(SRCS "DA2_esp_LAN.c"
-                            "../rbg_led_ws_handler/rbg_handler.c"
                             "../Application/FOTA_LAN/src/fota_lan_handler.c"
-                            "../Application/MCU_WAN_Handler/src/mcu_wan_handler.c"
+                            "../Application/MCU_WAN_Handler/src/mcu_wan_handler_uplink.c"
+                            "../Application/MCU_WAN_Handler/src/mcu_wan_handler_downlink.c"
                             "../Application/Config_Handler/src/config_handler.c"
                             "../Application/Config_Handler/src/config_load_save.c"
-                            "../Application/CAN_Handler/src/can_handler.c"
-                            "../Application/LoRa_Handler/src/lora_tdma_connect.c"
-                            "../Application/Zigbee_Handler/src/zigbee_nostack_connect.c"
+                            "../Application/Config_Handler/src/config_handler_ble_commands.c"
+                            "../Application/Config_Handler/src/config_handler_lora_commands.c"
+                            "../Application/Config_Handler/src/config_handler_zigbee_commands.c"
+                            "../Application/Config_Handler/src/config_handler_ble_native_commands.c"
+                            "../Application/Config_Handler/src/config_handler_ble_gatt_commands.c"
+                            "../Application/Config_Handler/src/config_handler_rs485_commands.c"
+                            "../Application/Config_Handler/src/config_ble_mode.c"
+                            "../Middleware/JSON_Config_Parser/src/json_rs485_config_parser.c"
+                            "../Application/Config_Handler/src/config_global.c"
                             "../Application/RS485_Handler/src/rs485_handler.c"
+                            "../Application/BLE_Handler/src/ble_handler_task.c"
+                            "../Application/BLE_Handler/src/ble_native_handler.c"
+                            "../Application/BLE_Handler/src/ble_native_config.c"
+                            "../Application/BLE_Handler/src/ble_native_uplink.c"
+                            "../Application/BLE_Handler/src/ble_native_downlink.c"
+                            "../Application/BLE_Handler/src/ble_gatt_handler.c"
+                            "../Application/BLE_Handler/src/ble_gatt_config.c"
+                            "../Application/BLE_Handler/src/ble_gatt_uplink.c"
+                            "../Application/BLE_Handler/src/ble_gatt_downlink.c"
+                            "../Application/LoRa_Handler/src/lora_handler_task.c"
+                            "../Application/Zigbee_Handler/src/zigbee_handler_task.c"
+                            "../Application/Benchmark/src/bench_counter.c"
+                            "../Application/Module_Monitor_Task/src/module_monitor_task.c"
                             "../BSP/MCU_WAN_Communication/src/wan_comm.c"
-                            "../BSP/LoRa_Module_Communicaiton/src/lora_e32_comm.c"
-                            "../BSP/Zigbee_Module_Communication/src/zigbee_cc_comm.c"
-                            "../BSP/CAN_Communication/src/can_driver.c"
                             "../BSP/stack_handler/src/stack_handler.c"
                             "../BSP/RS485_Communication/src/rs485_comm.c"
+                            "../BSP/SDCard_Communication/src/SDCard_comm.c"
+                            "../BSP/Module_UART_Communication/src/module_uart_comm.c"
+                            "../BSP/Module_SPI_Communication/src/module_spi_comm.c"
+                            "../BSP/Module_I2C_Communication/src/module_i2c_comm.c"
+                            "../BSP/Module_USB_Communication/src/module_usb_comm.c"
                             ${I2C_DEVICES}
-                            "../Middleware/LoRa_Handler/src/lora_tdma_handler.c"
-                            "../Middleware/Zigbee_Handler/src/zigbee_nostack_handler.c"
+                            "../Middleware/Storage_Handler/src/storage_handler.c"
+                            "../Middleware/JSON_Config_Parser/src/json_config_parser.c"
+                            "../Middleware/JSON_Config_Parser/src/json_ble_config_parser.c"
+                            "../Middleware/JSON_Config_Parser/src/json_lora_config_parser.c"
+                            "../Middleware/JSON_Config_Parser/src/json_zigbee_config_parser.c"
+                            "../Middleware/BLE_Handler/src/ble_handler.c"
+                            "../Middleware/LoRa_Handler/src/lora_handler.c"
+                            "../Middleware/Zigbee_Handler/src/zigbee_handler.c"
+                            "../Middleware/Module_Config_Controller/src/module_config_controller.c"
+                            
                     PRIV_REQUIRES 
                                 esp_wifi
                                 nvs_flash
                                 mqtt
                                 esp_adc
+                                bt
+                                # esp_ble_mesh
                                 esp_driver_i2c
                                 esp_driver_uart
                                 esp_driver_gpio
@@ -38,23 +69,31 @@ idf_component_register(SRCS "DA2_esp_LAN.c"
                                 esp_https_ota
                                 esp_netif
                                 esp_psram
+                                fatfs
+                                esp_driver_sdmmc
                     INCLUDE_DIRS "."
                                 "../Application/FOTA_LAN/include"
                                 "../Application/MCU_WAN_Handler/include"
                                 "../Application/Config_Handler/include"
-                                "../Application/CAN_Handler/include"
-                                "../Application/LoRa_Handler/include"
-                                "../Application/Zigbee_Handler/include"
                                 "../Application/RS485_Handler/include"
                                 "../BSP/MCU_WAN_Communication/include"
-                                "../BSP/LoRa_Module_Communicaiton/include"
-                                "../BSP/CAN_Communication/include"
-                                "../BSP/Zigbee_Module_Communication/include"
                                 "../BSP/i2c_dev_support/include"
                                 "../BSP/stack_handler/include"
                                 "../BSP/RS485_Communication/include"
+                                "../BSP/SDCard_Communication/include"
+                                "../BSP/Module_UART_Communication/include"
+                                "../BSP/Module_SPI_Communication/include"
+                                "../BSP/Module_I2C_Communication/include"
+                                "../BSP/Module_USB_Communication/include"
+                                "../Middleware/Storage_Handler/include"
+                                "../Middleware/BLE_Handler/include"
                                 "../Middleware/LoRa_Handler/include"
                                 "../Middleware/Zigbee_Handler/include"
-                                "../rbg_led_ws_handler"
+                                "../Middleware/Module_Config_Controller/include"
+                                "../Middleware/JSON_Config_Parser/include"
+                                "../Application/BLE_Handler/include"                                "../Application/LoRa_Handler/include"
+                                "../Application/Zigbee_Handler/include"
+                                "../Application/Module_Monitor_Task/include"
+                                "../Application/Benchmark/include"
                     EMBED_TXTFILES ${project_dir}/server_certs/ca_cert.pem)
 

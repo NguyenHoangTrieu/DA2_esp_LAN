@@ -1,71 +1,75 @@
 /**
  * @file mcu_wan_handler.h
  * @brief MCU WAN Handler - LAN Side (SPI Master)
- * 
- * Implements Diagram 1: System Control & Data Handling Logic
- * Runs on LAN MCU, communicates with WAN MCU via SPI Master
  */
+
 #ifndef MCU_WAN_HANDLER_H
 #define MCU_WAN_HANDLER_H
 
 #include "esp_err.h"
 #include "frame_types.h"
-#include <stdint.h>
 #include <stdbool.h>
+#include <stdint.h>
 
-typedef enum {
-    INTERNET_STATUS_OFFLINE = 0,
-    INTERNET_STATUS_ONLINE = 1
-} internet_status_t;
+// ===== Firmware Version =====
+#define DA2_VERSION_MAJOR 2
+#define DA2_VERSION_MINOR 1
+#define DA2_VERSION_PATCH 1
+#define DA2_VERSION_BUILD 0 // Increment after FOTA
+
+#define DA2_STR_HELPER(x) #x
+#define DA2_STR(x) DA2_STR_HELPER(x)
+
+#define DA2_CURRENT_VERSION_STR                                                \
+  DA2_STR(DA2_VERSION_MAJOR) "." DA2_STR(DA2_VERSION_MINOR) "."            \
+      DA2_STR(DA2_VERSION_PATCH)
+
+#define LAN_FW_VERSION_MAJOR DA2_VERSION_MAJOR
+#define LAN_FW_VERSION_MINOR DA2_VERSION_MINOR
+#define LAN_FW_VERSION_PATCH DA2_VERSION_PATCH
+#define LAN_FW_VERSION_BUILD DA2_VERSION_BUILD
+
+#define LAN_FW_VERSION                                                         \
+  FW_VERSION_MAKE(LAN_FW_VERSION_MAJOR, LAN_FW_VERSION_MINOR,                  \
+                  LAN_FW_VERSION_PATCH, LAN_FW_VERSION_BUILD)
+
+// ===== Public API =====
 
 /**
- * @brief Start MCU WAN handler task
- * @return esp_err_t ESP_OK on success
+ * @brief Start MCU WAN handler
  */
 esp_err_t mcu_wan_handler_start(void);
 
 /**
- * @brief Stop MCU WAN handler task
- * @return esp_err_t ESP_OK on success
+ * @brief Stop MCU WAN handler
  */
 esp_err_t mcu_wan_handler_stop(void);
 
 /**
- * @brief Enqueue uplink data from LAN handlers (CAN/LoRa/Zigbee -> WAN)
- * @param source_id Handler ID (HANDLER_CAN, HANDLER_LORA, etc.)
- * @param data Pointer to data buffer
- * @param len Length of data
- * @return true on success, false on failure
+ * @brief Enqueue uplink data from WAN handlers to be sent to WAN MCU
  */
-bool mcu_wan_enqueue_uplink(handler_id_t source_id, uint8_t *data, uint16_t len);
+bool mcu_wan_enqueue_uplink(handler_id_t source_id, uint8_t *data,
+                            uint16_t len);
 
 /**
- * @brief Get current internet status (from WAN MCU)
- * @return internet_status_t Current status
+ * @brief Get current internet status (cached from WAN MCU)
  */
 internet_status_t mcu_wan_handler_get_internet_status(void);
 
 /**
- * @brief Get cached RTC time string (from WAN MCU)
- * @param buffer Output buffer (min 20 bytes)
- * @return esp_err_t ESP_OK on success
+ * @brief Get cached RTC time string (from WAN MCU, updated every 1s)
  */
 esp_err_t mcu_wan_handler_get_rtc(char *buffer);
 
 /**
  * @brief Register callback for config data reception
- * @param callback Function pointer for config handling
  */
-void mcu_wan_handler_register_config_callback(void (*callback)(const uint8_t*, uint16_t, bool));
+void mcu_wan_handler_register_config_callback(void (*callback)(const uint8_t *,
+                                                               uint16_t, bool));
 
 /**
- * @brief Request LAN configuration from LAN MCU via SPI
- * @param buffer Output buffer to store LAN config
- * @param length Output parameter for length of config data
- * @param max_length Maximum size of output buffer
- * @return esp_err_t ESP_OK on success
+ * @brief Get cached WAN MCU firmware version
  */
-esp_err_t mcu_wan_handler_get_full_config(char *wan_buffer, uint16_t wan_max,
-                                          char *lan_buffer, uint16_t lan_max);
+uint32_t mcu_wan_handler_get_wan_fw_version(void);
 
 #endif // MCU_WAN_HANDLER_H

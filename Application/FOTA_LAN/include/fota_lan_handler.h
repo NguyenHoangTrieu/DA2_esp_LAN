@@ -35,4 +35,19 @@
 void fota_lan_handler_task_start(void);
 void fota_lan_handler_task_stop(void);
 
+/**
+ * @brief Set the firmware download URL at runtime.
+ *        Called by config_handler when a CFFW:<url> command arrives.
+ *        Overrides the compile-time default FOTA_CONFIG_LAN_FIRMWARE_URL.
+ * @param url  Full URL string, e.g.
+ *             "http://192.168.1.100:8080/api/v1/TOKEN/firmware?title=...&version=..."
+ */
+void fota_lan_handler_set_url(const char *url);
+
+/**
+ * @brief Get the currently-configured firmware download URL.
+ * @return Pointer to null-terminated URL string (never NULL).
+ */
+const char *fota_lan_handler_get_url(void);
+
 #endif /* FOTA_HANDLER_H */

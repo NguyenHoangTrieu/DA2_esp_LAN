@@ -5,48 +5,165 @@
 
 #include "config_handler.h"
 #include "DA2_esp_LAN.h"
-#include "can_driver.h"
+#include "ble_handler.h"
+#include "ble_gatt_handler.h"
+#include "ble_native_handler.h"
+#include "config_handler_ble_commands.h"
+#include "config_handler_lora_commands.h"
+#include "config_handler_zigbee_commands.h"
+#include "config_handler_ble_native_commands.h"
+#include "config_handler_ble_gatt_commands.h"
+#include "config_handler_rs485_commands.h"
+#include "config_ble_mode.h"
+#include "config_global.h"
 #include "fota_lan_config.h"
 #include "fota_lan_handler.h"
-#include "lora_e32_comm.h"
-#include "lora_tdma_handler.h"
+#include "led_strip.h"
 #include "mcu_wan_handler.h"
+#include "module_monitor_task.h"
+#include "rs485_handler.h"
 #include "stack_handler.h"
+#include "esp_heap_caps.h"
+#include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 
 static const char *TAG = "config_handler";
 
-extern lora_e32_comm_handle_t g_lora_e32_handle;
 // Queue handle
 QueueHandle_t g_config_handler_queue = NULL;
 
 static bool config_handler_running = false;
 static TaskHandle_t config_handler_task_handle = NULL;
+static StackType_t *g_config_task_stack = NULL;
+static StaticTask_t *g_config_task_tcb = NULL;
 static esp_err_t config_parse_fota(const char *data, uint16_t len,
                                    fota_lan_command_t *cfg);
 static void mcu_wan_config_callback(const uint8_t *data, uint16_t len,
                                     bool is_fota);
-/**
- * @brief Parse command type from 2-character prefix
- */
+
+static void config_log_fota_heap(const char *stage) {
+  size_t internal_free =
+      heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  size_t internal_largest =
+      heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  size_t dma_free = heap_caps_get_free_size(MALLOC_CAP_DMA);
+  size_t dma_largest = heap_caps_get_largest_free_block(MALLOC_CAP_DMA);
+  size_t psram_free =
+      heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  size_t psram_largest =
+      heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+
+  ESP_LOGI(TAG,
+           "[FOTA] Heap %s: total=%d internal=%d internal_largest=%d dma=%d dma_largest=%d psram=%d psram_largest=%d",
+           stage, esp_get_free_heap_size(), internal_free, internal_largest,
+           dma_free, dma_largest, psram_free, psram_largest);
+}
+
+static void config_prepare_for_fota(void) {
+  config_log_fota_heap("before cleanup");
+
+  esp_err_t ret = module_monitor_task_stop();
+  if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+    ESP_LOGW(TAG, "[FOTA] module_monitor_task_stop: %s", esp_err_to_name(ret));
+  }
+
+  ret = rs485_handler_stop();
+  if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+    ESP_LOGW(TAG, "[FOTA] rs485_handler_stop: %s", esp_err_to_name(ret));
+  }
+
+  switch (config_ble_mode_get()) {
+  case BLE_MODE_GATT:
+    ret = ble_gatt_handler_deinit();
+    if (ret != ESP_OK) {
+      ESP_LOGW(TAG, "[FOTA] ble_gatt_handler_deinit: %s", esp_err_to_name(ret));
+    }
+    break;
+  case BLE_MODE_NATIVE:
+    ret = ble_native_handler_deinit();
+    if (ret != ESP_OK) {
+      ESP_LOGW(TAG, "[FOTA] ble_native_handler_deinit: %s",
+               esp_err_to_name(ret));
+    }
+    break;
+  default:
+    break;
+  }
+
+  ret = mcu_wan_handler_stop();
+  if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+    ESP_LOGW(TAG, "[FOTA] mcu_wan_handler_stop: %s", esp_err_to_name(ret));
+  }
+
+  vTaskDelay(pdMS_TO_TICKS(500));
+  config_log_fota_heap("after cleanup");
+}
+
 config_type_t config_parse_type(const char *cmd, uint16_t len) {
   if (len < 4 || cmd[0] != 'C' || cmd[1] != 'F') {
+    ESP_LOGW(TAG, "config_parse_type: INVALID PREFIX");
+    ESP_LOGW(TAG, "  len=%u (need >=4), cmd[0-3]=%02X %02X %02X %02X ('%c%c%c%c')",
+             len, (unsigned char)cmd[0], (unsigned char)cmd[1], (unsigned char)cmd[2], (unsigned char)cmd[3],
+             (cmd[0] >= 32 && cmd[0] <= 126) ? cmd[0] : '.',
+             (cmd[1] >= 32 && cmd[1] <= 126) ? cmd[1] : '.',
+             (cmd[2] >= 32 && cmd[2] <= 126) ? cmd[2] : '.',
+             (cmd[3] >= 32 && cmd[3] <= 126) ? cmd[3] : '.');
     return CONFIG_TYPE_UNKNOWN;
   }
 
-  // Check first 2 characters
+  // Check first 2 characters after "CF"
   if (cmd[2] == 'F' && cmd[3] == 'W') {
     return CONFIG_UPDATE_FIRMWARE;
+  } else if (cmd[2] == 'F' && cmd[3] == 'U') {
+    return CONFIG_SET_FIRMWARE_URL;
+  } else if (cmd[2] == 'R' && cmd[3] == 'S') {
+    // RS485 commands - check subcommand
+    if (len >= 10 && strncmp(cmd + 5, "JSON:", 5) == 0) {
+      return CONFIG_UPDATE_RS485_JSON;
+    } else if (len >= 8 && strncmp(cmd + 5, "BR:", 3) == 0) {
+      return CONFIG_UPDATE_RS485; // CFRS:BR:<baud>
+    } else if (len >= 8 && isdigit((unsigned char)cmd[5])) {
+      return CONFIG_UPDATE_RS485_CMD; // CFRS:<stack>:DATA:<hex_data>
+    } else {
+      return CONFIG_UPDATE_RS485; // Default RS485
+    }
+  } else if (cmd[2] == 'B' && cmd[3] == 'L') {
+    // BLE AT commands (CFBL = CF + BLE) - check subcommand
+    if (len >= 10 && strncmp(cmd + 5, "JSON:", 5) == 0) {
+      return CONFIG_UPDATE_BLE_JSON;
+    } else {
+      // All other BLE AT commands use unified parser
+      return CONFIG_UPDATE_BLE_CMD;
+    }
   } else if (cmd[2] == 'L' && cmd[3] == 'R') {
-    return CONFIG_UPDATE_LORA;
-  } else if (cmd[2] == 'C' && cmd[3] == 'B') {
-    return CONFIG_UPDATE_CAN;
-  } else if (cmd[2] == 'C' && cmd[3] == 'M') {
-    return CONFIG_UPDATE_CAN;
-  } else if (cmd[2] == 'C' && cmd[3] == 'W') { // NEW: Whitelist
-    return CONFIG_UPDATE_CAN;
-  } else if (cmd[2] == 'S' && cmd[3] == 'T') {
-    return CONFIG_UPDATE_STACK;
+    // LoRa commands - check subcommand
+    if (len >= 10 && strncmp(cmd + 5, "JSON:", 5) == 0) {
+      return CONFIG_UPDATE_LORA_JSON;
+    } else {
+      return CONFIG_UPDATE_LORA_CMD;
+    }
+  } else if (cmd[2] == 'Z' && cmd[3] == 'B') {
+    // Zigbee commands - check subcommand
+    if (len >= 10 && strncmp(cmd + 5, "JSON:", 5) == 0) {
+      return CONFIG_UPDATE_ZIGBEE_JSON;
+    } else {
+      return CONFIG_UPDATE_ZIGBEE_CMD;
+    }
+  } else if (cmd[2] == 'B' && cmd[3] == 'N') {
+    // BLE Native (ESP32 direct BLE Mesh) commands
+    if (len >= 10 && strncmp(cmd + 5, "JSON:", 5) == 0) {
+      return CONFIG_UPDATE_BLE_NATIVE_JSON;
+    } else {
+      return CONFIG_UPDATE_BLE_NATIVE_CMD;
+    }
+  } else if (cmd[2] == 'B' && cmd[3] == 'G') {
+    // BLE GATT Central (ESP32 native GATT Central) commands
+    if (len >= 10 && strncmp(cmd + 5, "JSON:", 5) == 0) {
+      return CONFIG_UPDATE_BLE_GATT_JSON;
+    } else {
+      return CONFIG_UPDATE_BLE_GATT_CMD;
+    }
   }
   return CONFIG_TYPE_UNKNOWN;
 }
@@ -67,7 +184,7 @@ static esp_err_t config_parse_fota(const char *data, uint16_t len,
 
   // Initialize with defaults
   memset(cfg, 0, sizeof(fota_lan_command_t));
-  strncpy(cfg->url, FOTA_CONFIG_LAN_FIRMWARE_UPGRADE_URL, sizeof(cfg->url) - 1);
+  strncpy(cfg->url, fota_lan_handler_get_url(), sizeof(cfg->url) - 1);
   cfg->force_update = false;
 
   // Check if just "FW" command (use defaults)
@@ -119,143 +236,54 @@ static esp_err_t config_parse_fota(const char *data, uint16_t len,
 }
 
 /**
- * @brief Parse LoRa/E32 configuration frames coming from MCU WAN.
+ * @brief Parse RS485 baud rate configuration
  *
- * Supported frame formats (ASCII prefix + binary payload):
+ * Format: CFRS:BR:9600 or CFRS:BR:115200
  *
- *   1) CFLR:MODEM:<6 bytes>
- *      - 6 bytes follow the prefix and map directly to e32_params_t:
- *          [0] head   (0xC0/0xC2)
- *          [1] addh   (address high)
- *          [2] addl   (address low)
- *          [3] sped   (UART & air rate)
- *          [4] chan   (RF channel)
- *          [5] option (options)
- *      Action:
- *        - Copy into g_lora_e32_params
- *        - Save to NVS via save_lora_e32_config_to_nvs()
- *        - If LoRa E32 driver is initialized (g_lora_e32_handle != NULL),
- *          push params to radio via lora_e32_comm_write_params().
+ * Valid baud rates: 9600, 19200, 38400, 57600, 115200
  *
- *   2) CFLR:HDLCF:<11 bytes>
- *      - 11 bytes carry LoRa TDMA handler configuration:
- *          [0]  role              (lora_handler_role_t)
- *          [1]  node_id high
- *          [2]  node_id low
- *          [3]  gateway_id high
- *          [4]  gateway_id low
- *          [5]  num_slots
- *          [6]  my_slot
- *          [7]  slot_duration_ms byte3 (MSB)
- *          [8]  slot_duration_ms byte2
- *          [9]  slot_duration_ms byte1
- *          [10] slot_duration_ms byte0 (LSB)
- *      Action:
- *        - Update g_lora_handler_cfg
- *        - Save to NVS via save_lora_handler_config_to_nvs()
- *
- *   3) CFLR:CRYPT:<1 + N bytes>
- *      - Crypto key frame:
- *          [0] key_len (number of bytes that follow)
- *          [1..N] key bytes
- *      Action:
- *        - Update g_lora_handler_crypto_key_len and g_lora_handler_crypto_key[]
- *        - Save to NVS via save_lora_handler_config_to_nvs()
- *
- * All frames are expected to be passed *without* the outer [CF][length(2)]
- * WAN header. The buffer here must start at 'C' of "CFLR:...".
+ * @param data Command data buffer
+ * @param len Length of data
+ * @return esp_err_t ESP_OK on success
  */
-esp_err_t config_parse_lora(const uint8_t *data, uint16_t len) {
-  if (data == NULL || len < 5) {
-    ESP_LOGE(TAG, "LoRa config: invalid buffer");
+static esp_err_t config_parse_rs485_baud(const uint8_t *data, uint16_t len) {
+  if (data == NULL || len < 8) { // Minimum: "CFRS:BR:"
+    ESP_LOGE(TAG, "RS485 baud: invalid buffer");
     return ESP_ERR_INVALID_ARG;
   }
 
-  // Common prefix check
-  if (len < 5 || memcmp(data, "CFLR:", 5) != 0) {
-    ESP_LOGE(TAG, "LoRa config: missing CFLR prefix");
+  // Check CFRS:BR: prefix
+  if (memcmp(data, "CFRS:BR:", 8) != 0) {
+    ESP_LOGE(TAG, "RS485 baud: missing CFRS:BR: prefix");
     return ESP_FAIL;
   }
 
-  // MODEM config: CFLR:MODEM:<6 bytes>
-  const char *modem_prefix = "CFLR:MODEM:";
-  size_t modem_prefix_len = strlen(modem_prefix);
+  // Parse baud rate value
+  const char *ptr = (const char *)(data + 8);
+  int value_len = len - 8;
 
-  if (len >= modem_prefix_len + sizeof(e32_params_t) &&
-      strncmp((const char *)data, modem_prefix, modem_prefix_len) == 0) {
+  if (value_len > 0 && value_len < 16) {
+    char baud_str[16] = {0};
+    memcpy(baud_str, ptr, value_len);
+    uint32_t baud_rate = atoi(baud_str);
 
-    const uint8_t *p = data + modem_prefix_len;
-
-    e32_params_t params = {0};
-    // e32_params_t is exactly 6 bytes packed (head, addh, addl, sped, chan,
-    // option)
-    memcpy(&params, p, sizeof(e32_params_t));
-
-    g_lora_e32_params = params;
-
-    ESP_LOGI(TAG,
-             "LoRa MODEM config: head=0x%02X, addr=0x%02X%02X, sped=0x%02X, "
-             "chan=0x%02X, option=0x%02X",
-             params.head, params.addh, params.addl, params.sped, params.chan,
-             params.option);
-
-    // Persist to NVS
-    esp_err_t err = save_lora_e32_config_to_nvs();
-    if (err != ESP_OK) {
-      ESP_LOGE(TAG, "Failed to save E32 config to NVS: %s",
-               esp_err_to_name(err));
-      return err;
+    // Validate RS485 baud rates (max 115200)
+    if (baud_rate != 9600 && baud_rate != 19200 && baud_rate != 38400 &&
+        baud_rate != 57600 && baud_rate != 115200) {
+      ESP_LOGE(TAG,
+               "RS485: Invalid baud rate %lu (valid: 9600, 19200, 38400, "
+               "57600, 115200)",
+               (unsigned long)baud_rate);
+      return ESP_FAIL;
     }
 
-    // Push parameters to the E32 module if radio handle is available
-    if (g_lora_e32_handle != NULL) {
-      lora_e32_comm_status_t st =
-          lora_e32_comm_write_params(g_lora_e32_handle, &g_lora_e32_params);
-      if (st != LORA_E32_COMM_OK) {
-        ESP_LOGE(TAG, "Failed to write params to E32 module (status=%d)", st);
-        return ESP_FAIL;
-      }
-      ESP_LOGI(TAG, "E32 module parameters updated from WAN");
-    } else {
-      ESP_LOGW(TAG, "E32 handle not initialized, skipping write to module");
-    }
+    g_rs485_baud_rate = baud_rate;
+    ESP_LOGI(TAG, "RS485 baud rate updated: %lu", (unsigned long)baud_rate);
 
-    return ESP_OK;
-  }
-
-  // HDLCF (LoRa handler) config: CFLR:HDLCF:<11 bytes>
-  const char *hdlc_prefix = "CFLR:HDLCF:";
-  size_t hdlc_prefix_len = strlen(hdlc_prefix);
-
-  if (len >= hdlc_prefix_len + 11 &&
-      strncmp((const char *)data, hdlc_prefix, hdlc_prefix_len) == 0) {
-
-    const uint8_t *p = data + hdlc_prefix_len;
-
-    uint8_t role = p[0];
-    uint16_t node_id = ((uint16_t)p[1] << 8) | p[2];
-    uint16_t gateway_id = ((uint16_t)p[3] << 8) | p[4];
-    uint8_t num_slots = p[5];
-    uint8_t my_slot = p[6];
-    uint32_t slot_ms = ((uint32_t)p[7] << 24) | ((uint32_t)p[8] << 16) |
-                       ((uint32_t)p[9] << 8) | (uint32_t)p[10];
-
-    g_lora_handler_cfg.role = (lora_handler_role_t)role;
-    g_lora_handler_cfg.node_id = node_id;
-    g_lora_handler_cfg.gateway_id = gateway_id;
-    g_lora_handler_cfg.num_slots = num_slots;
-    g_lora_handler_cfg.my_slot = my_slot;
-    g_lora_handler_cfg.slot_duration_ms = slot_ms;
-
-    ESP_LOGI(TAG,
-             "LoRa TDMA config: role=%u, node=0x%04X, gw=0x%04X, slots=%u, "
-             "my_slot=%u, slot_ms=%lu",
-             (unsigned)role, node_id, gateway_id, num_slots, my_slot,
-             (unsigned long)slot_ms);
-
-    esp_err_t err = save_lora_handler_config_to_nvs();
+    // Save to NVS
+    esp_err_t err = config_save_rs485_baud(baud_rate);
     if (err != ESP_OK) {
-      ESP_LOGE(TAG, "Failed to save LoRa TDMA config to NVS: %s",
+      ESP_LOGE(TAG, "Failed to save RS485 baud to NVS: %s",
                esp_err_to_name(err));
       return err;
     }
@@ -263,432 +291,8 @@ esp_err_t config_parse_lora(const uint8_t *data, uint16_t len) {
     return ESP_OK;
   }
 
-  // CRYPT config: CFLR:CRYPT:<len+key>
-  const char *crypt_prefix = "CFLR:CRYPT:";
-  size_t crypt_prefix_len = strlen(crypt_prefix);
-
-  if (len >= crypt_prefix_len + 1 &&
-      strncmp((const char *)data, crypt_prefix, crypt_prefix_len) == 0) {
-
-    const uint8_t *p = data + crypt_prefix_len;
-    uint16_t payload_len = len - crypt_prefix_len;
-
-    uint8_t key_len = p[0];
-    if (key_len == 0 || key_len > LORA_HANDLER_CRYPTO_KEY_MAX_LEN) {
-      ESP_LOGE(TAG, "LoRa CRYPT: invalid key_len=%u", key_len);
-      return ESP_FAIL;
-    }
-
-    if (payload_len < (uint16_t)(1 + key_len)) {
-      ESP_LOGE(TAG, "LoRa CRYPT: buffer too short for key_len=%u", key_len);
-      return ESP_FAIL;
-    }
-
-    g_lora_handler_crypto_key_len = key_len;
-    memcpy(g_lora_handler_crypto_key, &p[1], key_len);
-
-    ESP_LOGI(TAG, "LoRa crypto key updated, len=%u", key_len);
-
-    esp_err_t err = save_lora_handler_config_to_nvs();
-    if (err != ESP_OK) {
-      ESP_LOGE(TAG, "Failed to save LoRa crypto config to NVS: %s",
-               esp_err_to_name(err));
-      return err;
-    }
-
-    return ESP_OK;
-  }
-
-  ESP_LOGW(TAG, "Unknown CFLR frame (len=%u)", (unsigned)len);
+  ESP_LOGE(TAG, "RS485 baud: invalid value format");
   return ESP_FAIL;
-}
-/**
- * @brief Parse CAN whitelist management commands
- *
- * Supported formats:
- *
- * 1) CFCW:ADD:0xXXX
- *    - Add a single CAN ID to whitelist
- *    - Example: "CFCW:ADD:0x123"
- *
- * 2) CFCW:REM:0xXXX
- *    - Remove a single CAN ID from whitelist
- *    - Example: "CFCW:REM:0x456"
- *
- * 3) CFCW:CLR
- *    - Clear entire whitelist
- *
- * 4) CFCW:SET:0xXXX,0xYYY,0xZZZ
- *    - Set entire whitelist (replace existing)
- *    - Example: "CFCW:SET:0x123,0x456,0x789"
- */
-static esp_err_t config_parse_can_whitelist(const uint8_t *data, uint16_t len) {
-  if (data == NULL || len < 8) { // Minimum: "CFCW:ADD"
-    ESP_LOGE(TAG, "CAN whitelist: invalid buffer");
-    return ESP_ERR_INVALID_ARG;
-  }
-
-  // Check CFCW: prefix
-  if (memcmp(data, "CFCW:", 5) != 0) {
-    ESP_LOGE(TAG, "CAN whitelist: missing CFCW prefix");
-    return ESP_FAIL;
-  }
-
-  const char *ptr = (const char *)(data + 5);
-  int remaining = len - 5;
-
-  // Parse subcommand: ADD, REM, CLR, SET
-  if (remaining >= 3 && strncmp(ptr, "CLR", 3) == 0) {
-    // Clear whitelist
-    g_can_whitelist_count = 0;
-    ESP_LOGI(TAG, "CAN whitelist cleared");
-
-    esp_err_t err = save_can_config_to_nvs();
-    if (err != ESP_OK) {
-      ESP_LOGE(TAG, "Failed to save CAN whitelist: %s", esp_err_to_name(err));
-      return err;
-    }
-    return ESP_OK;
-  }
-
-  if (remaining >= 4 && strncmp(ptr, "ADD:", 4) == 0) {
-    // Add single ID
-    ptr += 4;
-    remaining -= 4;
-
-    if (remaining < 3) { // At least "0x1"
-      ESP_LOGE(TAG, "CAN whitelist ADD: missing ID");
-      return ESP_FAIL;
-    }
-
-    // Parse hex ID
-    char id_str[16] = {0};
-    int id_len = remaining < 15 ? remaining : 15;
-    memcpy(id_str, ptr, id_len);
-
-    uint16_t can_id = (uint16_t)strtol(id_str, NULL, 16);
-
-    // Check if already in whitelist
-    bool exists = false;
-    for (uint8_t i = 0; i < g_can_whitelist_count; i++) {
-      if (g_can_whitelist[i] == can_id) {
-        exists = true;
-        break;
-      }
-    }
-
-    if (!exists && g_can_whitelist_count < MAX_WHITELISTED_IDS) {
-      g_can_whitelist[g_can_whitelist_count++] = can_id;
-      ESP_LOGI(TAG, "CAN whitelist: added ID 0x%03X (count: %d)", can_id,
-               g_can_whitelist_count);
-
-      esp_err_t err = save_can_config_to_nvs();
-      if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to save CAN whitelist: %s", esp_err_to_name(err));
-        return err;
-      }
-      return ESP_OK;
-    } else if (exists) {
-      ESP_LOGW(TAG, "CAN whitelist: ID 0x%03X already exists", can_id);
-      return ESP_OK;
-    } else {
-      ESP_LOGE(TAG, "CAN whitelist: full (max %d IDs)", MAX_WHITELISTED_IDS);
-      return ESP_FAIL;
-    }
-  }
-
-  if (remaining >= 4 && strncmp(ptr, "REM:", 4) == 0) {
-    // Remove single ID
-    ptr += 4;
-    remaining -= 4;
-
-    if (remaining < 3) {
-      ESP_LOGE(TAG, "CAN whitelist REM: missing ID");
-      return ESP_FAIL;
-    }
-
-    char id_str[16] = {0};
-    int id_len = remaining < 15 ? remaining : 15;
-    memcpy(id_str, ptr, id_len);
-
-    uint16_t can_id = (uint16_t)strtol(id_str, NULL, 16);
-
-    // Find and remove
-    bool found = false;
-    for (uint8_t i = 0; i < g_can_whitelist_count; i++) {
-      if (g_can_whitelist[i] == can_id) {
-        // Shift remaining IDs down
-        for (uint8_t j = i; j < g_can_whitelist_count - 1; j++) {
-          g_can_whitelist[j] = g_can_whitelist[j + 1];
-        }
-        g_can_whitelist_count--;
-        found = true;
-        ESP_LOGI(TAG, "CAN whitelist: removed ID 0x%03X (count: %d)", can_id,
-                 g_can_whitelist_count);
-        break;
-      }
-    }
-
-    if (found) {
-      esp_err_t err = save_can_config_to_nvs();
-      if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to save CAN whitelist: %s", esp_err_to_name(err));
-        return err;
-      }
-      return ESP_OK;
-    } else {
-      ESP_LOGW(TAG, "CAN whitelist: ID 0x%03X not found", can_id);
-      return ESP_FAIL;
-    }
-  }
-
-  if (remaining >= 4 && strncmp(ptr, "SET:", 4) == 0) {
-    // Set entire whitelist (comma-separated)
-    ptr += 4;
-    remaining -= 4;
-
-    if (remaining < 3) {
-      ESP_LOGE(TAG, "CAN whitelist SET: missing IDs");
-      return ESP_FAIL;
-    }
-
-    // Clear current whitelist
-    g_can_whitelist_count = 0;
-
-    // Parse comma-separated IDs
-    char id_buffer[16] = {0};
-    int id_buf_idx = 0;
-
-    for (int i = 0; i < remaining; i++) {
-      char c = ptr[i];
-
-      if (c == ',' || i == remaining - 1) {
-        // End of ID (or last character)
-        if (i == remaining - 1 && c != ',') {
-          id_buffer[id_buf_idx++] = c;
-        }
-        id_buffer[id_buf_idx] = '\0';
-
-        if (id_buf_idx > 0) {
-          uint16_t can_id = (uint16_t)strtol(id_buffer, NULL, 16);
-
-          if (g_can_whitelist_count < MAX_WHITELISTED_IDS) {
-            g_can_whitelist[g_can_whitelist_count++] = can_id;
-            ESP_LOGI(TAG, "  Added ID 0x%03X", can_id);
-          } else {
-            ESP_LOGW(TAG, "  Whitelist full, skipping ID 0x%03X", can_id);
-          }
-        }
-
-        // Reset for next ID
-        id_buf_idx = 0;
-        memset(id_buffer, 0, sizeof(id_buffer));
-      } else {
-        // Accumulate ID string
-        if (id_buf_idx < 15) {
-          id_buffer[id_buf_idx++] = c;
-        }
-      }
-    }
-
-    ESP_LOGI(TAG, "CAN whitelist SET: total %d IDs", g_can_whitelist_count);
-
-    esp_err_t err = save_can_config_to_nvs();
-    if (err != ESP_OK) {
-      ESP_LOGE(TAG, "Failed to save CAN whitelist: %s", esp_err_to_name(err));
-      return err;
-    }
-    return ESP_OK;
-  }
-
-  ESP_LOGW(TAG, "Unknown CAN whitelist command");
-  return ESP_FAIL;
-}
-
-/**
- * @brief Parse CAN configuration frames from MCU WAN
- *
- * Supported formats:
- *
- * 1) CFCB:baudrate
- *    - Set CAN bus baud rate
- *    - Example: "CFCB:500000"
- *    - Valid rates: 125000, 250000, 500000, 800000, 1000000
- *    Action:
- *    - Update g_can_config.baud_rate
- *    - Save to NVS via save_can_config_to_nvs()
- *    - Reinitialize CAN driver if running
- *
- * 2) CFCM:mode
- *    - Set CAN bus mode
- *    - Example: "CFCM:NORMAL"
- *    - Valid modes: NORMAL, LOOPBACK, NO_ACK
- *    Action:
- *    - Update g_can_config.operating_mode
- *    - Save to NVS via save_can_config_to_nvs()
- *    - Reinitialize CAN driver if running
- */
-static esp_err_t config_parse_can(const uint8_t *data, uint16_t len) {
-  if (data == NULL || len < 5) {
-    ESP_LOGE(TAG, "CAN config: invalid buffer");
-    return ESP_ERR_INVALID_ARG;
-  }
-
-  // Check CFCB: prefix (CAN Baud Rate)
-  if (len >= 5 && memcmp(data, "CFCB:", 5) == 0) {
-    const char *ptr = (const char *)(data + 5);
-    int value_len = len - 5;
-
-    if (value_len > 0 && value_len < 16) {
-      char baud_str[16] = {0};
-      memcpy(baud_str, ptr, value_len);
-
-      uint32_t baud_rate = atoi(baud_str);
-
-      // Validate baud rate
-      if (baud_rate != 125000 && baud_rate != 250000 && baud_rate != 500000 &&
-          baud_rate != 800000 && baud_rate != 1000000) {
-        ESP_LOGE(TAG, "CAN: Invalid baud rate %lu", (unsigned long)baud_rate);
-        return ESP_FAIL;
-      }
-
-      g_can_config.baud_rate = baud_rate;
-      ESP_LOGI(TAG, "CAN baud rate updated: %lu", (unsigned long)baud_rate);
-
-      // Save to NVS
-      esp_err_t err = save_can_config_to_nvs();
-      if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to save CAN config to NVS: %s",
-                 esp_err_to_name(err));
-        return err;
-      }
-
-      // TODO: Reinitialize CAN driver if needed
-      // can_handler_reinit();
-
-      return ESP_OK;
-    }
-  }
-
-  // Check CFCM: prefix (CAN Mode)
-  if (len >= 5 && memcmp(data, "CFCM:", 5) == 0) {
-    const char *ptr = (const char *)(data + 5);
-    int value_len = len - 5;
-
-    if (value_len >= 6) { // At least "NORMAL"
-      can_operating_mode_t new_mode;
-
-      if (strncmp(ptr, "NORMAL", 6) == 0) {
-        new_mode = CAN_MODE_NORMAL;
-      } else if (strncmp(ptr, "LOOPBACK", 8) == 0) {
-        new_mode = CAN_MODE_LOOPBACK;
-      } else if (strncmp(ptr, "NO_ACK", 6) == 0) {
-        new_mode = CAN_MODE_NO_ACK;
-      } else {
-        ESP_LOGE(TAG, "CAN: Invalid mode");
-        return ESP_FAIL;
-      }
-
-      g_can_config.operating_mode = new_mode;
-      ESP_LOGI(TAG, "CAN mode updated: %d", new_mode);
-
-      // Save to NVS
-      esp_err_t err = save_can_config_to_nvs();
-      if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to save CAN config to NVS: %s",
-                 esp_err_to_name(err));
-        return err;
-      }
-
-      // TODO: Reinitialize CAN driver if needed
-      // can_handler_reinit();
-
-      return ESP_OK;
-    }
-  }
-
-  ESP_LOGW(TAG, "Unknown CAN frame (len=%u)", (unsigned)len);
-  return ESP_FAIL;
-}
-
-/**
- * @brief Parse stack type configuration
- *
- * Format: CFST:ST_1:LORA or CFST:ST_2:RS485
- * Valid types: NONE, LORA, RS485, ZIGBEE, CAN
- */
-static esp_err_t config_parse_stack_type(const uint8_t *data, uint16_t len) {
-  if (data == NULL || len < 10) { // Minimum: "CFST:ST_1:X"
-    ESP_LOGE(TAG, "Stack type: invalid buffer");
-    return ESP_ERR_INVALID_ARG;
-  }
-
-  // Check CFST: prefix
-  if (memcmp(data, "CFST:", 5) != 0) {
-    ESP_LOGE(TAG, "Stack type: missing CFST prefix");
-    return ESP_FAIL;
-  }
-
-  const char *ptr = (const char *)(data + 5);
-  int remaining = len - 5;
-
-  // Parse stack ID
-  uint8_t stack_id;
-  if (remaining >= 4 && strncmp(ptr, "ST_1:", 5) == 0) {
-    stack_id = 0;
-    ptr += 5;
-    remaining -= 5;
-  } else if (remaining >= 4 && strncmp(ptr, "ST_2:", 5) == 0) {
-    stack_id = 1;
-    ptr += 5;
-    remaining -= 5;
-  } else if (remaining >= 3 && strncmp(ptr, "ST1:", 4) == 0) {
-    stack_id = 0;
-    ptr += 4;
-    remaining -= 4;
-  } else if (remaining >= 3 && strncmp(ptr, "ST2:", 4) == 0) {
-    stack_id = 1;
-    ptr += 4;
-    remaining -= 4;
-  } else {
-    ESP_LOGE(TAG, "Stack type: invalid stack ID format");
-    return ESP_FAIL;
-  }
-
-  // Parse type
-  stack_comm_type_t stack_type;
-  if (remaining >= 4 && strncasecmp(ptr, "NONE", 4) == 0) {
-    stack_type = STACK_COMM_TYPE_NONE;
-  } else if (remaining >= 4 && strncasecmp(ptr, "LORA", 4) == 0) {
-    stack_type = STACK_COMM_TYPE_LORA;
-  } else if (remaining >= 5 && strncasecmp(ptr, "RS485", 5) == 0) {
-    stack_type = STACK_COMM_TYPE_RS485;
-  } else if (remaining >= 6 && strncasecmp(ptr, "ZIGBEE", 6) == 0) {
-    stack_type = STACK_COMM_TYPE_ZIGBEE;
-  } else if (remaining >= 3 && strncasecmp(ptr, "CAN", 3) == 0) {
-    stack_type = STACK_COMM_TYPE_CAN;
-  } else {
-    ESP_LOGE(TAG, "Stack type: invalid type");
-    return ESP_FAIL;
-  }
-
-  // Update global stack type
-  if (stack_id == 0) {
-    g_stack_1_type = stack_type;
-  } else {
-    g_stack_2_type = stack_type;
-  }
-
-  ESP_LOGI(TAG, "Stack %d type set to: %d", stack_id + 1, stack_type);
-
-  // Save to NVS
-  esp_err_t err = config_save_stack_type(stack_id, stack_type);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to save stack type to NVS: %s", esp_err_to_name(err));
-    return err;
-  }
-
-  return ESP_OK;
 }
 
 /**
@@ -700,7 +304,7 @@ static esp_err_t config_parse_stack_type(const uint8_t *data, uint16_t len) {
 static void mcu_wan_config_callback(const uint8_t *data, uint16_t len,
                                     bool is_fota) {
   if (data == NULL || len == 0) {
-    ESP_LOGW(TAG, "Config callback: invalid data");
+    ESP_LOGW(TAG, "Config callback: invalid data (NULL or len=0)");
     return;
   }
 
@@ -709,32 +313,39 @@ static void mcu_wan_config_callback(const uint8_t *data, uint16_t len,
     return;
   }
 
-  config_command_t cmd;
-  memset(&cmd, 0, sizeof(cmd));
-
-  // Parse command type from raw data
-  cmd.type = config_parse_type((const char *)data, len);
-
-  // Clamp raw data length to CONFIG_CMD_MAX_LEN
+  // CRITICAL: Reject configs that exceed maximum size
   if (len > CONFIG_CMD_MAX_LEN) {
-    ESP_LOGW(TAG, "Config callback: input length %u truncated to max %d bytes",
-             len, CONFIG_CMD_MAX_LEN);
-    cmd.data_len = CONFIG_CMD_MAX_LEN;
-  } else {
-    cmd.data_len = len;
+    ESP_LOGE(TAG, "Config too large: %u > %d bytes - REJECTED", len, CONFIG_CMD_MAX_LEN);
+    return;
   }
 
-  // Copy raw config payload
-  memcpy(cmd.raw_data, data, cmd.data_len);
+  // Allocate on heap to avoid stack overflow (4KB+ structure)
+  config_command_t *cmd = (config_command_t *)malloc(sizeof(config_command_t));
+  if (cmd == NULL) {
+    ESP_LOGE(TAG, "Config callback: failed to allocate command buffer (%u bytes)", sizeof(config_command_t));
+    return;
+  }
 
-  // Enqueue command to the main config handler queue
+  memset(cmd, 0, sizeof(config_command_t));
+
+  // Parse command type from raw data
+  cmd->type = config_parse_type((const char *)data, len);
+  cmd->source = CONFIG_SOURCE_WAN_MCU;  // All commands via WAN callback are from WAN MCU
+  cmd->data_len = len;
+
+  // Copy raw config payload
+  memcpy(cmd->raw_data, data, cmd->data_len);
+
+  // Enqueue command pointer to the main config handler queue (queue takes ownership)
   if (xQueueSend(g_config_handler_queue, &cmd, pdMS_TO_TICKS(50)) != pdTRUE) {
     ESP_LOGW(TAG, "Config callback: queue full, dropping command");
+    free(cmd); // Queue full, must free memory
   } else {
     ESP_LOGI(TAG,
              "Config callback: queued config command, type=%d, len=%u, "
              "is_fota=%d",
-             cmd.type, cmd.data_len, is_fota);
+             cmd->type, cmd->data_len, is_fota);
+    // Queue now owns the memory, task will free it after processing
   }
 }
 
@@ -742,80 +353,242 @@ static void mcu_wan_config_callback(const uint8_t *data, uint16_t len,
  * @brief Config handler task - processes commands from queue
  */
 static void config_handler_task(void *arg) {
-  config_command_t cmd;
+  config_command_t *cmd = NULL;
 
   ESP_LOGI(TAG, "Config LAN handler task started");
 
   while (config_handler_running) {
-    // Wait for command from MCU LAN handler
+    // Wait for command pointer from MCU WAN handler callback
     if (xQueueReceive(g_config_handler_queue, &cmd, pdMS_TO_TICKS(100)) ==
         pdTRUE) {
-      ESP_LOGI(TAG, "Received config command, type: %d, len: %d", cmd.type,
-               cmd.data_len);
+      if (cmd == NULL) {
+        ESP_LOGE(TAG, "Received NULL command pointer from queue!");
+        continue;
+      }
+
+      ESP_LOGI(TAG, "Received config command, type: %d, len: %d", cmd->type,
+               cmd->data_len);
 
       // Route based on command type
-      switch (cmd.type) {
+      switch (cmd->type) {
+      case CONFIG_SET_FIRMWARE_URL: {
+        /* CFFU:<url> — save LAN firmware URL to NVS only, no OTA trigger */
+        if (cmd->data_len > 5 && cmd->raw_data[4] == ':') {
+          const char *url = cmd->raw_data + 5;
+          if (url[0] != '\0') {
+            fota_lan_handler_set_url(url); /* set_url saves to NVS internally */
+            ESP_LOGI(TAG, "LAN firmware URL saved: %s", url);
+          }
+        }
+        break;
+      }
       case CONFIG_UPDATE_FIRMWARE: {
         fota_lan_command_t fota_cfg;
 
-        if (config_parse_fota(cmd.raw_data, cmd.data_len, &fota_cfg) ==
+        if (config_parse_fota(cmd->raw_data, cmd->data_len, &fota_cfg) ==
             ESP_OK) {
           ESP_LOGI(TAG, "Starting FOTA process...");
-          // Start FOTA handler task
-          can_handler_stop();
-          lora_tdma_connect_stop();
-          zigbee_nostack_connect_stop();
-          mcu_wan_handler_stop();
-          lan_ppp_connect();
+          /* Apply the URL parsed from the command (may be default or overridden). */
+          fota_lan_handler_set_url(fota_cfg.url);
+          config_prepare_for_fota();
           fota_lan_handler_task_start();
         } else {
           ESP_LOGE(TAG, "Failed to parse FOTA command");
         }
         break;
       }
-      case CONFIG_UPDATE_LORA: {
-        if (config_parse_lora((const uint8_t *)cmd.raw_data, cmd.data_len) ==
-            ESP_OK) {
-          ESP_LOGI(TAG, "LoRa config updated from MCU WAN");
-        } else {
-          ESP_LOGE(TAG, "Failed to parse LoRa config frame");
-        }
-        break;
-      }
-      case CONFIG_UPDATE_CAN: {
-        // Check if it's whitelist command or config command
-        if (cmd.data_len >= 5 && memcmp(cmd.raw_data, "CFCW:", 5) == 0) {
-          // Whitelist command
-          if (config_parse_can_whitelist((const uint8_t *)cmd.raw_data,
-                                         cmd.data_len) == ESP_OK) {
-            ESP_LOGI(TAG, "CAN whitelist updated from MCU WAN");
-          } else {
-            ESP_LOGE(TAG, "Failed to parse CAN whitelist command");
+      case CONFIG_UPDATE_RS485: {
+        if (config_parse_rs485_baud((const uint8_t *)cmd->raw_data,
+                                    cmd->data_len) == ESP_OK) {
+          ESP_LOGI(TAG, "RS485 baud rate updated from MCU WAN");
+          {
+            const char ack[] = "CFRS:BR:OK";
+            mcu_wan_enqueue_uplink(HANDLER_RS485, (uint8_t *)ack,
+                                   sizeof(ack) - 1);
           }
         } else {
-          // Regular CAN config (baud/mode)
-          if (config_parse_can((const uint8_t *)cmd.raw_data, cmd.data_len) ==
-              ESP_OK) {
-            ESP_LOGI(TAG, "CAN config updated from MCU WAN");
-          } else {
-            ESP_LOGE(TAG, "Failed to parse CAN config frame");
+          ESP_LOGE(TAG, "Failed to parse RS485 baud rate command");
+          {
+            const char ack[] = "CFRS:BR:FAIL";
+            mcu_wan_enqueue_uplink(HANDLER_RS485, (uint8_t *)ack,
+                                   sizeof(ack) - 1);
           }
         }
         break;
       }
-      case CONFIG_UPDATE_STACK: {
-        if (config_parse_stack_type((const uint8_t *)cmd.raw_data,
-                                    cmd.data_len) == ESP_OK) {
-          ESP_LOGI(TAG, "Stack type updated from MCU WAN");
+      case CONFIG_UPDATE_RS485_JSON: {
+        if (config_parse_rs485_json((const uint8_t *)cmd->raw_data,
+                                    cmd->data_len) == ESP_OK) {
+          ESP_LOGI(TAG, "RS485 JSON GPIO config applied");
         } else {
-          ESP_LOGE(TAG, "Failed to parse stack type command");
+          ESP_LOGE(TAG, "Failed to parse RS485 JSON config");
+          {
+            const char ack[] = "CFRS:JSON:FAIL";
+            mcu_wan_enqueue_uplink(HANDLER_RS485, (uint8_t *)ack,
+                                   sizeof(ack) - 1);
+          }
         }
+        break;
+      }
+      case CONFIG_UPDATE_RS485_CMD: {
+        if (config_parse_rs485_downlink((const uint8_t *)cmd->raw_data,
+                                        cmd->data_len) == ESP_OK) {
+          ESP_LOGI(TAG, "RS485 downlink data sent");
+        } else {
+          ESP_LOGE(TAG, "Failed to parse/send RS485 downlink data");
+          {
+            const char ack[] = "CFRS:DATA:FAIL";
+            mcu_wan_enqueue_uplink(HANDLER_RS485, (uint8_t *)ack,
+                                   sizeof(ack) - 1);
+          }
+        }
+        break;
+      }
+      case CONFIG_UPDATE_BLE_JSON: {
+        if (config_parse_ble_json((const uint8_t *)cmd->raw_data,
+                                  cmd->data_len) == ESP_OK) {
+          ESP_LOGI(TAG, "BLE JSON config loaded from WAN MCU");
+        } else {
+          ESP_LOGE(TAG, "Failed to parse BLE JSON config");
+        }
+        break;
+      }
+      case CONFIG_UPDATE_BLE_CMD: {
+        if (config_parse_ble_command((const uint8_t *)cmd->raw_data,
+                                     cmd->data_len) == ESP_OK) {
+          ESP_LOGI(TAG, "BLE command executed successfully");
+        } else {
+          ESP_LOGE(TAG, "Failed to execute BLE command");
+        }
+        break;
+      }
+      case CONFIG_UPDATE_LORA_JSON: {
+        if (config_parse_lora_json((const uint8_t *)cmd->raw_data,
+                                    cmd->data_len) == ESP_OK) {
+          ESP_LOGI(TAG, "LoRa JSON config loaded from WAN MCU");
+        } else {
+          ESP_LOGE(TAG, "Failed to parse LoRa JSON config");
+        }
+        break;
+      }
+      case CONFIG_UPDATE_LORA_CMD: {
+        if (config_parse_lora_command((const uint8_t *)cmd->raw_data,
+                                       cmd->data_len) == ESP_OK) {
+          ESP_LOGI(TAG, "LoRa command executed successfully");
+        } else {
+          ESP_LOGE(TAG, "Failed to execute LoRa command");
+        }
+        break;
+      }
+      case CONFIG_UPDATE_ZIGBEE_JSON: {
+        if (config_parse_zigbee_json((const uint8_t *)cmd->raw_data,
+                                      cmd->data_len) == ESP_OK) {
+          ESP_LOGI(TAG, "Zigbee JSON config loaded from WAN MCU");
+        } else {
+          ESP_LOGE(TAG, "Failed to parse Zigbee JSON config");
+        }
+        break;
+      }
+      case CONFIG_UPDATE_ZIGBEE_CMD: {
+        if (config_parse_zigbee_command((const uint8_t *)cmd->raw_data,
+                                         cmd->data_len) == ESP_OK) {
+          ESP_LOGI(TAG, "Zigbee command executed successfully");
+        } else {
+          ESP_LOGE(TAG, "Failed to execute Zigbee command");
+        }
+        break;
+      }
+      case CONFIG_UPDATE_BLE_NATIVE_JSON: {
+        if (config_ble_mode_get() != BLE_MODE_NATIVE) {
+          /* Cleanup previous BLE mode before switching */
+          if (config_ble_mode_get() == BLE_MODE_GATT) {
+            ESP_LOGI(TAG, "Deinitializing BLE GATT handler before switching to Native");
+            ble_gatt_handler_deinit();
+          }
+          config_ble_mode_set(BLE_MODE_NATIVE);
+          /* Ensure BLE Native handler is initialized when switching to NATIVE mode */
+          esp_err_t init_ret = ble_native_handler_init();
+          if (init_ret != ESP_OK) {
+            ESP_LOGW(TAG, "BLE Native handler init failed: %s (may already be initialized)", 
+                     esp_err_to_name(init_ret));
+          }
+        }
+        if (config_parse_ble_native_json((const uint8_t *)cmd->raw_data,
+                                          cmd->data_len) == ESP_OK) {
+          /* Save JSON to NVS so it can be restored on next boot */
+          if (cmd->data_len > 10) {
+            config_save_ble_json_to_nvs(BLE_MODE_NATIVE,
+                                        cmd->raw_data + 10,
+                                        cmd->data_len - 10);
+          }
+          ESP_LOGI(TAG, "BLE Native JSON config loaded and saved to NVS");
+        } else {
+          ESP_LOGE(TAG, "Failed to parse BLE Native JSON config");
+        }
+        break;
+      }
+      case CONFIG_UPDATE_BLE_NATIVE_CMD: {
+        if (config_ble_mode_get() != BLE_MODE_NATIVE) {
+          /* Cleanup previous BLE mode before switching */
+          if (config_ble_mode_get() == BLE_MODE_GATT) {
+            ESP_LOGI(TAG, "Deinitializing BLE GATT handler before switching to Native");
+            ble_gatt_handler_deinit();
+          }
+          config_ble_mode_set(BLE_MODE_NATIVE);
+          esp_err_t init_ret = ble_native_handler_init();
+          if (init_ret != ESP_OK) {
+            ESP_LOGW(TAG, "BLE Native handler init failed: %s", esp_err_to_name(init_ret));
+          }
+        }
+        if (config_parse_ble_native_command((const uint8_t *)cmd->raw_data,
+                                             cmd->data_len) == ESP_OK) {
+          ESP_LOGI(TAG, "BLE Native command executed");
+        } else {
+          ESP_LOGE(TAG, "Failed to execute BLE Native command");
+        }
+        break;
+      }
+      case CONFIG_UPDATE_BLE_GATT_JSON: {
+        if (config_ble_mode_get() != BLE_MODE_GATT) {
+          /* NOTE: Do NOT deinit BLE Native — keep Mesh stack running independent */
+          config_ble_mode_set(BLE_MODE_GATT);
+        }
+        /* Always attempt init — safe no-op if already initialized.
+         * Also retries if a previous attempt failed (e.g. NO_MEM). */
+        esp_err_t init_ret = ble_gatt_handler_init();
+        if (init_ret != ESP_OK) {
+          ESP_LOGW(TAG, "BLE GATT handler init failed: %s", esp_err_to_name(init_ret));
+        }
+        config_parse_ble_gatt_json(cmd->raw_data, cmd->data_len);
+        /* Save JSON to NVS so it can be restored on next boot */
+        if (cmd->data_len > 10) {
+          config_save_ble_json_to_nvs(BLE_MODE_GATT,
+                                      cmd->raw_data + 10,
+                                      cmd->data_len - 10);
+        }
+        break;
+      }
+      case CONFIG_UPDATE_BLE_GATT_CMD: {
+        if (config_ble_mode_get() != BLE_MODE_GATT) {
+          /* NOTE: Do NOT deinit BLE Native — keep Mesh stack running independent */
+          config_ble_mode_set(BLE_MODE_GATT);
+        }
+        /* Always attempt init — retries if previous attempt failed */
+        esp_err_t init_ret = ble_gatt_handler_init();
+        if (init_ret != ESP_OK) {
+          ESP_LOGW(TAG, "BLE GATT handler init failed: %s", esp_err_to_name(init_ret));
+        }
+        config_parse_ble_gatt_command(cmd->raw_data, cmd->data_len);
         break;
       }
       default:
-        ESP_LOGW(TAG, "Unknown config type: %d", cmd.type);
+        ESP_LOGW(TAG, "Unknown config type: %d", cmd->type);
         break;
       }
+
+      // Free command buffer after processing
+      free(cmd);
+      cmd = NULL;
     }
   }
 
@@ -833,9 +606,10 @@ void config_handler_task_start(void) {
   }
 
   // Create queue if not exists
+  // Queue holds pointers to avoid large memory consumption (4KB+ per item)
   if (!g_config_handler_queue) {
     g_config_handler_queue =
-        xQueueCreate(CONFIG_QUEUE_SIZE, sizeof(config_command_t));
+        xQueueCreate(CONFIG_QUEUE_SIZE, sizeof(config_command_t*));
     if (!g_config_handler_queue) {
       ESP_LOGE(TAG, "Failed to create config queue");
       return;
@@ -847,16 +621,30 @@ void config_handler_task_start(void) {
 
   config_handler_running = true;
 
-  BaseType_t ret = xTaskCreate(config_handler_task, "config_handler", 4096,
-                               NULL, 5, &config_handler_task_handle);
+  // Stack size increased from 4KB to 16KB to handle large config structures (4KB+ each)
+  g_config_task_stack = (StackType_t *)heap_caps_malloc(1024 * 16, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  g_config_task_tcb = (StaticTask_t *)heap_caps_malloc(sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 
-  if (ret != pdPASS) {
+  if (!g_config_task_stack || !g_config_task_tcb) {
+      ESP_LOGE(TAG, "Failed to allocate memory for config handler task");
+      if (g_config_task_stack) heap_caps_free(g_config_task_stack);
+      if (g_config_task_tcb) heap_caps_free(g_config_task_tcb);
+      config_handler_running = false;
+      return;
+  }
+
+  config_handler_task_handle = xTaskCreateStatic(config_handler_task, "config_handler", 1024 * 16 / sizeof(StackType_t),
+                               NULL, 5, g_config_task_stack, g_config_task_tcb);
+
+  if (config_handler_task_handle == NULL) {
     ESP_LOGE(TAG, "Failed to create config handler task");
+    heap_caps_free(g_config_task_stack);
+    heap_caps_free(g_config_task_tcb);
     config_handler_running = false;
     return;
   }
 
-  ESP_LOGI(TAG, "Config LAN handler task created");
+  ESP_LOGI(TAG, "Config LAN handler task created in PSRAM");
 }
 
 /**
@@ -873,7 +661,64 @@ void config_handler_task_stop(void) {
   if (config_handler_task_handle) {
     vTaskDelay(pdMS_TO_TICKS(200)); // Give time to exit gracefully
     config_handler_task_handle = NULL;
+    if (g_config_task_stack) heap_caps_free(g_config_task_stack);
+    if (g_config_task_tcb) heap_caps_free(g_config_task_tcb);
+    g_config_task_stack = NULL;
+    g_config_task_tcb = NULL;
   }
 
   ESP_LOGI(TAG, "Config LAN handler task stopped");
 }
+
+/**
+ * @brief Restore BLE mode and JSON config from NVS on boot.
+ *
+ * Called once from app_main() after all peripheral init is done.
+ * Initializes the appropriate BLE handler (GATT or Native) and applies the
+ * previously saved JSON config so the device is immediately operational
+ * without waiting for a new JSON from the WAN MCU.
+ *
+ * If no BLE config has been saved to NVS yet this is a no-op.
+ */
+void config_restore_ble_from_nvs(void) {
+    uint8_t mode = 0;
+    char *json = NULL;
+    uint16_t json_len = 0;
+
+    esp_err_t ret = config_load_ble_json_from_nvs(&mode, &json, &json_len);
+    if (ret == ESP_ERR_NOT_FOUND) {
+        ESP_LOGI(TAG, "No BLE config in NVS — skipping BLE restore");
+        return;
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "BLE NVS load failed: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    ESP_LOGI(TAG, "Restoring BLE config from NVS (mode=%u, %u bytes)", mode, json_len);
+
+    if (mode == BLE_MODE_NATIVE) {
+        config_ble_mode_set(BLE_MODE_NATIVE);
+        ret = ble_native_handler_init();
+        if (ret == ESP_OK || ret == ESP_ERR_INVALID_STATE /* already init */) {
+            ble_native_handler_load_config(0, json, json_len);
+            ESP_LOGI(TAG, "BLE Native config restored from NVS");
+        } else {
+            ESP_LOGE(TAG, "BLE Native init failed during NVS restore: %s", esp_err_to_name(ret));
+        }
+    } else if (mode == BLE_MODE_GATT) {
+        config_ble_mode_set(BLE_MODE_GATT);
+        ret = ble_gatt_handler_init();
+        if (ret == ESP_OK) {
+            ble_gatt_handler_load_config(0, json, json_len);
+            ESP_LOGI(TAG, "BLE GATT config restored from NVS");
+        } else {
+            ESP_LOGE(TAG, "BLE GATT init failed during NVS restore: %s", esp_err_to_name(ret));
+        }
+    } else {
+        ESP_LOGW(TAG, "Unknown BLE mode %u in NVS — ignoring", mode);
+    }
+
+    free(json);
+}
+

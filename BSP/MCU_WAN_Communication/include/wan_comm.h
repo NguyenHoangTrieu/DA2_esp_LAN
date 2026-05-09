@@ -1,172 +1,203 @@
-/**
- * @file wan_comm.h
- * @brief WAN Communication Library for LAN MCU (SPI Master)
- */
-
 #ifndef WAN_COMM_H
 #define WAN_COMM_H
 
-#include "driver/gpio.h"
+#include <stdint.h>
+#include <stdbool.h>
+#include "frame_types.h"
 #include "driver/spi_master.h"
 #include "esp_err.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
-#include <stdbool.h>
-#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/**
- * @brief Protocol headers
- */
-#define WAN_COMM_HEADER_CF 0x4346 // "CF" - Command Frame
-#define WAN_COMM_HEADER_DT 0x4454 // "DT" - Data Frame
-#define WAN_COMM_HEADER_SIZE 2
+// CONFIGURATION - Timing Parameters
 
-/**
- * @brief Default configuration values
- */
-#define WAN_COMM_DEFAULT_CLOCK_HZ (10 * 1000 * 1000) // 10 MHz
-#define WAN_COMM_DEFAULT_QUEUE_SIZE 7
-#define WAN_COMM_MAX_TRANSFER_SIZE 8192 // SPI DMA limitation
-#define WAN_COMM_TIMEOUT_MS 1000
-#define FRAME_HEADER_SIZE  1
+#define WAN_COMM_SPI_CLOCK_HZ         40000000  // 40 MHz default
+#define WAN_COMM_DEFAULT_TX_BUFFER    16384     // 16KB per design (legacy)
+#define WAN_COMM_DEFAULT_RX_BUFFER    16384     // 16KB per design
+#define WAN_COMM_DMA_BUFFER_SIZE      16384     // 16KB – large enough for max config JSON
+#define WAN_COMM_TRANS_QUEUE_SIZE     7
+#define WAN_COMM_ACK_TIMEOUT_MS       200
+#define WAN_COMM_DQ_RETRY_MS          50
+#define WAN_COMM_DQ_RETRY_COUNT       10
+#define WAN_COMM_TIMEOUT_MS           1000
+#define WAN_COMM_MAX_TRANSFER_SIZE    16384
+#define WAN_COMM_FIXED_XFER_LEN       (INTER_MCU_PAYLOAD_MAX_LEN + WAN_COMM_HEADER_SIZE)
+#define WAN_COMM_DMA_DESCRIPTOR_SIZE  4092      // ESP32 max per descriptor
+#define WAN_COMM_MAX_DMA_DESCRIPTORS  8
 
-/**
- * @brief Status codes
- */
+// Frame headers
+#define WAN_COMM_HEADER_CF            0x4346    // Command Frame
+#define WAN_COMM_HEADER_DT            0x4454    // Data Transfer
+#define WAN_COMM_HEADER_DQ            0x4451    // Data Query
+#define WAN_COMM_HEADER_SIZE          2
+
+// DMA alignment
+#define DMA_ALIGNMENT                 4
+#define DMA_ALIGN_SIZE(x)             (((x) + (DMA_ALIGNMENT - 1)) & ~(DMA_ALIGNMENT - 1))
+
+// ERROR CODES
+
 typedef enum {
-  WAN_COMM_OK = 0,
-  WAN_COMM_ERR_INVALID_ARG,
-  WAN_COMM_ERR_TIMEOUT,
-  WAN_COMM_ERR_INVALID_STATE,
-  WAN_COMM_ERR_NO_MEM,
-  WAN_COMM_ERR_INVALID_HEADER,
-  WAN_COMM_ERR_BUS_BUSY,
-  WAN_COMM_ERR_NOT_INITIALIZED
+    WAN_COMM_OK = 0,
+    WAN_COMM_ERR_INVALID_ARG,
+    WAN_COMM_ERR_NOT_INITIALIZED,
+    WAN_COMM_ERR_NOMEM,
+    WAN_COMM_ERR_TIMEOUT,
+    WAN_COMM_ERR_BUS_BUSY,
+    WAN_COMM_ERR_INVALID_STATE,
+    WAN_COMM_ERR_DMA_ALIGN
 } wan_comm_status_t;
 
+// STRUCTURES
+
 /**
- * @brief Configuration structure
+ * @brief SPI Master Configuration
  */
 typedef struct {
-  // GPIO pins
-  int gpio_sck; // SPI Clock
-  int gpio_cs;  // Chip Select
-  int gpio_io0; // MOSI / IO0
-  int gpio_io1; // MISO / IO1
-  int gpio_io2; // WP / IO2 (for Quad mode)
-  int gpio_io3; // HD / IO3 (for Quad mode)
-
-  // SPI configuration
-  uint32_t clock_speed_hz;   // SPI clock frequency
-  uint8_t mode;              // SPI mode (0-3)
-  spi_host_device_t host_id; // SPI peripheral (SPI2_HOST or SPI3_HOST)
-
-  // DMA configuration
-  int dma_channel;     // DMA channel (SPI_DMA_CH_AUTO recommended)
-  uint16_t queue_size; // Transaction queue size
-
-  // Options
-  bool enable_quad_mode; // Enable QSPI (4-bit) mode
+    // GPIO pins
+    int gpio_sck;
+    int gpio_cs;
+    int gpio_io0;
+    int gpio_io1;
+    int gpio_data_ready_input; // GPIO46 for ISR, -1 to disable
+    
+    // SPI settings
+    uint32_t clock_speed_hz;   // 40 MHz recommended
+    uint8_t mode;              // SPI mode 0-3
+    spi_host_device_t host_id; // SPI2_HOST or SPI3_HOST
+    int dma_channel;           // SPI_DMA_CH_AUTO recommended
+    
+    // Buffer sizes (legacy, replaced by DMA buffer internally)
+    size_t tx_buffer_size;
+    size_t rx_buffer_size;
+    
+    // Queue
+    int queue_size;
 } wan_comm_config_t;
 
 /**
- * @brief Handle structure (opaque)
+ * @brief Default configuration macro
+ */
+#define WAN_COMM_CONFIG_DEFAULT() { \
+    .gpio_sck = 12, \
+    .gpio_cs = 10, \
+    .gpio_io0 = 11, \
+    .gpio_io1 = 13, \
+    .gpio_data_ready_input = 46, \
+    .clock_speed_hz = WAN_COMM_SPI_CLOCK_HZ, \
+    .mode = 0, \
+    .host_id = SPI2_HOST, \
+    .dma_channel = SPI_DMA_CH_AUTO, \
+    .tx_buffer_size = WAN_COMM_DEFAULT_TX_BUFFER, \
+    .rx_buffer_size = WAN_COMM_DEFAULT_RX_BUFFER, \
+    .queue_size = WAN_COMM_TRANS_QUEUE_SIZE \
+}
+
+/**
+ * @brief Opaque handle
  */
 typedef struct wan_comm_handle_s *wan_comm_handle_t;
 
 /**
- * @brief Initialize WAN communication library (Master mode)
- *
- * @param config Configuration structure
- * @param handle Output handle pointer
- * @return wan_comm_status_t Status code
+ * @brief Data-ready ISR callback
  */
-wan_comm_status_t wan_comm_init(const wan_comm_config_t *config,
-                                wan_comm_handle_t *handle);
+typedef void (*wan_comm_data_ready_callback_t)(void *user_arg);
+
+// PUBLIC API
 
 /**
- * @brief Deinitialize WAN communication library
- *
- * @param handle Handle to deinitialize
- * @return wan_comm_status_t Status code
+ * @brief Initialize SPI Master with DMA buffering
+ * 
+ * @param config Configuration structure
+ * @param[out] handle Output handle
+ * @return WAN_COMM_OK on success
+ */
+wan_comm_status_t wan_comm_init(const wan_comm_config_t *config, wan_comm_handle_t *handle);
+
+/**
+ * @brief Deinitialize SPI Master
  */
 wan_comm_status_t wan_comm_deinit(wan_comm_handle_t handle);
 
 /**
- * @brief Send command packet to slave (WAN MCU)
- * Automatically prepends CF header to payload
- *
- * @param handle Communication handle
- * @param command_payload Command data
- * @param length Payload length (excluding header)
- * @return wan_comm_status_t Status code
+ * @brief Send command frame (CF) - uses DMA buffering
+ * 
+ * @param handle Handle
+ * @param command_payload Payload without header
+ * @param length Payload length
+ * @return WAN_COMM_OK on success
  */
-wan_comm_status_t wan_comm_send_command(wan_comm_handle_t handle,
-                                        const uint8_t *command_payload,
-                                        uint16_t length);
+wan_comm_status_t wan_comm_send_command(wan_comm_handle_t handle, 
+                                         const uint8_t *command_payload, 
+                                         uint16_t length);
 
 /**
- * @brief Send data packet to slave (WAN MCU)
- * Automatically prepends DT header to payload
- *
- * @param handle Communication handle
- * @param data_payload Data to send
- * @param length Payload length (excluding header)
- * @return wan_comm_status_t Status code
+ * @brief Send data frame (DT) - uses DMA buffering
+ * 
+ * @param handle Handle
+ * @param data_payload Payload without header
+ * @param length Payload length
+ * @return WAN_COMM_OK on success
  */
-wan_comm_status_t wan_comm_send_data(wan_comm_handle_t handle,
-                                     const uint8_t *data_payload,
-                                     uint16_t length);
+wan_comm_status_t wan_comm_send_data(wan_comm_handle_t handle, 
+                                      const uint8_t *data_payload, 
+                                      uint16_t length);
 
 /**
- * @brief Request data from slave (WAN MCU)
- * Performs a read transaction (master clocks, slave sends data)
- *
- * @param handle Communication handle
- * @param rx_buffer Buffer to receive data
+ * @brief Request data from slave (DQ)
+ * 
+ * @param handle Handle
+ * @param rx_buffer Buffer to store received data
  * @param length_to_read Number of bytes to read
- * @return wan_comm_status_t Status code
+ * @return WAN_COMM_OK on success
  */
-wan_comm_status_t wan_comm_request_data(wan_comm_handle_t handle,
-                                        uint8_t *rx_buffer,
-                                        uint16_t length_to_read);
+wan_comm_status_t wan_comm_request_data(wan_comm_handle_t handle, 
+                                         uint8_t *rx_buffer, 
+                                         uint16_t length_to_read);
 
 /**
- * @brief Get last error status
- *
- * @param handle Communication handle
- * @return wan_comm_status_t Last error code
+ * @brief Full-duplex transceive
+ */
+wan_comm_status_t wan_comm_transceive(wan_comm_handle_t handle, 
+                                       const uint8_t *tx_data, 
+                                       uint16_t tx_length,
+                                       uint8_t *rx_buffer, 
+                                       uint16_t rx_length);
+
+/**
+ * @brief Flush DMA TX buffer immediately
+ * Forces transmission of accumulated frames with 0x00 padding
+ * 
+ * @param handle Handle
+ * @return WAN_COMM_OK on success
+ */
+wan_comm_status_t wan_comm_flush_dma_buffer(wan_comm_handle_t handle);
+
+/**
+ * @brief Register data-ready ISR callback
+ */
+wan_comm_status_t wan_comm_register_data_ready_callback(wan_comm_handle_t handle, 
+                                                         wan_comm_data_ready_callback_t callback,
+                                                         void *user_arg);
+
+/**
+ * @brief Get last error code
  */
 wan_comm_status_t wan_comm_get_last_error(wan_comm_handle_t handle);
 
 /**
- * @brief Get error count
- *
- * @param handle Communication handle
- * @return uint32_t Number of errors occurred
+ * @brief Get statistics
  */
-uint32_t wan_comm_get_error_count(wan_comm_handle_t handle);
+wan_comm_status_t wan_comm_get_statistics(wan_comm_handle_t handle, 
+                                           uint32_t *packets_sent, 
+                                           uint32_t *errors);
 
 /**
- * @brief Clear error count
- *
- * @param handle Communication handle
- * @return wan_comm_status_t Status code
+ * @brief Clear error counter
  */
 wan_comm_status_t wan_comm_clear_error_count(wan_comm_handle_t handle);
-
-/**
- * @brief Get header size constant
- *
- * @return uint16_t Header size in bytes
- */
-static inline uint16_t wan_comm_get_header_size(void) {
-  return WAN_COMM_HEADER_SIZE;
-}
 
 #ifdef __cplusplus
 }

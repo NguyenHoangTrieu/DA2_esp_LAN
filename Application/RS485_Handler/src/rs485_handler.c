@@ -5,6 +5,7 @@
 
 #include "rs485_handler.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "frame_types.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -16,13 +17,14 @@
 static const char *TAG = "RS485_HANDLER";
 
 /* ===== Configuration ===== */
-#define RS485_HANDLER_TASK_STACK_SIZE 4096
+#define RS485_HANDLER_TASK_STACK_SIZE (8 * 1024)   // PSRAM stack
 #define RS485_HANDLER_TASK_PRIORITY 5
 #define RS485_RX_BUFFER_SIZE 512
 #define RS485_TX_TIMEOUT_MS 1000
 #define RS485_RX_POLL_INTERVAL_MS 20
 #define RS485_DOWNLINK_QUEUE_SIZE 10
 #define RS485_STATS_LOG_INTERVAL_MS 10000 // 10 seconds
+uint32_t g_rs485_baud_rate = RS485_DEFAULT_BAUD_RATE;
 
 /* ===== Statistics ===== */
 typedef struct {
@@ -43,6 +45,8 @@ typedef struct {
 
 static struct {
   TaskHandle_t task_handle;
+  StackType_t  *task_stack;   // PSRAM stack buffer
+  StaticTask_t *task_tcb;     // internal SRAM TCB
   QueueHandle_t downlink_queue;
   rs485_comm_handle_t comm_handle;
   rs485_handler_stats_t stats;
@@ -64,7 +68,7 @@ esp_err_t rs485_handler_start(void) {
 
   // Initialize RS485 communication driver
   rs485_comm_config_t config = {
-      .baud_rate = RS485_DEFAULT_BAUD_RATE,
+      .baud_rate = g_rs485_baud_rate,
       .rx_buffer_size = RS485_DEFAULT_RX_BUF_SIZE,
       .tx_buffer_size = RS485_DEFAULT_TX_BUF_SIZE,
   };
@@ -94,13 +98,28 @@ esp_err_t rs485_handler_start(void) {
   // Reset statistics
   memset(&g_rs485_ctx.stats, 0, sizeof(rs485_handler_stats_t));
 
-  // Create handler task
-  BaseType_t task_ret = xTaskCreate(
-      rs485_handler_task, "rs485_handler", RS485_HANDLER_TASK_STACK_SIZE, NULL,
-      RS485_HANDLER_TASK_PRIORITY, &g_rs485_ctx.task_handle);
+  // Create handler task (PSRAM stack)
+  g_rs485_ctx.task_stack = heap_caps_malloc(RS485_HANDLER_TASK_STACK_SIZE,
+                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  g_rs485_ctx.task_tcb   = heap_caps_malloc(sizeof(StaticTask_t),
+                                             MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (!g_rs485_ctx.task_stack || !g_rs485_ctx.task_tcb) {
+    ESP_LOGE(TAG, "Failed to alloc RS485 task stack/TCB");
+    heap_caps_free(g_rs485_ctx.task_stack); g_rs485_ctx.task_stack = NULL;
+    heap_caps_free(g_rs485_ctx.task_tcb);   g_rs485_ctx.task_tcb   = NULL;
+    vQueueDelete(g_rs485_ctx.downlink_queue);
+    return ESP_ERR_NO_MEM;
+  }
+  g_rs485_ctx.task_handle = xTaskCreateStaticPinnedToCore(
+      rs485_handler_task, "rs485_handler",
+      RS485_HANDLER_TASK_STACK_SIZE / sizeof(StackType_t),
+      NULL, RS485_HANDLER_TASK_PRIORITY,
+      g_rs485_ctx.task_stack, g_rs485_ctx.task_tcb, tskNO_AFFINITY);
 
-  if (task_ret != pdPASS) {
+  if (!g_rs485_ctx.task_handle) {
     ESP_LOGE(TAG, "Failed to create RS485 handler task");
+    heap_caps_free(g_rs485_ctx.task_stack); g_rs485_ctx.task_stack = NULL;
+    heap_caps_free(g_rs485_ctx.task_tcb);   g_rs485_ctx.task_tcb   = NULL;
     vQueueDelete(g_rs485_ctx.downlink_queue);
     return ESP_ERR_NO_MEM;
   }
@@ -123,6 +142,8 @@ esp_err_t rs485_handler_stop(void) {
   if (g_rs485_ctx.task_handle) {
     vTaskDelete(g_rs485_ctx.task_handle);
     g_rs485_ctx.task_handle = NULL;
+    heap_caps_free(g_rs485_ctx.task_stack); g_rs485_ctx.task_stack = NULL;
+    heap_caps_free(g_rs485_ctx.task_tcb);   g_rs485_ctx.task_tcb   = NULL;
   }
 
   // Delete queue
@@ -136,8 +157,32 @@ esp_err_t rs485_handler_stop(void) {
 }
 
 bool rs485_handler_enqueue_downlink(uint8_t *data, uint16_t len) {
-  if (!g_rs485_ctx.is_running || !data || len == 0) {
-    ESP_LOGW(TAG, "Invalid downlink request");
+  if (!data || len == 0) {
+    ESP_LOGW(TAG, "Invalid downlink request: data=%p len=%u", (void *)data,
+             len);
+    g_rs485_ctx.stats.downlink_dropped++;
+    return false;
+  }
+
+  if (!g_rs485_ctx.is_running) {
+    rs485_gpio_mode_config_t gpio_cfg;
+    esp_err_t cfg_ret = rs485_comm_get_gpio_config(&gpio_cfg);
+    if (cfg_ret == ESP_OK) {
+      ESP_LOGW(TAG,
+               "Downlink rejected: handler not running yet (configured stack=%u). "
+               "Ensure module_monitor_task started RS485 after JSON apply.",
+               gpio_cfg.stack_id);
+    } else {
+      ESP_LOGW(TAG,
+               "Downlink rejected: no RS485 JSON config loaded and handler not running. "
+               "Send CFRS:JSON:<stack_id>:<json> first.");
+    }
+    g_rs485_ctx.stats.downlink_dropped++;
+    return false;
+  }
+
+  if (!g_rs485_ctx.downlink_queue) {
+    ESP_LOGW(TAG, "Downlink rejected: handler queue not created");
     g_rs485_ctx.stats.downlink_dropped++;
     return false;
   }
@@ -154,14 +199,14 @@ bool rs485_handler_enqueue_downlink(uint8_t *data, uint16_t len) {
   rs485_downlink_msg_t msg = {.data = msg_data, .len = len};
 
   if (xQueueSend(g_rs485_ctx.downlink_queue, &msg, 0) != pdTRUE) {
-    ESP_LOGW(TAG, "Downlink queue full");
+    ESP_LOGW(TAG, "Downlink queue full (len=%u)", len);
     free(msg_data);
     g_rs485_ctx.stats.downlink_dropped++;
     return false;
   }
 
   g_rs485_ctx.stats.downlink_enqueued++;
-  ESP_LOGD(TAG, "Enqueued downlink: %u bytes", len);
+  ESP_LOGI(TAG, "Enqueued downlink: %u bytes", len);
   return true;
 }
 
@@ -184,7 +229,7 @@ static void rs485_handler_task(void *arg) {
 
       if (ret == ESP_OK) {
         g_rs485_ctx.stats.tx_ok++;
-        ESP_LOGD(TAG, "Sent downlink: %u bytes", downlink_msg.len);
+        ESP_LOGI(TAG, "Sent downlink: %u bytes", downlink_msg.len);
       } else {
         g_rs485_ctx.stats.tx_error++;
         ESP_LOGE(TAG, "Failed to send downlink");
@@ -212,12 +257,13 @@ static void rs485_handler_task(void *arg) {
 
       if (ret == ESP_OK && actual_read > 0) {
         g_rs485_ctx.stats.rx_ok++;
-        ESP_LOGD(TAG, "Received RS485 data: %u bytes", actual_read);
+        ESP_LOGI(TAG, "Received RS485 data: %u bytes", actual_read);
+        ESP_LOG_BUFFER_HEX(TAG, rx_buffer, actual_read);
 
         // Forward to WAN uplink
         if (mcu_wan_enqueue_uplink(HANDLER_RS485, rx_buffer, actual_read)) {
           g_rs485_ctx.stats.uplink_forwarded++;
-          ESP_LOGD(TAG, "Forwarded to WAN uplink: %u bytes", actual_read);
+          ESP_LOGI(TAG, "Forwarded to WAN uplink: %u bytes", actual_read);
         } else {
           g_rs485_ctx.stats.uplink_queue_full++;
           ESP_LOGW(TAG, "WAN uplink queue full");

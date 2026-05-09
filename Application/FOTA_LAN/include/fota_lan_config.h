@@ -1,11 +1,33 @@
 #ifndef FOTA_LAN_CONFIG_H
 #define FOTA_LAN_CONFIG_H
 
-/* Firmware upgrade URL endpoint */
-#define FOTA_CONFIG_LAN_FIRMWARE_UPGRADE_URL "https://github.com/NguyenHoangTrieu/DA2_esp_release/releases/download/V0.0.1/DA2_esp_LAN.bin"
+/* ============================================================
+ * ThingsBoard OTA Server Configuration (LAN MCU)
+ * ============================================================
+ *
+ * Set FOTA_CONFIG_LAN_FIRMWARE_URL to the full firmware download URL.
+ * This is the compile-time default; the URL can be overridden at
+ * runtime via the web config portal (WAN MCU) or the Python desktop
+ * app by sending:  CFML:CFFW:<url>
+ *
+ * ThingsBoard URL format:
+ *   http://<host>:<port>/api/v1/<token>/firmware?title=<title>&version=<ver>
+ *
+ * Examples:
+ *   Local: http://192.168.1.100:8080/api/v1/TOKEN/firmware?title=DA2_esp_LAN&version=<current-version>
+ *   Cloud: https://demo.thingsboard.io/api/v1/TOKEN/firmware?title=DA2_esp_LAN&version=<current-version>
+ * ============================================================ */
 
-/* Enable certificate bundle (default: enabled) */
-#define FOTA_CONFIG_LAN_USE_CERT_BUNDLE 1
+/* Full firmware download URL — override via web config or Python app at runtime */
+#define FOTA_CONFIG_LAN_FIRMWARE_URL \
+    "https://github.com/NguyenHoangTrieu/DA2_esp_release/releases/download/V0.0.1/DA2_esp_LAN.bin"
+
+/* Maximum URL length stored at runtime */
+#define FOTA_CONFIG_LAN_FIRMWARE_URL_MAX_LEN  256
+
+/* Use cert bundle for HTTPS URLs.
+ * Disabled for plain HTTP; enable if you switch to an https:// URL. */
+#define FOTA_CONFIG_LAN_USE_CERT_BUNDLE 0
 
 /* Firmware upgrade URL from stdin (set to 1 if URL is "FROM_STDIN") */
 #define FOTA_CONFIG_LAN_FIRMWARE_UPGRADE_URL_FROM_STDIN 0
@@ -29,11 +51,23 @@
 /* Enable WiFi connection */
 #define FOTA_CONFIG_LAN_CONNECT_WIFI 1
 
+/* -----------------------------------------------------------------------
+ * FOTA WiFi AP credentials (must match DA2_esp/Application/FOTA/include/fota_ap.h)
+ * The WAN MCU broadcasts this AP specifically for LAN MCU firmware updates.
+ * ----------------------------------------------------------------------- */
+#define FOTA_CONFIG_LAN_WIFI_AP_SSID   "DA2-FOTA"
+#define FOTA_CONFIG_LAN_WIFI_AP_PASS   "da2fota1"
+#define FOTA_CONFIG_LAN_WIFI_CONNECT_TIMEOUT_MS  30000
+
 /* Enable Ethernet connection */
 #define FOTA_CONFIG_LAN_CONNECT_ETHERNET 0
 
-/* OTA Receive Timeout in milliseconds */
-#define FOTA_CONFIG_LAN_OTA_RECV_TIMEOUT 15000
+/* OTA Receive Timeout in milliseconds.
+ * 30s is plenty for a local HTTP server — file is ~1.6 MB over LAN. */
+#define FOTA_CONFIG_LAN_OTA_RECV_TIMEOUT 300000
+
+/* TCP connect timeout for connectivity pre-check (ms) */
+#define FOTA_CONFIG_LAN_CONNECTIVITY_CHECK_TIMEOUT_MS 5000
 
 /* Enable partial HTTP download (for large firmware images) */
 #define FOTA_CONFIG_LAN_ENABLE_PARTIAL_HTTP_DOWNLOAD 0
@@ -57,8 +91,5 @@
 
 /* Enable dynamic buffer support in mbedTLS */
 #define MBEDTLS_DYNAMIC_BUFFER 1
-
-// Global DNS Server (8.8.8.8)
-#define PPP_GLOBAL_DNS                 0x08080808
 
 #endif /* CONFIG_H */

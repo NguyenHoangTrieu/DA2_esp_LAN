@@ -20,21 +20,21 @@ extern "C" {
 /* ===== Hardware Configuration - Dual Stack Support ===== */
 
 // Stack 1 configuration
-#define RS485_UART_PORT_STACK_1     1
+#define RS485_UART_PORT_STACK_1     UART_NUM_2
 #define RS485_UART_TX_PIN_STACK_1   17
 #define RS485_UART_RX_PIN_STACK_1   18
-#define RS485_DE_GPIO_STACK_1       STACK_GPIO_PIN_1
-#define RS485_RE_GPIO_STACK_1       STACK_GPIO_PIN_2
+#define RS485_DE_GPIO_STACK_1       STACK_GPIO_PIN_06
+#define RS485_RE_GPIO_STACK_1       STACK_GPIO_PIN_05
 
 // Stack 2 configuration
-#define RS485_UART_PORT_STACK_2     2
-#define RS485_UART_TX_PIN_STACK_2   15
-#define RS485_UART_RX_PIN_STACK_2   16
-#define RS485_DE_GPIO_STACK_2       STACK_GPIO_PIN_1
-#define RS485_RE_GPIO_STACK_2       STACK_GPIO_PIN_2
+#define RS485_UART_PORT_STACK_2     UART_NUM_1
+#define RS485_UART_TX_PIN_STACK_2   8
+#define RS485_UART_RX_PIN_STACK_2   21
+#define RS485_DE_GPIO_STACK_2       STACK_GPIO_PIN_06
+#define RS485_RE_GPIO_STACK_2       STACK_GPIO_PIN_05
 
 /* ===== Default Configuration ===== */
-#define RS485_DEFAULT_BAUD_RATE     9600
+#define RS485_DEFAULT_BAUD_RATE     115200
 #define RS485_DEFAULT_RX_BUF_SIZE   1024
 #define RS485_DEFAULT_TX_BUF_SIZE   512
 
@@ -122,6 +122,58 @@ esp_err_t rs485_comm_flush(rs485_comm_handle_t handle);
  * @return esp_err_t ESP_OK on success
  */
 esp_err_t rs485_comm_set_mode(rs485_comm_handle_t handle, rs485_mode_t mode);
+
+/* ===== JSON GPIO Mode Configuration ===== */
+
+/** Maximum GPIO pin actions per RS485 mode */
+#define RS485_COMM_MAX_GPIO_ACTIONS 5
+
+/**
+ * @brief RS485 GPIO pin action (loaded from JSON config)
+ *
+ * pin_1indexed: 1-based pin number parsed from JSON "XY" → Y digit (1-9)
+ * state:        true = HIGH, false = LOW
+ */
+typedef struct {
+    uint8_t pin_1indexed;  /**< 1-indexed pin number (JSON pin[1]-'0') */
+    bool    state;         /**< Pin level: true = HIGH, false = LOW */
+} rs485_gpio_action_t;
+
+/**
+ * @brief RS485 GPIO mode configuration loaded from JSON
+ *
+ * Loaded via CFRS:JSON:0:{...} command.  When loaded, overrides the
+ * hardcoded DE/RE pin assignments in the driver.
+ */
+typedef struct {
+    bool    loaded;                                        /**< true when JSON config has been applied */
+    uint8_t stack_id;                                      /**< Stack this config applies to (0 or 1) */
+    rs485_gpio_action_t send_actions[RS485_COMM_MAX_GPIO_ACTIONS]; /**< GPIO actions to enter SEND mode */
+    uint8_t             send_count;                        /**< Number of send_actions entries */
+    uint16_t            send_delay_ms;                     /**< Delay after asserting SEND mode */
+    rs485_gpio_action_t recv_actions[RS485_COMM_MAX_GPIO_ACTIONS]; /**< GPIO actions to enter RECEIVE mode */
+    uint8_t             recv_count;                        /**< Number of recv_actions entries */
+    uint16_t            recv_delay_ms;                     /**< Delay after asserting RECEIVE mode */
+} rs485_gpio_mode_config_t;
+
+/**
+ * @brief Load RS485 GPIO mode configuration (from JSON parser)
+ *
+ * Stores the configuration globally.  Subsequent calls to rs485_comm_set_mode()
+ * will use these GPIO actions instead of the hardcoded DE/RE pins.
+ *
+ * @param config  Pointer to filled rs485_gpio_mode_config_t
+ * @return ESP_OK on success
+ */
+esp_err_t rs485_comm_load_gpio_config(const rs485_gpio_mode_config_t *config);
+
+/**
+ * @brief Get current GPIO mode configuration
+ *
+ * @param config  Output pointer (must not be NULL)
+ * @return ESP_OK on success, ESP_ERR_NOT_FOUND if no config loaded
+ */
+esp_err_t rs485_comm_get_gpio_config(rs485_gpio_mode_config_t *config);
 
 #ifdef __cplusplus
 }
