@@ -5,6 +5,7 @@
  */
 
 #include "storage_handler.h"
+#include "frame_types.h"
 #include "SDCard_comm.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -17,10 +18,10 @@
 
 static const char *TAG = "STORAGE";
 
-/* Configuration - 5KB buffer with 500ms timeout for packet batching */
+/* Configuration - 5KB buffer with unified 10ms timeout for packet batching */
 #define BATCH_BUFFER_SIZE 5120   // 5 KB buffer
 #define MAX_PACKET_SIZE 8192     // Max single packet size
-#define FLUSH_TIMEOUT_MS 500     // 500ms idle timeout - packets within 500ms batched to same file
+#define FLUSH_TIMEOUT_MS INTER_MCU_BATCH_INTERVAL_MS
 
 /* Batch Buffer Structure */
 typedef struct {
@@ -118,9 +119,9 @@ esp_err_t storage_handler_init(void) {
   memset(g_batch_buffer, 0, sizeof(batch_buffer_t));
   g_last_write_us = esp_timer_get_time(); // Initialize timestamp
 
-  /* Create 500ms flush timer - check every 100ms for responsive batching */
+  /* Create flush timer - check every 10ms for responsive batching */
   g_flush_timer = xTimerCreate("sd_flush",
-                               pdMS_TO_TICKS(100), // Check every 100ms
+                               pdMS_TO_TICKS(INTER_MCU_BATCH_INTERVAL_MS),
                                pdTRUE,              // Auto-reload
                                NULL, flush_timer_callback);
   if (g_flush_timer == NULL) {

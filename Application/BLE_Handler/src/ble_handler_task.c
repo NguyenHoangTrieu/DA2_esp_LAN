@@ -30,7 +30,7 @@ static const char *TAG = "BLE_TASK";
 #define BLE_COMMAND_QUEUE_SIZE       10
 #define BLE_MAX_STACKS               2      // Stack 0 and Stack 1
 #define BLE_UPLINK_BATCH_MAX         8
-#define BLE_UPLINK_BATCH_FLUSH_MS    50
+#define BLE_UPLINK_BATCH_FLUSH_MS    INTER_MCU_BATCH_INTERVAL_MS
 #define BLE_LISTEN_BUFFER_SIZE       512    // Unsolicited event receive buffer
 
 /* ===== Static Data ===== */

@@ -15,13 +15,14 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "esp_err.h"
+#include "frame_types.h"
 #include "zigbee_handler.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define ZIGBEE_UPLINK_PAYLOAD_MAX_LEN 1024
+#define ZIGBEE_UPLINK_PAYLOAD_MAX_LEN INTER_MCU_PAYLOAD_MAX_LEN
 
 /* ===== Type Definitions ===== */
 

@@ -22,6 +22,7 @@
 #define BLE_NATIVE_DOWNLINK_H
 
 #include "esp_err.h"
+#include "frame_types.h"
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -32,7 +33,7 @@ extern "C" {
 #define BLE_NATIVE_DOWNLINK_QUEUE_DEPTH  8
 
 /* Maximum length of one downlink command item (verb + JSON params) */
-#define BLE_NATIVE_DOWNLINK_ITEM_MAX     1024
+#define BLE_NATIVE_DOWNLINK_ITEM_MAX     INTER_MCU_PAYLOAD_MAX_LEN
 
 /**
  * @brief Start the downlink task.

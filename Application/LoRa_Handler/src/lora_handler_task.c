@@ -36,9 +36,9 @@ static const char *TAG = "LORA_TASK";
 #define LORA_COMMAND_QUEUE_SIZE        10
 #define LORA_MAX_STACKS                2
 #define LORA_UPLINK_BATCH_MAX          8
-#define LORA_UPLINK_BATCH_FLUSH_MS     50
+#define LORA_UPLINK_BATCH_FLUSH_MS     INTER_MCU_BATCH_INTERVAL_MS
 #define LORA_LISTEN_BUFFER_SIZE        2048  // Unsolicited event receive buffer
-#define LORA_WAN_UPLINK_MAX            2048
+#define LORA_WAN_UPLINK_MAX            INTER_MCU_PAYLOAD_MAX_LEN
 
 /* ===== Static Data ===== */
 

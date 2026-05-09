@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "frame_types.h"
 #include "driver/spi_master.h"
 #include "esp_err.h"
 
@@ -22,7 +23,7 @@ extern "C" {
 #define WAN_COMM_DQ_RETRY_COUNT       10
 #define WAN_COMM_TIMEOUT_MS           1000
 #define WAN_COMM_MAX_TRANSFER_SIZE    16384
-#define WAN_COMM_FIXED_XFER_LEN       1024      // Fixed transfer length (bytes)
+#define WAN_COMM_FIXED_XFER_LEN       (INTER_MCU_PAYLOAD_MAX_LEN + WAN_COMM_HEADER_SIZE)
 #define WAN_COMM_DMA_DESCRIPTOR_SIZE  4092      // ESP32 max per descriptor
 #define WAN_COMM_MAX_DMA_DESCRIPTORS  8
 

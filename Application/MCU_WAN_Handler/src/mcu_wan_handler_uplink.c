@@ -24,7 +24,7 @@ static const char *TAG = "WAN_UL";
  * without exhausting internal heap during boot. */
 #define UPLINK_QUEUE_SIZE 32
 #define UPLINK_QUEUE_SEND_WAIT_MS 20
-#define MAX_PAYLOAD_SIZE 2048
+#define MAX_PAYLOAD_SIZE INTER_MCU_PAYLOAD_MAX_LEN
 #define ACK_TIMEOUT_MS 2000  /* STM32 forwards DT to ThingsBoard via MQTT before ACKing; 200ms was too short */
 #define RTC_REQUEST_INTERVAL_MS 1000
 #define MAX_RETRY_COUNT 3
@@ -498,10 +498,10 @@ skip_sd_retry:
       xSemaphoreGive(g_qspi_mutex);
     }
 
-    // D) Periodic Flush (500ms to match timeout batching, outside SPI mutex)
+    // D) Periodic Flush (matches unified timeout batching, outside SPI mutex)
     // This handles timeout flushes set by storage handler timer callback
 
-    if ((now - last_flush) >= pdMS_TO_TICKS(500)) {
+    if ((now - last_flush) >= pdMS_TO_TICKS(INTER_MCU_BATCH_INTERVAL_MS)) {
       storage_handler_flush();
       wan_comm_flush_dma_buffer(g_wan_handle);
       last_flush = now;

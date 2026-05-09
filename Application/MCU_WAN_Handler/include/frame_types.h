@@ -24,6 +24,10 @@
 #define PREFIX_QUERY "DQ"  // Data Query
 #define PREFIX_CFCQ "CQ"   // Config Query
 
+// ===== Inter-MCU Common Limits =====
+#define INTER_MCU_PAYLOAD_MAX_LEN 2048
+#define INTER_MCU_BATCH_INTERVAL_MS 10
+
 // ===== Handler Type Identifiers (3-byte ASCII) =====
 #define HANDLER_TYPE_CAN "CAN"
 #define HANDLER_TYPE_LOR "LOR" // LoRa

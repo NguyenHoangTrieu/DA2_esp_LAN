@@ -22,6 +22,7 @@
 #define BLE_GATT_DOWNLINK_H
 
 #include "esp_err.h"
+#include "frame_types.h"
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -29,7 +30,7 @@ extern "C" {
 #endif
 
 #define BLE_GATT_DOWNLINK_QUEUE_DEPTH  8
-#define BLE_GATT_DOWNLINK_ITEM_MAX     1024
+#define BLE_GATT_DOWNLINK_ITEM_MAX     INTER_MCU_PAYLOAD_MAX_LEN
 
 /**
  * @brief Start the downlink task.  Called from ble_gatt_handler_init().

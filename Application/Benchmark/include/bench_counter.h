@@ -32,7 +32,7 @@ extern "C" {
  *        1 = enable benchmark counting + periodic BENCH log.
  *        0 = compile benchmark API as no-op (similar to disabling logs).
  */
-#define BENCH_ENABLE 1
+#define BENCH_ENABLE 0
 
 /**
  * @brief Set to 1 to suppress high-frequency data-path log spam during
