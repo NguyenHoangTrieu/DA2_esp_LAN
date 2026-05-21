@@ -347,9 +347,9 @@ static void lora_downlink_task(void *pvParameters) {
                     }
 
                     if (resp_len > 0 && resp_len < 4096) {
-                        if (!mcu_wan_enqueue_uplink(HANDLER_LORA,
-                                                     (uint8_t *)resp_packet,
-                                                     (uint16_t)resp_len)) {
+                        if (!mcu_wan_enqueue_uplink_local(HANDLER_LORA,
+                                                           (uint8_t *)resp_packet,
+                                                           (uint16_t)resp_len)) {
                             ESP_LOGW(TAG, "[Stack %d] Failed to enqueue response to WAN",
                                      stack_id);
                         }

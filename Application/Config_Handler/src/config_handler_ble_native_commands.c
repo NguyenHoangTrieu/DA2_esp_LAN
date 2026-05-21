@@ -44,7 +44,7 @@ esp_err_t config_parse_ble_native_command(const uint8_t *data, uint16_t len) {
 #if BLE_NATIVE_MESH_SUPPORTED == 0
     ESP_LOGW(TAG, "CMD: BLE Mesh not supported in this build");
     const char *not_sup = "CFBN:FAIL:NOT_SUPPORTED";
-    mcu_wan_enqueue_uplink(HANDLER_BLE_NATIVE,
+    mcu_wan_enqueue_uplink_local(HANDLER_BLE_NATIVE,
                            (uint8_t *)not_sup, (uint16_t)strlen(not_sup));
     return ESP_ERR_NOT_SUPPORTED;
 #endif
@@ -56,7 +56,7 @@ esp_err_t config_parse_ble_native_command(const uint8_t *data, uint16_t len) {
     if (!ble_native_config_is_loaded(stack_id)) {
         ESP_LOGW(TAG, "CMD: not configured yet — send CFBN:JSON first");
         const char *err = "CFBN:FAIL:NOT_CONFIGURED";
-        mcu_wan_enqueue_uplink(HANDLER_BLE_NATIVE,
+        mcu_wan_enqueue_uplink_local(HANDLER_BLE_NATIVE,
                                (uint8_t *)err, (uint16_t)strlen(err));
         return ESP_FAIL;
     }
@@ -68,7 +68,7 @@ esp_err_t config_parse_ble_native_command(const uint8_t *data, uint16_t len) {
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "CMD: execute failed: %s", esp_err_to_name(ret));
         const char *err = "CFBN:FAIL:QUEUE_FULL";
-        mcu_wan_enqueue_uplink(HANDLER_BLE_NATIVE,
+        mcu_wan_enqueue_uplink_local(HANDLER_BLE_NATIVE,
                                (uint8_t *)err, (uint16_t)strlen(err));
     }
     return ret;
@@ -94,7 +94,7 @@ esp_err_t config_parse_ble_native_json(const uint8_t *data, uint16_t len) {
 #if BLE_NATIVE_MESH_SUPPORTED == 0
     ESP_LOGW(TAG, "JSON: BLE Mesh not supported in this build");
     const char *not_sup_j = "CFBN:FAIL:NOT_SUPPORTED";
-    mcu_wan_enqueue_uplink(HANDLER_BLE_NATIVE,
+    mcu_wan_enqueue_uplink_local(HANDLER_BLE_NATIVE,
                            (uint8_t *)not_sup_j, (uint16_t)strlen(not_sup_j));
     return ESP_ERR_NOT_SUPPORTED;
 #endif

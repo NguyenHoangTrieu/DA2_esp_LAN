@@ -47,9 +47,25 @@ esp_err_t mcu_wan_handler_stop(void);
 
 /**
  * @brief Enqueue uplink data from WAN handlers to be sent to WAN MCU
+ *
+ * Default route is UPLINK_ROUTE_CLOUD: payload is treated as telemetry,
+ * persisted to SD when internet is offline, and replayed when online.
+ * Use for node-originated data (LoRa/BLE/Zigbee/RS485 sensors, events).
  */
 bool mcu_wan_enqueue_uplink(handler_id_t source_id, uint8_t *data,
                             uint16_t len);
+
+/**
+ * @brief Enqueue a local response that must reach the WAN MCU immediately,
+ *        regardless of internet state, and must NOT be persisted to SD.
+ *
+ * Use for every ACK / error / result that answers a CF command originated by
+ * the config app (UART/USB/Web). WAN MCU correlates these responses with the
+ * last CF source via a short-lived cache; stale responses replayed from SD
+ * would route to MQTT instead of the originating channel.
+ */
+bool mcu_wan_enqueue_uplink_local(handler_id_t source_id, uint8_t *data,
+                                  uint16_t len);
 
 /**
  * @brief Get current internet status (cached from WAN MCU)

@@ -111,7 +111,7 @@ esp_err_t config_parse_lora_command(const uint8_t *data, uint16_t len) {
             int  err_len = snprintf(err_resp, sizeof(err_resp),
                                     "CFLR:%d:FAIL:NO_FUNC:%s", stack_id, func_name);
             if (err_len > 0) {
-                mcu_wan_enqueue_uplink(HANDLER_LORA, (uint8_t *)err_resp, (uint16_t)err_len);
+                mcu_wan_enqueue_uplink_local(HANDLER_LORA, (uint8_t *)err_resp, (uint16_t)err_len);
             }
             return ESP_FAIL;
         }
@@ -138,7 +138,7 @@ esp_err_t config_parse_lora_command(const uint8_t *data, uint16_t len) {
             int  err_len = snprintf(err_resp, sizeof(err_resp),
                                     "CFLR:%d:FAIL:NO_MATCH", stack_id);
             if (err_len > 0) {
-                mcu_wan_enqueue_uplink(HANDLER_LORA, (uint8_t *)err_resp, (uint16_t)err_len);
+                mcu_wan_enqueue_uplink_local(HANDLER_LORA, (uint8_t *)err_resp, (uint16_t)err_len);
             }
             return ESP_FAIL;
         }
@@ -170,7 +170,7 @@ esp_err_t config_parse_lora_command(const uint8_t *data, uint16_t len) {
         int  err_len = snprintf(err_resp, sizeof(err_resp),
                                 "CFLR:%d:FAIL:QUEUE_FULL", stack_id);
         if (err_len > 0) {
-            mcu_wan_enqueue_uplink(HANDLER_LORA, (uint8_t *)err_resp, (uint16_t)err_len);
+            mcu_wan_enqueue_uplink_local(HANDLER_LORA, (uint8_t *)err_resp, (uint16_t)err_len);
         }
         return ret;
     }
@@ -256,7 +256,7 @@ esp_err_t config_parse_lora_json(const uint8_t *data, uint16_t len) {
                  esp_err_to_name(ret));
         /* Notify App – module_monitor not running or queue full */
         uint8_t err_resp[] = "LR:JSON:FAIL:QUEUE";
-        mcu_wan_enqueue_uplink(HANDLER_LORA, err_resp, sizeof(err_resp) - 1);
+        mcu_wan_enqueue_uplink_local(HANDLER_LORA, err_resp, sizeof(err_resp) - 1);
         return ret;
     }
 

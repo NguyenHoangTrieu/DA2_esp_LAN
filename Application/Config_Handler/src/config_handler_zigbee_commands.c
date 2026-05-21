@@ -108,7 +108,7 @@ esp_err_t config_parse_zigbee_command(const uint8_t *data, uint16_t len) {
             char err_resp[64];
             int  el = snprintf(err_resp, sizeof(err_resp),
                                "CFZB:%d:FAIL:NO_FUNC:%s", stack_id, func_name);
-            if (el > 0) mcu_wan_enqueue_uplink(HANDLER_ZIGBEE, (uint8_t *)err_resp, (uint16_t)el);
+            if (el > 0) mcu_wan_enqueue_uplink_local(HANDLER_ZIGBEE, (uint8_t *)err_resp, (uint16_t)el);
             return ESP_FAIL;
         }
 
@@ -159,7 +159,7 @@ esp_err_t config_parse_zigbee_command(const uint8_t *data, uint16_t len) {
         char err[64];
         int  el = snprintf(err, sizeof(err), "CFZB:%d:FAIL:%.*s:QUEUE_FULL",
                            stack_id, copy_len, req.command);
-        if (el > 0) mcu_wan_enqueue_uplink(HANDLER_ZIGBEE, (uint8_t *)err, (uint16_t)el);
+        if (el > 0) mcu_wan_enqueue_uplink_local(HANDLER_ZIGBEE, (uint8_t *)err, (uint16_t)el);
         return ret;
     }
 
@@ -243,7 +243,7 @@ esp_err_t config_parse_zigbee_json(const uint8_t *data, uint16_t len) {
         ESP_LOGE(TAG, "ZIGBEE JSON: module_monitor queue failed: %s",
                  esp_err_to_name(ret));
         uint8_t err_resp[] = "CFZB:JSON:FAIL:QUEUE";
-        mcu_wan_enqueue_uplink(HANDLER_ZIGBEE, err_resp, sizeof(err_resp) - 1);
+        mcu_wan_enqueue_uplink_local(HANDLER_ZIGBEE, err_resp, sizeof(err_resp) - 1);
         return ret;
     }
 

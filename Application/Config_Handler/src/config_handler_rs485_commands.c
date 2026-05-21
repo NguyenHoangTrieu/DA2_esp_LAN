@@ -144,7 +144,7 @@ esp_err_t config_parse_rs485_json(const uint8_t *data, uint16_t len) {
         ESP_LOGE(TAG, "RS485 JSON: failed to notify module_monitor: %s",
                  esp_err_to_name(ret));
         const char ack[] = "CFRS:JSON:FAIL:QUEUE";
-        mcu_wan_enqueue_uplink(HANDLER_RS485, (uint8_t *)ack, sizeof(ack) - 1);
+        mcu_wan_enqueue_uplink_local(HANDLER_RS485, (uint8_t *)ack, sizeof(ack) - 1);
         return ret;
     }
 
@@ -238,7 +238,7 @@ esp_err_t config_parse_rs485_downlink(const uint8_t *data, uint16_t len) {
     if (success) {
         ESP_LOGI(TAG, "RS485 Downlink: sent %u bytes to handler", bin_len);
         const char ack[] = "CFRS:DATA:OK";
-        mcu_wan_enqueue_uplink(HANDLER_RS485, (uint8_t *)ack, sizeof(ack) - 1);
+        mcu_wan_enqueue_uplink_local(HANDLER_RS485, (uint8_t *)ack, sizeof(ack) - 1);
         return ESP_OK;
     } else {
         ESP_LOGE(TAG, "RS485 Downlink: enqueue failed for stack=%u, len=%u (see RS485_HANDLER logs)",

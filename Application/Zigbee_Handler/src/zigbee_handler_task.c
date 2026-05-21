@@ -310,8 +310,8 @@ static void zigbee_downlink_task(void *pv) {
     }
 
     if (pkt_len > 0 && pkt_len < ZIGBEE_RESP_PACKET_SIZE) {
-      if (!mcu_wan_enqueue_uplink(HANDLER_ZIGBEE, (uint8_t *)resp_pkt,
-                                  (uint16_t)pkt_len)) {
+      if (!mcu_wan_enqueue_uplink_local(HANDLER_ZIGBEE, (uint8_t *)resp_pkt,
+                                        (uint16_t)pkt_len)) {
         ESP_LOGW(TAG, "[Stack %d] Failed to enqueue response", sid);
       }
     }

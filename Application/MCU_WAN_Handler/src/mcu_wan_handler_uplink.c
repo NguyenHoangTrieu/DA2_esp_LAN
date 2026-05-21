@@ -44,6 +44,7 @@ typedef struct {
   uint8_t data[MAX_PAYLOAD_SIZE];
   uint16_t length;
   char rtc_timestamp[20];
+  uplink_route_t route;
 } uplink_item_t;
 
 typedef struct {
@@ -210,8 +211,8 @@ void mcu_wan_handler_stop_uplink_task(void) {
   }
 }
 
-bool mcu_wan_enqueue_uplink(handler_id_t source_id, uint8_t *data,
-                            uint16_t len) {
+static bool enqueue_uplink_internal(handler_id_t source_id, const uint8_t *data,
+                                    uint16_t len, uplink_route_t route) {
   if (!g_uplink_queue || !data || len == 0) {
     ESP_LOGE(TAG, "Invalid uplink parameters");
     return false;
@@ -225,6 +226,7 @@ bool mcu_wan_enqueue_uplink(handler_id_t source_id, uint8_t *data,
   uplink_item_t item;
   item.source_id = source_id;
   item.length = len;
+  item.route = route;
   memcpy(item.data, data, len);
 
   // Attach current RTC timestamp
@@ -253,10 +255,21 @@ bool mcu_wan_enqueue_uplink(handler_id_t source_id, uint8_t *data,
   }
 
 #if !BENCH_QUIET_LOG
-  ESP_LOGI(TAG, "Uplink queued from handler %s: %u bytes",
-           handler_id_to_string(source_id), len);
+  ESP_LOGI(TAG, "Uplink queued from handler %s: %u bytes (route=%s)",
+           handler_id_to_string(source_id), len,
+           (route == UPLINK_ROUTE_LOCAL) ? "LOCAL" : "CLOUD");
 #endif
   return true;
+}
+
+bool mcu_wan_enqueue_uplink(handler_id_t source_id, uint8_t *data,
+                            uint16_t len) {
+  return enqueue_uplink_internal(source_id, data, len, UPLINK_ROUTE_CLOUD);
+}
+
+bool mcu_wan_enqueue_uplink_local(handler_id_t source_id, uint8_t *data,
+                                  uint16_t len) {
+  return enqueue_uplink_internal(source_id, data, len, UPLINK_ROUTE_LOCAL);
 }
 
 internet_status_t mcu_wan_handler_get_internet_status(void) {
@@ -356,7 +369,39 @@ static void uplink_handler_task(void *pvParameters) {
         uint16_t packet_len = 0;
         build_data_packet(&uplink_item, packet, &packet_len);
 
-        if (g_internet_status == INTERNET_STATUS_ONLINE) {
+        // Routing policy (3 paths):
+        //  1. HANDLER_BENCH      : throughput test, fire-and-forget, no SD.
+        //  2. UPLINK_ROUTE_LOCAL : response to a CF command from the config
+        //                          app (UART/USB/Web). Must reach WAN MCU
+        //                          immediately so it can correlate with the
+        //                          recent CF source and route back to the
+        //                          originating channel. NEVER persisted —
+        //                          a stale local response replayed from SD
+        //                          would route to MQTT (app already timed out).
+        //  3. UPLINK_ROUTE_CLOUD : node telemetry. Online → send + ACK gate.
+        //                          Offline → SD backup, replay when online.
+        if (uplink_item.source_id == HANDLER_BENCH) {
+          ack_type_t ack_result;
+          send_data_to_wan(packet, packet_len, &ack_result);
+          // Drop silently on failure — BNC is test traffic only, no SD backup needed
+        } else if (uplink_item.route == UPLINK_ROUTE_LOCAL) {
+          ack_type_t ack_result;
+          esp_err_t send_result =
+              send_data_to_wan(packet, packet_len, &ack_result);
+          if (send_result == ESP_OK) {
+            g_uplink_sent_count++;
+#if !BENCH_QUIET_LOG
+            ESP_LOGI(TAG, "Local response forwarded (#%lu)",
+                     g_uplink_sent_count);
+#endif
+          } else {
+            /* Drop on failure — local responses are time-sensitive; SD
+             * persistence would cause WAN to misroute the stale reply. */
+            g_uplink_fail_count++;
+            ESP_LOGW(TAG, "Local response dropped after retries (handler=%s)",
+                     handler_id_to_string(uplink_item.source_id));
+          }
+        } else if (g_internet_status == INTERNET_STATUS_ONLINE) {
           ack_type_t ack_result;
           esp_err_t send_result =
               send_data_to_wan(packet, packet_len, &ack_result);

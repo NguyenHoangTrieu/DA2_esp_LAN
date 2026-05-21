@@ -125,7 +125,7 @@ esp_err_t config_parse_ble_command(const uint8_t *data, uint16_t len) {
             int err_len = snprintf(err_resp, sizeof(err_resp),
                                    "CFBL:%d:FAIL:NO_FUNC:%s", stack_id, func_name);
             if (err_len > 0) {
-                mcu_wan_enqueue_uplink(HANDLER_BLE, (uint8_t *)err_resp, (uint16_t)err_len);
+                mcu_wan_enqueue_uplink_local(HANDLER_BLE, (uint8_t *)err_resp, (uint16_t)err_len);
             }
             return ESP_FAIL;
         }
@@ -158,7 +158,7 @@ esp_err_t config_parse_ble_command(const uint8_t *data, uint16_t len) {
             int err_len = snprintf(err_resp, sizeof(err_resp),
                                    "CFBL:%d:FAIL:NO_MATCH", stack_id);
             if (err_len > 0) {
-                mcu_wan_enqueue_uplink(HANDLER_BLE, (uint8_t *)err_resp, (uint16_t)err_len);
+                mcu_wan_enqueue_uplink_local(HANDLER_BLE, (uint8_t *)err_resp, (uint16_t)err_len);
             }
             return ESP_FAIL;
         }
@@ -192,7 +192,7 @@ esp_err_t config_parse_ble_command(const uint8_t *data, uint16_t len) {
         int err_len = snprintf(err_resp, sizeof(err_resp),
                                "CFBL:%d:FAIL:QUEUE_FULL", stack_id);
         if (err_len > 0) {
-            mcu_wan_enqueue_uplink(HANDLER_BLE, (uint8_t *)err_resp, (uint16_t)err_len);
+            mcu_wan_enqueue_uplink_local(HANDLER_BLE, (uint8_t *)err_resp, (uint16_t)err_len);
         }
         return ret;
     }
@@ -290,7 +290,7 @@ esp_err_t config_parse_ble_json(const uint8_t *data, uint16_t len) {
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "Failed to send config to module_monitor: %s", esp_err_to_name(ret));
     uint8_t error_resp[] = "BR:JSON:FAIL:QUEUE";
-    mcu_wan_enqueue_uplink(HANDLER_BLE, error_resp, sizeof(error_resp) - 1);
+    mcu_wan_enqueue_uplink_local(HANDLER_BLE, error_resp, sizeof(error_resp) - 1);
     return ret;
   }
 

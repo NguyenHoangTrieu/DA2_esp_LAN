@@ -36,6 +36,7 @@
 #define HANDLER_TYPE_BLE "BLE" // Bluetooth Low Energy (AT module via UART)
 #define HANDLER_TYPE_BLN "BLN" // BLE Native — ESP32 BLE Mesh provisioner
 #define HANDLER_TYPE_BLG "BLG" // BLE GATT Central — ESP32 native GATT client
+#define HANDLER_TYPE_BENCH "BNC" // Throughput benchmark (sink only, never routed)
 
 // ===== Frame Types (Single Byte) =====
 typedef enum {
@@ -69,6 +70,7 @@ typedef enum {
   HANDLER_BLE = 0x05,
   HANDLER_BLE_NATIVE = 0x06,  /* ESP32-S3 direct BLE Mesh provisioner */
   HANDLER_BLE_GATT   = 0x07,  /* ESP32-S3 native BLE GATT Central      */
+  HANDLER_BENCH = 0xFE, // Throughput benchmark traffic — never routed
   HANDLER_UNKNOWN = 0xFF
 } handler_id_t;
 
@@ -77,6 +79,19 @@ typedef enum {
   INTERNET_STATUS_OFFLINE = 0,
   INTERNET_STATUS_ONLINE = 1
 } internet_status_t;
+
+// ===== Uplink Route =====
+/* CLOUD: telemetry-bound; goes through internet check, persisted to SD when
+ *        offline, replayed when online. Use for node data (LoRa/BLE/Zigbee/...).
+ * LOCAL: response to a config command from app (UART/USB/Web). MUST be
+ *        forwarded to WAN MCU immediately so WAN can route it back to the
+ *        originating channel before its CF-source correlation expires.
+ *        NEVER persisted to SD — stale local responses are useless because the
+ *        app has already timed out and the WAN-side correlation is gone. */
+typedef enum {
+  UPLINK_ROUTE_CLOUD = 0,
+  UPLINK_ROUTE_LOCAL = 1
+} uplink_route_t;
 
 // ===== Data Structures =====
 
@@ -203,6 +218,8 @@ static inline const char *handler_id_to_string(handler_id_t id) {
     return HANDLER_TYPE_BLN;
   case HANDLER_BLE_GATT:
     return HANDLER_TYPE_BLG;
+  case HANDLER_BENCH:
+    return HANDLER_TYPE_BENCH;
   default:
     return "UNK";
   }
@@ -228,6 +245,8 @@ static inline handler_id_t handler_string_to_id(const uint8_t *str) {
     return HANDLER_BLE;
   if (str[0] == 'B' && str[1] == 'L' && str[2] == 'N')
     return HANDLER_BLE_NATIVE;
+  if (str[0] == 'B' && str[1] == 'N' && str[2] == 'C')
+    return HANDLER_BENCH;
   return HANDLER_UNKNOWN;
 }
 

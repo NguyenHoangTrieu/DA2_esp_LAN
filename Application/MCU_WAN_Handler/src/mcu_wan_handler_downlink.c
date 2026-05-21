@@ -9,6 +9,7 @@
 #include "rs485_handler.h"
 #include "storage_handler.h"
 #include "wan_comm.h"
+#include "bench_throughput.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -301,6 +302,25 @@ static bool poll_wan_with_retry(uint8_t *rx_buffer, size_t buffer_size) {
 
           got_valid_response = true;
         }
+      }
+      // Data packet from WAN: [DT][handler_type(3)][data_length(2)][payload]
+      else if (rx_buffer[0] == 'D' && rx_buffer[1] == 'T') {
+        if (buffer_size >= DATA_PACKET_HEADER_SIZE) {
+          handler_id_t hid = handler_string_to_id(&rx_buffer[2]);
+          uint16_t data_len = ((uint16_t)rx_buffer[5] << 8) | rx_buffer[6];
+
+          if (hid == HANDLER_BENCH) {
+            /* Throughput benchmark frame — count bytes, send ACK, done. */
+            bench_throughput_count_rx(data_len);
+            send_ack_to_wan(ACK_TYPE_RECEIVED_OK);
+            ESP_LOGD(TAG, "BNC DT frame: %u bytes (bench RX counted)", data_len);
+          } else {
+            /* Unknown DT source — ACK to unblock WAN sender. */
+            ESP_LOGW(TAG, "DT frame with unknown handler 0x%02X, len=%u", hid, data_len);
+            send_ack_to_wan(ACK_TYPE_RECEIVED_OK);
+          }
+        }
+        got_valid_response = true;
       }
       // Ignore polling packet (CF + zeros or all zeros)
       else if ((rx_buffer[0] == 'C' && rx_buffer[1] == 'F' &&

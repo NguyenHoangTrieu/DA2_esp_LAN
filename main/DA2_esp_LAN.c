@@ -7,6 +7,7 @@
 #include "esp_bt_main.h"
 #include "module_config_controller.h"
 #include "bench_counter.h"
+#include "bench_throughput.h"
 #include <esp_pm.h>
 
 static const char *TAG = "MAIN APP";
@@ -84,6 +85,12 @@ void app_main(void) {
   // module handlers (BLE/LoRa/etc.) consume internal RAM on NVS restore.
   mcu_wan_handler_start();
   ESP_LOGI(TAG, "MCU WAN handler started");
+
+  /* Start inter-MCU throughput benchmark (requires WAN handler uplink queue) */
+  if (bench_throughput_start() != ESP_OK) {
+    ESP_LOGW(TAG, "MCU throughput benchmark start failed (non-fatal)");
+  }
+  ESP_LOGI(TAG, "MCU throughput benchmark started");
 
   /* Start benchmark counter task after WAN handler so uplink queue exists */
   if (bench_task_start() != ESP_OK) {

@@ -403,15 +403,15 @@ static void config_handler_task(void *arg) {
           ESP_LOGI(TAG, "RS485 baud rate updated from MCU WAN");
           {
             const char ack[] = "CFRS:BR:OK";
-            mcu_wan_enqueue_uplink(HANDLER_RS485, (uint8_t *)ack,
-                                   sizeof(ack) - 1);
+            mcu_wan_enqueue_uplink_local(HANDLER_RS485, (uint8_t *)ack,
+                                         sizeof(ack) - 1);
           }
         } else {
           ESP_LOGE(TAG, "Failed to parse RS485 baud rate command");
           {
             const char ack[] = "CFRS:BR:FAIL";
-            mcu_wan_enqueue_uplink(HANDLER_RS485, (uint8_t *)ack,
-                                   sizeof(ack) - 1);
+            mcu_wan_enqueue_uplink_local(HANDLER_RS485, (uint8_t *)ack,
+                                         sizeof(ack) - 1);
           }
         }
         break;
@@ -424,8 +424,8 @@ static void config_handler_task(void *arg) {
           ESP_LOGE(TAG, "Failed to parse RS485 JSON config");
           {
             const char ack[] = "CFRS:JSON:FAIL";
-            mcu_wan_enqueue_uplink(HANDLER_RS485, (uint8_t *)ack,
-                                   sizeof(ack) - 1);
+            mcu_wan_enqueue_uplink_local(HANDLER_RS485, (uint8_t *)ack,
+                                         sizeof(ack) - 1);
           }
         }
         break;
@@ -438,8 +438,8 @@ static void config_handler_task(void *arg) {
           ESP_LOGE(TAG, "Failed to parse/send RS485 downlink data");
           {
             const char ack[] = "CFRS:DATA:FAIL";
-            mcu_wan_enqueue_uplink(HANDLER_RS485, (uint8_t *)ack,
-                                   sizeof(ack) - 1);
+            mcu_wan_enqueue_uplink_local(HANDLER_RS485, (uint8_t *)ack,
+                                         sizeof(ack) - 1);
           }
         }
         break;

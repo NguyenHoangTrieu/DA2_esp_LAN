@@ -642,7 +642,7 @@ static void module_monitor_task_impl(void *pvParameters) {
         if (parse_ret != ESP_OK) {
           ESP_LOGE(TAG, "Failed to parse RS485 config for Stack %d", msg.stack_id);
           uint8_t error_resp[] = "CFRS:JSON:FAIL:PARSE";
-          mcu_wan_enqueue_uplink(HANDLER_RS485, error_resp,
+          mcu_wan_enqueue_uplink_local(HANDLER_RS485, error_resp,
                                  sizeof(error_resp) - 1);
           free(msg.json_str);
           continue;
@@ -654,7 +654,7 @@ static void module_monitor_task_impl(void *pvParameters) {
           ESP_LOGE(TAG, "Failed to save RS485 config to NVS for Stack %d: %s",
                    msg.stack_id, esp_err_to_name(save_ret));
           uint8_t error_resp[] = "CFRS:JSON:FAIL:SAVE";
-          mcu_wan_enqueue_uplink(HANDLER_RS485, error_resp,
+          mcu_wan_enqueue_uplink_local(HANDLER_RS485, error_resp,
                                  sizeof(error_resp) - 1);
           free(msg.json_str);
           continue;
@@ -674,7 +674,7 @@ static void module_monitor_task_impl(void *pvParameters) {
           } else if (start_ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to start RS485 handler for Stack %d", msg.stack_id);
             uint8_t error_resp[] = "CFRS:JSON:FAIL:START";
-            mcu_wan_enqueue_uplink(HANDLER_RS485, error_resp, sizeof(error_resp) - 1);
+            mcu_wan_enqueue_uplink_local(HANDLER_RS485, error_resp, sizeof(error_resp) - 1);
             free(msg.json_str);
             continue;
           }
@@ -684,7 +684,7 @@ static void module_monitor_task_impl(void *pvParameters) {
                  handler_already_running ? "already running" : "started",
                  msg.stack_id);
         uint8_t ok_resp[] = "CFRS:JSON:OK";
-        mcu_wan_enqueue_uplink(HANDLER_RS485, ok_resp, sizeof(ok_resp) - 1);
+        mcu_wan_enqueue_uplink_local(HANDLER_RS485, ok_resp, sizeof(ok_resp) - 1);
         free(msg.json_str);
         continue;
       }
@@ -721,13 +721,13 @@ static void module_monitor_task_impl(void *pvParameters) {
             ESP_LOGE(TAG, "Failed to start handler for Stack %d", msg.stack_id);
             if (info->module_type == MODULE_TYPE_ZIGBEE) {
               uint8_t error_resp[] = "CFZB:JSON:FAIL:START";
-              mcu_wan_enqueue_uplink(HANDLER_ZIGBEE, error_resp, sizeof(error_resp) - 1);
+              mcu_wan_enqueue_uplink_local(HANDLER_ZIGBEE, error_resp, sizeof(error_resp) - 1);
             } else if (info->module_type == MODULE_TYPE_LORA) {
               uint8_t error_resp[] = "CFLR:JSON:FAIL:START";
-              mcu_wan_enqueue_uplink(HANDLER_LORA, error_resp, sizeof(error_resp) - 1);
+              mcu_wan_enqueue_uplink_local(HANDLER_LORA, error_resp, sizeof(error_resp) - 1);
             } else {
               uint8_t error_resp[] = "CFBL:JSON:FAIL:START";
-              mcu_wan_enqueue_uplink(HANDLER_BLE, error_resp, sizeof(error_resp) - 1);
+              mcu_wan_enqueue_uplink_local(HANDLER_BLE, error_resp, sizeof(error_resp) - 1);
             }
             free(msg.json_str);
             continue;
@@ -744,12 +744,12 @@ static void module_monitor_task_impl(void *pvParameters) {
           if (cfg_ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to load config into BLE handler for Stack %d", msg.stack_id);
             uint8_t error_resp[] = "CFBL:JSON:FAIL:LOAD";
-            mcu_wan_enqueue_uplink(HANDLER_BLE, error_resp, sizeof(error_resp) - 1);
+            mcu_wan_enqueue_uplink_local(HANDLER_BLE, error_resp, sizeof(error_resp) - 1);
           } else {
             ESP_LOGI(TAG, "%s BLE config loaded for Stack %d",
                      handler_already_running ? "Reloaded" : "Handler started and", msg.stack_id);
             uint8_t ok_resp[] = "CFBL:JSON:OK";
-            mcu_wan_enqueue_uplink(HANDLER_BLE, ok_resp, sizeof(ok_resp) - 1);
+            mcu_wan_enqueue_uplink_local(HANDLER_BLE, ok_resp, sizeof(ok_resp) - 1);
           }
         } else if (info->module_type == MODULE_TYPE_LORA) {
           esp_err_t cfg_ret = lora_handler_task_load_config(msg.stack_id,
@@ -758,12 +758,12 @@ static void module_monitor_task_impl(void *pvParameters) {
           if (cfg_ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to load config into LoRa handler for Stack %d", msg.stack_id);
             uint8_t error_resp[] = "CFLR:JSON:FAIL:LOAD";
-            mcu_wan_enqueue_uplink(HANDLER_LORA, error_resp, sizeof(error_resp) - 1);
+            mcu_wan_enqueue_uplink_local(HANDLER_LORA, error_resp, sizeof(error_resp) - 1);
           } else {
             ESP_LOGI(TAG, "%s LoRa config loaded for Stack %d",
                      handler_already_running ? "Reloaded" : "Handler started and", msg.stack_id);
             uint8_t ok_resp[] = "CFLR:JSON:OK";
-            mcu_wan_enqueue_uplink(HANDLER_LORA, ok_resp, sizeof(ok_resp) - 1);
+            mcu_wan_enqueue_uplink_local(HANDLER_LORA, ok_resp, sizeof(ok_resp) - 1);
           }
         } else if (info->module_type == MODULE_TYPE_ZIGBEE) {
           esp_err_t cfg_ret = zigbee_handler_task_load_config(msg.stack_id,
@@ -772,12 +772,12 @@ static void module_monitor_task_impl(void *pvParameters) {
           if (cfg_ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to load config into Zigbee handler for Stack %d", msg.stack_id);
             uint8_t error_resp[] = "CFZB:JSON:FAIL:LOAD";
-            mcu_wan_enqueue_uplink(HANDLER_ZIGBEE, error_resp, sizeof(error_resp) - 1);
+            mcu_wan_enqueue_uplink_local(HANDLER_ZIGBEE, error_resp, sizeof(error_resp) - 1);
           } else {
             ESP_LOGI(TAG, "%s Zigbee config loaded for Stack %d",
                      handler_already_running ? "Reloaded" : "Handler started and", msg.stack_id);
             uint8_t ok_resp[] = "CFZB:JSON:OK";
-            mcu_wan_enqueue_uplink(HANDLER_ZIGBEE, ok_resp, sizeof(ok_resp) - 1);
+            mcu_wan_enqueue_uplink_local(HANDLER_ZIGBEE, ok_resp, sizeof(ok_resp) - 1);
           }
         } else {
           ESP_LOGI(TAG, "Handler %s for Stack %d",
@@ -788,13 +788,13 @@ static void module_monitor_task_impl(void *pvParameters) {
         // Send failure response – guess handler from prefix
         if (msg.json_len >= 10 && strncmp(msg.json_str, "CFZB", 4) == 0) {
           uint8_t error_resp[] = "CFZB:JSON:FAIL:PARSE";
-          mcu_wan_enqueue_uplink(HANDLER_ZIGBEE, error_resp, sizeof(error_resp) - 1);
+          mcu_wan_enqueue_uplink_local(HANDLER_ZIGBEE, error_resp, sizeof(error_resp) - 1);
         } else if (msg.json_len >= 10 && strncmp(msg.json_str, "CFLR", 4) == 0) {
           uint8_t error_resp[] = "CFLR:JSON:FAIL:PARSE";
-          mcu_wan_enqueue_uplink(HANDLER_LORA, error_resp, sizeof(error_resp) - 1);
+          mcu_wan_enqueue_uplink_local(HANDLER_LORA, error_resp, sizeof(error_resp) - 1);
         } else {
           uint8_t error_resp[] = "CFBL:JSON:FAIL:PARSE";
-          mcu_wan_enqueue_uplink(HANDLER_BLE, error_resp, sizeof(error_resp) - 1);
+          mcu_wan_enqueue_uplink_local(HANDLER_BLE, error_resp, sizeof(error_resp) - 1);
         }
       }
 
