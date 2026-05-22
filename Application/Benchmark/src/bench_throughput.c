@@ -33,7 +33,7 @@ static const char *TAG = "BENCH_TP";
 
 /* ---------- Configuration ---------- */
 #define BENCH_TP_TASK_STACK_WORDS (4096 / sizeof(StackType_t))
-#define BENCH_TP_TASK_PRIORITY    2   /* below all real handler tasks */
+#define BENCH_TP_TASK_PRIORITY    4   /* raised from 2; below uplink(5) so it doesn't starve it */
 #define BENCH_TP_PAYLOAD_LEN      INTER_MCU_PAYLOAD_MAX_LEN /* 2048 bytes */
 
 /* ---------- Shared state (portMUX protected) ---------- */

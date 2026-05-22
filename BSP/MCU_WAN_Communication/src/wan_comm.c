@@ -500,11 +500,15 @@ wan_comm_status_t wan_comm_request_data(wan_comm_handle_t handle,
         return WAN_COMM_ERR_INVALID_ARG;
     }
     
-    uint16_t transfer_len = WAN_COMM_FIXED_XFER_LEN;
-    if (length_to_read > transfer_len) {
+    // Allow short DQ polls (e.g., ACK-only) to skip the 2050-byte minimum.
+    // DMA requires 4-byte alignment; round up but never exceed the TX buffer.
+    uint16_t transfer_len;
+    if (length_to_read >= WAN_COMM_FIXED_XFER_LEN) {
         transfer_len = length_to_read;
+    } else {
+        transfer_len = (uint16_t)((length_to_read + 3u) & ~3u);
+        if (transfer_len < 4) transfer_len = 4;
     }
-
     wan_comm_status_t status = wan_comm_validate_transaction(handle, transfer_len);
     if (status != WAN_COMM_OK) {
         return status;

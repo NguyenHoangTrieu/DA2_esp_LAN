@@ -26,6 +26,9 @@ static const char *TAG = "WAN_UL";
 #define UPLINK_QUEUE_SEND_WAIT_MS 20
 #define MAX_PAYLOAD_SIZE INTER_MCU_PAYLOAD_MAX_LEN
 #define ACK_TIMEOUT_MS 2000  /* STM32 forwards DT to ThingsBoard via MQTT before ACKing; 200ms was too short */
+#define BENCH_ACK_TIMEOUT_MS 100  /* Short ACK timeout for benchmark (WAN responds in <5ms) */
+#define UPLINK_BURST_COUNT 8      /* Max queue items drained per loop iteration */
+#define UPLINK_ACK_TIGHT_POLLS 32 /* DQ polls per ACK without yield (covers ~400µs WAN prep window) */
 #define RTC_REQUEST_INTERVAL_MS 1000
 #define MAX_RETRY_COUNT 3
 #define HANDSHAKE_INTERVAL_MS 1000
@@ -92,7 +95,7 @@ static void uplink_handler_task(void *pvParameters);
 static esp_err_t perform_handshake(void);
 static esp_err_t request_rtc_and_status(void);
 static esp_err_t send_data_to_wan(const uint8_t *data, uint16_t length,
-                                  ack_type_t *ack_out);
+                                  ack_type_t *ack_out, uint32_t ack_timeout_ms);
 static void build_data_packet(const uplink_item_t *item, uint8_t *packet,
                               uint16_t *packet_len);
 // Downlink
@@ -345,6 +348,7 @@ static void uplink_handler_task(void *pvParameters) {
   TickType_t last_sd_retry_attempt = 0;  // Track last SD retry to avoid spam
   uint8_t consecutive_sd_failures = 0;   // Track consecutive failures for same file
   uplink_item_t uplink_item;
+  bool had_work = false;  /* set each iteration for adaptive vTaskDelay */
 
   while (g_handler_running) {
 
@@ -355,9 +359,10 @@ static void uplink_handler_task(void *pvParameters) {
     if (xSemaphoreTake(g_qspi_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) ==
         pdTRUE) {
 
-      // A) Check Uplink Queue
-
-      if (xQueueReceive(g_uplink_queue, &uplink_item, 0) == pdTRUE) {
+      // A) Check Uplink Queue — burst up to UPLINK_BURST_COUNT items
+      int burst_count = 0;
+      while (burst_count < UPLINK_BURST_COUNT &&
+             xQueueReceive(g_uplink_queue, &uplink_item, 0) == pdTRUE) {
 
 #if !BENCH_QUIET_LOG
         ESP_LOGI(TAG, "Processing uplink from handler %s: %u bytes",
@@ -382,12 +387,12 @@ static void uplink_handler_task(void *pvParameters) {
         //                          Offline → SD backup, replay when online.
         if (uplink_item.source_id == HANDLER_BENCH) {
           ack_type_t ack_result;
-          send_data_to_wan(packet, packet_len, &ack_result);
+          send_data_to_wan(packet, packet_len, &ack_result, BENCH_ACK_TIMEOUT_MS);
           // Drop silently on failure — BNC is test traffic only, no SD backup needed
         } else if (uplink_item.route == UPLINK_ROUTE_LOCAL) {
           ack_type_t ack_result;
           esp_err_t send_result =
-              send_data_to_wan(packet, packet_len, &ack_result);
+              send_data_to_wan(packet, packet_len, &ack_result, ACK_TIMEOUT_MS);
           if (send_result == ESP_OK) {
             g_uplink_sent_count++;
 #if !BENCH_QUIET_LOG
@@ -404,7 +409,7 @@ static void uplink_handler_task(void *pvParameters) {
         } else if (g_internet_status == INTERNET_STATUS_ONLINE) {
           ack_type_t ack_result;
           esp_err_t send_result =
-              send_data_to_wan(packet, packet_len, &ack_result);
+              send_data_to_wan(packet, packet_len, &ack_result, ACK_TIMEOUT_MS);
 
           if (send_result == ESP_OK) {
             if (ack_result == ACK_TYPE_INTERNET_OK) {
@@ -432,7 +437,9 @@ static void uplink_handler_task(void *pvParameters) {
           storage_handler_save(packet, packet_len);
           g_sd_backup_count++;
         }
-      }
+        burst_count++;
+      }  /* end burst while */
+      had_work = (burst_count > 0);
 
       {
         UBaseType_t q_now = uxQueueMessagesWaiting(g_uplink_queue);
@@ -492,7 +499,7 @@ static void uplink_handler_task(void *pvParameters) {
             ack_type_t ack_result =
                 ACK_TYPE_TIMEOUT; // Initialize to avoid garbage
             esp_err_t send_result =
-                send_data_to_wan(sd_buffer, sd_length, &ack_result);
+                send_data_to_wan(sd_buffer, sd_length, &ack_result, ACK_TIMEOUT_MS);
 
             if (send_result == ESP_OK && ack_result == ACK_TYPE_INTERNET_OK) {
               g_sd_retry_success_count++;
@@ -552,8 +559,8 @@ skip_sd_retry:
       last_flush = now;
     }
 
-    // Small delay before next iteration
-    vTaskDelay(pdMS_TO_TICKS(10));
+    // Adaptive delay: 1 ms when queue was active, 10 ms when idle
+    vTaskDelay(pdMS_TO_TICKS(had_work ? 1 : 10));
   }
 
   ESP_LOGI(TAG, "Uplink Handler Task exiting");
@@ -643,7 +650,7 @@ static esp_err_t request_rtc_and_status(void) {
     return ESP_FAIL;
   }
 
-  vTaskDelay(pdMS_TO_TICKS(100));
+  vTaskDelay(pdMS_TO_TICKS(20));  /* reduced from 100ms; WAN reads RTC in <5ms */
 
   uint8_t response[32] = {0};
   status = wan_comm_request_data(g_wan_handle, response, sizeof(response));
@@ -679,7 +686,7 @@ static esp_err_t request_rtc_and_status(void) {
  * @return ESP_OK on success
  */
 static esp_err_t send_data_to_wan(const uint8_t *data, uint16_t length,
-                                  ack_type_t *ack_out) {
+                                  ack_type_t *ack_out, uint32_t ack_timeout_ms) {
   if (!data || length == 0 || !ack_out) {
     return ESP_ERR_INVALID_ARG;
   }
@@ -696,10 +703,11 @@ static esp_err_t send_data_to_wan(const uint8_t *data, uint16_t length,
       continue;
     }
 
-    // Poll ACK within ACK_TIMEOUT_MS
+    // Poll ACK within ack_timeout_ms
     const TickType_t start = xTaskGetTickCount();
-    const TickType_t timeout_ticks = pdMS_TO_TICKS(ACK_TIMEOUT_MS);
+    const TickType_t timeout_ticks = pdMS_TO_TICKS(ack_timeout_ms);
 
+    uint32_t poll_streak = 0;
     while ((xTaskGetTickCount() - start) < timeout_ticks) {
 
       /* Use 256-byte buffer so the ACK [0x02][0x11] is found even when WAN
@@ -732,8 +740,15 @@ static esp_err_t send_data_to_wan(const uint8_t *data, uint16_t length,
         }
       }
 
-      // Small yield to allow other tasks to run
-      taskYIELD();
+      /* Tight-poll for the first UPLINK_ACK_TIGHT_POLLS iterations — this
+       * covers the ~400 µs WAN ACK preparation window without yielding to
+       * WiFi/system tasks.  After that, yield once per batch so the scheduler
+       * can service higher-priority tasks between poll groups.              */
+      poll_streak++;
+      if (poll_streak >= UPLINK_ACK_TIGHT_POLLS) {
+        taskYIELD();
+        poll_streak = 0;
+      }
     }
 
     ESP_LOGW(TAG, "ACK timeout on attempt %d", retry + 1);
