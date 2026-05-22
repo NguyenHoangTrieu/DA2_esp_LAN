@@ -41,7 +41,7 @@ extern "C" {
  *        1 = compile real sender + reporter tasks.
  *        0 = all functions compiled as no-ops (zero production overhead).
  */
-#define BENCH_THROUGHPUT_ENABLE 0
+#define BENCH_THROUGHPUT_ENABLE 1
 
 /** Reporting interval in milliseconds. */
 #define BENCH_TP_REPORT_INTERVAL_MS 2000
