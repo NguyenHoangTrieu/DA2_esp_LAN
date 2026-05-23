@@ -45,8 +45,8 @@ extern "C" {
 #define SPI_FRAME_HDR_SIZE      9u  /* SOF(2)+TYPE(1)+SEQ(1)+ACK_FOR(2)+LEN(2)+HDRCRC(1) */
 #define SPI_FRAME_TAIL_SIZE     2u  /* CRC16 */
 #define SPI_FRAME_OVERHEAD      (SPI_FRAME_HDR_SIZE + SPI_FRAME_TAIL_SIZE)
-#define SPI_FRAME_MAX_PAYLOAD   4096u
-#define SPI_FRAME_MAX_SIZE      (SPI_FRAME_MAX_PAYLOAD + SPI_FRAME_OVERHEAD)
+#define SPI_FRAME_MAX_SIZE      16384u /* Matches the 16 KB inter-MCU TX/RX buffers. */
+#define SPI_FRAME_MAX_PAYLOAD   (SPI_FRAME_MAX_SIZE - SPI_FRAME_OVERHEAD)
 
 /** Sentinel for ACK_FOR when this frame carries no piggyback ack. */
 #define SPI_FRAME_ACK_NONE      0xFFFFu
