@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "frame_types.h"
+#include "spi_framing.h"               /* for spi_frame_view_t */
 #include "driver/spi_master.h"
 #include "esp_err.h"
 
@@ -245,6 +246,39 @@ uint16_t wan_comm_get_last_acked_seq(wan_comm_handle_t handle);
  * the outstanding window stays under 128 frames.
  */
 bool wan_comm_was_seq_acked(wan_comm_handle_t handle, uint8_t seq);
+
+/* ============================================================================
+ * P3.d — bidirectional bench / full-duplex RX dispatch
+ *
+ * Every master flush is now full-duplex: the slave's tx_buffer content is
+ * clocked back into a 16 KB scratch RX buffer. After the transaction
+ * completes, the parser walks that buffer with spi_frame_parse_stream() and
+ * dispatches each valid frame to a caller-registered callback.
+ *
+ * Used by the bidirectional bench to count WAN→LAN BNC frames, and as a
+ * side-effect updates handle->last_acked_seq from any piggyback ack found.
+ * ========================================================================= */
+
+/**
+ * @brief Callback fired once per slave-to-master frame parsed out of the
+ *        full-duplex flush RX buffer.
+ *
+ * Called from the context of wan_comm_flush_dma_buffer (or any internal
+ * flush triggered by send_data or request_data), with transfer_mutex held.
+ * The callback must not call back into wan_comm or it will deadlock.
+ *
+ * The view pointer is invalidated when the callback returns - copy what you
+ * need before returning.
+ */
+typedef void (*wan_comm_rx_frame_cb_t)(const spi_frame_view_t *view, void *user);
+
+/**
+ * @brief Register (or unregister with cb=NULL) the RX frame callback.
+ *        Replaces any previously registered callback.
+ */
+wan_comm_status_t wan_comm_register_rx_frame_callback(wan_comm_handle_t handle,
+                                                       wan_comm_rx_frame_cb_t cb,
+                                                       void *user);
 
 #ifdef __cplusplus
 }

@@ -64,6 +64,13 @@ struct wan_comm_handle_s {
      * loads are atomic on Xtensa); writes only happen under transfer_mutex. */
     volatile uint16_t last_acked_seq;
 
+    /* P3.d: full-duplex flush RX scratch. flush_dma_locked() captures the
+     * slave's MISO content here and walks it with spi_frame_parse_stream() to
+     * dispatch each parsed frame to rx_frame_cb. Allocated DMA-capable. */
+    uint8_t                *flush_rx_buffer;
+    wan_comm_rx_frame_cb_t  rx_frame_cb;
+    void                   *rx_frame_cb_user;
+
     // GPIO ISR
     bool gpio_isr_configured;
     wan_comm_data_ready_callback_t data_ready_callback;
@@ -118,6 +125,7 @@ static void IRAM_ATTR wan_comm_gpio_isr_handler(void *arg) {
         if (handle->transfer_mutex) vSemaphoreDelete(handle->transfer_mutex); \
         if (handle->rx_buffer) heap_caps_free(handle->rx_buffer); \
         if (handle->tx_request_buffer) heap_caps_free(handle->tx_request_buffer); \
+        if (handle->flush_rx_buffer) heap_caps_free(handle->flush_rx_buffer); \
         if (handle->spi_device) spi_bus_remove_device(handle->spi_device); \
         spi_bus_free(handle->config.host_id); \
         free(handle); \
@@ -203,6 +211,20 @@ wan_comm_status_t wan_comm_init(const wan_comm_config_t *config, wan_comm_handle
         free(h);
         return WAN_COMM_ERR_NOMEM;
     }
+
+    /* P3.d: full-duplex flush scratch (DMA-capable). */
+    h->flush_rx_buffer = (uint8_t*)heap_caps_aligned_alloc(DMA_ALIGNMENT,
+                                                            WAN_COMM_DMA_BUFFER_SIZE,
+                                                            MALLOC_CAP_DMA);
+    if (!h->flush_rx_buffer) {
+        ESP_LOGE(TAG, "Failed to allocate flush RX DMA buffer");
+        heap_caps_free(h->tx_request_buffer);
+        heap_caps_free(h->rx_buffer);
+        free(h);
+        return WAN_COMM_ERR_NOMEM;
+    }
+    h->rx_frame_cb       = NULL;
+    h->rx_frame_cb_user  = NULL;
     
     // Verify DMA alignment
     if (!is_dma_aligned(h->rx_buffer, h->rx_buffer_size_aligned)) {
@@ -366,7 +388,13 @@ wan_comm_status_t wan_comm_deinit(wan_comm_handle_t handle) {
     if (handle->rx_buffer) {
         heap_caps_free(handle->rx_buffer);
     }
-    
+    if (handle->tx_request_buffer) {
+        heap_caps_free(handle->tx_request_buffer);
+    }
+    if (handle->flush_rx_buffer) {
+        heap_caps_free(handle->flush_rx_buffer);
+    }
+
     if (handle->transfer_mutex) {
         vSemaphoreDelete(handle->transfer_mutex);
     }
@@ -779,6 +807,39 @@ bool wan_comm_was_seq_acked(wan_comm_handle_t handle, uint8_t seq) {
     return delta >= 0;
 }
 
+wan_comm_status_t wan_comm_register_rx_frame_callback(wan_comm_handle_t handle,
+                                                       wan_comm_rx_frame_cb_t cb,
+                                                       void *user) {
+    if (!handle || !handle->is_initialized) {
+        return WAN_COMM_ERR_NOT_INITIALIZED;
+    }
+    if (xSemaphoreTake(handle->transfer_mutex, pdMS_TO_TICKS(WAN_COMM_TIMEOUT_MS)) != pdTRUE) {
+        return WAN_COMM_ERR_TIMEOUT;
+    }
+    handle->rx_frame_cb      = cb;
+    handle->rx_frame_cb_user = user;
+    xSemaphoreGive(handle->transfer_mutex);
+    ESP_LOGI(TAG, "RX frame callback %s", cb ? "registered" : "unregistered");
+    return WAN_COMM_OK;
+}
+
+/* P3.d: stream callback that bridges spi_frame_parse_stream() into the
+ * handle's per-frame user callback, and also harvests piggyback ack_for. */
+static void wan_comm_rx_stream_cb(const spi_frame_view_t *view, void *user) {
+    wan_comm_handle_t handle = (wan_comm_handle_t)user;
+    if (!handle) return;
+    /* Update last_acked_seq from every parsed slave→master frame. */
+    if (view->ack_for != SPI_FRAME_ACK_NONE) {
+        handle->last_acked_seq = view->ack_for;
+    }
+    /* Track seq for stats. */
+    spi_frame_track_seq(&handle->rx_prev_seq, view->seq, &handle->frame_stats);
+    /* Fire the registered user callback. */
+    if (handle->rx_frame_cb) {
+        handle->rx_frame_cb(view, handle->rx_frame_cb_user);
+    }
+}
+
 /* P3.c batching: how many frames to accumulate before forcing a flush.
  * Larger = better throughput (amortises per-transaction ~250 µs overhead),
  * worse first-frame latency. 8 × 2 KB payload = ~16 KB per transaction —
@@ -788,27 +849,45 @@ bool wan_comm_was_seq_acked(wan_comm_handle_t handle, uint8_t seq) {
 #endif
 
 /**
- * @brief Issue the accumulated dma_tx.buffer as a single TX-only transaction
- *        and reset the accumulator. Caller must hold transfer_mutex.
- *        No-op when nothing is queued.
+ * @brief Issue the accumulated dma_tx.buffer as a single FULL-DUPLEX
+ *        transaction. Capture the slave's MISO content into flush_rx_buffer,
+ *        walk it with the framing parser, and dispatch each parsed frame to
+ *        the registered RX callback (also updating last_acked_seq).
+ *
+ *        Caller must hold transfer_mutex. No-op when nothing is queued.
+ *
+ * P3.d note: the bench (bench_throughput.c) registers a callback that counts
+ * BNC inner frames to provide the WAN→LAN throughput number. Production
+ * traffic (handshake response, RTC response, etc.) is also visible to the
+ * callback but bench-side filters by inner header.
  */
 static esp_err_t flush_dma_locked(wan_comm_handle_t handle) {
     if (handle->dma_tx.used == 0) {
         return ESP_OK;
     }
+    size_t used = handle->dma_tx.used;
+
     spi_transaction_t trans = {0};
-    trans.length    = handle->dma_tx.used * 8;
+    trans.length    = used * 8;
+    trans.rxlength  = used * 8;
     trans.tx_buffer = handle->dma_tx.buffer;
-    trans.rx_buffer = NULL;
+    trans.rx_buffer = handle->flush_rx_buffer;  /* P3.d: full-duplex capture */
+
     esp_err_t ret = spi_device_transmit(handle->spi_device, &trans);
 
-    /* Reset regardless of outcome — leaving stale frames queued after an
-     * error would replay them next flush. */
+    /* Reset accumulator regardless of outcome — leaving stale frames queued
+     * after an error would replay them next flush. */
     handle->dma_tx.used = 0;
     handle->dma_tx.frame_count = 0;
 
     if (ret == ESP_OK) {
         handle->dma_flushes++;
+        /* P3.d: walk the captured RX buffer for any slave→master frames.
+         * Updates last_acked_seq via wan_comm_rx_stream_cb; the registered
+         * user callback (if any) gets fired per frame. */
+        spi_frame_parse_stream(handle->flush_rx_buffer, used,
+                               wan_comm_rx_stream_cb, handle,
+                               &handle->frame_stats);
     } else {
         ESP_LOGE(TAG, "framed transmit failed: %s", esp_err_to_name(ret));
     }

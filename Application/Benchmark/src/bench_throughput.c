@@ -83,6 +83,27 @@ void bench_throughput_count_tx_drop(void) {
     portEXIT_CRITICAL(&s_mux);
 }
 
+/* P3.d: parses WAN→LAN frames captured by wan_comm's full-duplex flush.
+ * Inner payload format (mirror of LAN→WAN side, see s_inner_buf below):
+ *   [0..1]   "DT"            inserted by slave-side load_tx_data wrapper
+ *   [2..4]   "BNC"
+ *   [5..6]   data_length BE  (= 19 rtc + N payload)
+ *   [7..25]  rtc string
+ *   [26..]   payload (0xAA × N)
+ * Counted bytes = payload only (data_length − 19), matching the slave-side
+ * convention in bench_throughput_wan_count_rx().                            */
+static void bench_tp_rx_cb(const spi_frame_view_t *view, void *user) {
+    (void)user;
+    if (view == NULL || view->payload == NULL || view->len < 7) return;
+    const uint8_t *p = view->payload;
+    if (p[0] != 'D' || p[1] != 'T') return;
+    if (p[2] != 'B' || p[3] != 'N' || p[4] != 'C') return;
+    uint16_t data_length = ((uint16_t)p[5] << 8) | p[6];
+    uint32_t payload_bytes = (data_length > 19u) ? (uint32_t)(data_length - 19u)
+                                                  : (uint32_t)data_length;
+    bench_throughput_count_rx(payload_bytes);
+}
+
 /* ---------- Sender task ---------- */
 
 static void bench_tp_sender_task(void *arg) {
@@ -238,6 +259,14 @@ esp_err_t bench_throughput_start(void) {
 
     s_running = true;
 
+    /* P3.d: hook into wan_comm's full-duplex flush so any WAN→LAN frame
+     * present in the slave's tx_buffer (loaded once by bench_throughput_wan
+     * at start) gets counted via bench_throughput_count_rx(). g_wan_handle
+     * must already be initialised by mcu_wan_handler_start. */
+    if (g_wan_handle != NULL) {
+        wan_comm_register_rx_frame_callback(g_wan_handle, bench_tp_rx_cb, NULL);
+    }
+
     /* --- Sender task --- */
     StackType_t  *send_stack = (StackType_t *)heap_caps_malloc(
         BENCH_TP_TASK_STACK_WORDS * sizeof(StackType_t),
@@ -308,6 +337,10 @@ esp_err_t bench_throughput_start(void) {
 void bench_throughput_stop(void) {
     if (!s_running) return;
     s_running = false;
+    /* Unregister P3.d callback so flush_dma_locked stops counting. */
+    if (g_wan_handle != NULL) {
+        wan_comm_register_rx_frame_callback(g_wan_handle, NULL, NULL);
+    }
     /* Tasks detect s_running==false on their next iteration and self-delete */
     ESP_LOGI(TAG, "Stop requested — tasks will self-delete");
 }
