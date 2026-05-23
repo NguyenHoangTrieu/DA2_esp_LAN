@@ -25,7 +25,18 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "mcu_wan_handler.h"
+#include "wan_comm.h"
 #include <string.h>
+
+/* P2b: sender bypasses the uplink queue and calls wan_comm directly to
+ * isolate the SPI driver from the rest of the handler pipeline (mutex,
+ * RTC polling, storage flush, etc). The slave side still parses BNC DT
+ * frames through process_data_from_lan(), so the inner payload must
+ * match the legacy [handler 3B][len 2B][rtc 19B][data] layout. */
+#define BENCH_TP_DIRECT_SEND 1
+
+extern wan_comm_handle_t g_wan_handle;
+extern volatile bool g_handshake_done;
 
 static const char *TAG = "BENCH_TP";
 
@@ -50,6 +61,13 @@ static volatile bool s_running = false;
 /* Reusable fill buffer — allocated once in bench_throughput_start() */
 static uint8_t *s_tx_buf = NULL;
 
+#if BENCH_TP_DIRECT_SEND
+/* Inner payload for direct-send mode. Layout the slave expects inside the
+ * DT frame: [BNC handler 3B][data_length 2B BE][rtc 19B][payload N]. */
+#define BENCH_TP_INNER_LEN (3u + 2u + 19u + BENCH_TP_PAYLOAD_LEN)
+static uint8_t *s_inner_buf = NULL;
+#endif
+
 /* ---------- Public counter API ---------- */
 
 void bench_throughput_count_rx(uint32_t bytes) {
@@ -68,13 +86,35 @@ void bench_throughput_count_tx_drop(void) {
 /* ---------- Sender task ---------- */
 
 static void bench_tp_sender_task(void *arg) {
-    ESP_LOGI(TAG, "Sender task started (payload=%u bytes, prio=%d)",
-             BENCH_TP_PAYLOAD_LEN, BENCH_TP_TASK_PRIORITY);
+    ESP_LOGI(TAG, "Sender task started (payload=%u bytes, prio=%d, direct=%d)",
+             BENCH_TP_PAYLOAD_LEN, BENCH_TP_TASK_PRIORITY, BENCH_TP_DIRECT_SEND);
+
+    /* Wait for SPI handshake to complete before flooding. Otherwise the
+     * slave's perform_handshake_slave() never catches the master's CF in its
+     * 500ms RX window because every captured frame is a bench DT. */
+    while (s_running && !g_handshake_done) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    if (!s_running) {
+        vTaskDelete(NULL);
+        return;
+    }
+    ESP_LOGI(TAG, "Handshake done — sender entering flood loop");
 
     while (s_running) {
+#if BENCH_TP_DIRECT_SEND
+        if (g_wan_handle == NULL) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+        wan_comm_status_t st = wan_comm_send_data(g_wan_handle, s_inner_buf,
+                                                   (uint16_t)BENCH_TP_INNER_LEN);
+        bool ok = (st == WAN_COMM_OK);
+#else
         bool ok = mcu_wan_enqueue_uplink(HANDLER_BENCH,
                                          s_tx_buf,
                                          (uint16_t)BENCH_TP_PAYLOAD_LEN);
+#endif
         if (ok) {
             portENTER_CRITICAL(&s_mux);
             s_tx_pkt++;
@@ -84,7 +124,7 @@ static void bench_tp_sender_task(void *arg) {
             portENTER_CRITICAL(&s_mux);
             s_tx_drop++;
             portEXIT_CRITICAL(&s_mux);
-            /* Yield briefly when queue is full to avoid busy-spinning */
+            /* Yield briefly when queue/SPI busy to avoid busy-spinning */
             taskYIELD();
         }
     }
@@ -133,6 +173,20 @@ static void bench_tp_reporter_task(void *arg) {
                  tx_pps, tx_kbps, (unsigned long)tx_drop,
                  (unsigned long)rx_pkt, (unsigned long)rx_b,
                  rx_pps, rx_kbps);
+
+        /* P1 framing diagnostics — cumulative since boot. Useful for spotting
+         * CRC/sync issues introduced by clock or layout changes. */
+        if (g_wan_handle) {
+            uint32_t fok = 0, hcrc = 0, pcrc = 0, resync = 0, gap = 0;
+            wan_comm_get_framing_stats(g_wan_handle, &fok, &hcrc, &pcrc,
+                                       &resync, &gap);
+            ESP_LOGI(TAG,
+                     "[BENCH_TP frame] rx_ok=%lu hdr_crc_fail=%lu "
+                     "pay_crc_fail=%lu resync_bytes=%lu seq_gap=%lu",
+                     (unsigned long)fok, (unsigned long)hcrc,
+                     (unsigned long)pcrc, (unsigned long)resync,
+                     (unsigned long)gap);
+        }
     }
 
     ESP_LOGI(TAG, "Reporter task stopped");
@@ -154,6 +208,33 @@ esp_err_t bench_throughput_start(void) {
     }
     /* Fill with 0xAA pattern so the receiver can optionally verify */
     memset(s_tx_buf, 0xAA, BENCH_TP_PAYLOAD_LEN);
+
+#if BENCH_TP_DIRECT_SEND
+    /* Pre-build the inner DT payload once. Slave decodes:
+     *   [0]      'B'                       handler ID (HANDLER_BENCH = "BNC")
+     *   [1]      'N'
+     *   [2]      'C'
+     *   [3..4]   data_length BE             = 19 + 2048 = 2067
+     *   [5..23]  rtc timestamp (19 bytes)
+     *   [24..]   payload (0xAA × 2048)
+     */
+    s_inner_buf = (uint8_t *)heap_caps_malloc(BENCH_TP_INNER_LEN,
+                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_inner_buf) {
+        ESP_LOGE(TAG, "Failed to allocate inner buf (%u bytes)",
+                 (unsigned)BENCH_TP_INNER_LEN);
+        heap_caps_free(s_tx_buf); s_tx_buf = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+    s_inner_buf[0] = 'B';
+    s_inner_buf[1] = 'N';
+    s_inner_buf[2] = 'C';
+    uint16_t data_len = 19u + BENCH_TP_PAYLOAD_LEN;
+    s_inner_buf[3] = (uint8_t)((data_len >> 8) & 0xFFu);
+    s_inner_buf[4] = (uint8_t)(data_len & 0xFFu);
+    memcpy(&s_inner_buf[5],  "00/00/0000-00:00:00", 19);
+    memset(&s_inner_buf[24], 0xAA, BENCH_TP_PAYLOAD_LEN);
+#endif
 
     s_running = true;
 

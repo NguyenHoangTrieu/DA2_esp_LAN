@@ -26,7 +26,6 @@ static const char *TAG = "WAN_UL";
 #define UPLINK_QUEUE_SEND_WAIT_MS 20
 #define MAX_PAYLOAD_SIZE INTER_MCU_PAYLOAD_MAX_LEN
 #define ACK_TIMEOUT_MS 2000  /* STM32 forwards DT to ThingsBoard via MQTT before ACKing; 200ms was too short */
-#define BENCH_ACK_TIMEOUT_MS 100  /* Short ACK timeout for benchmark (WAN responds in <5ms) */
 #define UPLINK_BURST_COUNT 8      /* Max queue items drained per loop iteration */
 #define UPLINK_ACK_TIGHT_POLLS 32 /* DQ polls per ACK without yield (covers ~400µs WAN prep window) */
 #define RTC_REQUEST_INTERVAL_MS 1000
@@ -386,9 +385,12 @@ static void uplink_handler_task(void *pvParameters) {
         //  3. UPLINK_ROUTE_CLOUD : node telemetry. Online → send + ACK gate.
         //                          Offline → SD backup, replay when online.
         if (uplink_item.source_id == HANDLER_BENCH) {
-          ack_type_t ack_result;
-          send_data_to_wan(packet, packet_len, &ack_result, BENCH_ACK_TIMEOUT_MS);
-          // Drop silently on failure — BNC is test traffic only, no SD backup needed
+          /* P2 fast path: BNC is pure SPI-layer throughput measurement.
+           * Skip the DQ-ACK ping-pong (each ACK poll costs a full transaction
+           * and the slave can take >10 ms to refresh its TX buffer under
+           * WiFi/MQTT load), and instead fire-and-forget the framed DT.
+           * Production traffic still uses send_data_to_wan with ACKs. */
+          (void)wan_comm_send_data(g_wan_handle, packet, packet_len);
         } else if (uplink_item.route == UPLINK_ROUTE_LOCAL) {
           ack_type_t ack_result;
           esp_err_t send_result =
@@ -697,35 +699,40 @@ static esp_err_t send_data_to_wan(const uint8_t *data, uint16_t length,
     ESP_LOGI(TAG, "Transmit attempt %d/%d", retry + 1, MAX_RETRY_COUNT);
 #endif
 
-    wan_comm_status_t status = wan_comm_send_data(g_wan_handle, data, length);
+    uint8_t my_seq = 0;
+    wan_comm_status_t status =
+        wan_comm_send_data_get_seq(g_wan_handle, data, length, &my_seq);
     if (status != WAN_COMM_OK) {
       vTaskDelay(pdMS_TO_TICKS(20));
       continue;
     }
 
-    // Poll ACK within ack_timeout_ms
+    /* Poll ACK within ack_timeout_ms. Two paths can signal success:
+     *  1. Explicit [0x02][0x11][internet_flag] ACK payload from slave's
+     *     downlink_send_ack_to_lan(). Carries internet status.
+     *  2. P3.b cumulative ACK: any slave→master frame piggybacks
+     *     handle->last_acked_seq via the framing layer. If that covers my_seq
+     *     we know the DT arrived even if the slave hasn't loaded the explicit
+     *     ACK frame yet — exit early and assume INTERNET_OK (the periodic
+     *     RTC poll keeps g_internet_status fresh independently). */
     const TickType_t start = xTaskGetTickCount();
     const TickType_t timeout_ticks = pdMS_TO_TICKS(ack_timeout_ms);
 
     uint32_t poll_streak = 0;
     while ((xTaskGetTickCount() - start) < timeout_ticks) {
 
-      /* Use 256-byte buffer so the ACK [0x02][0x11] is found even when WAN
-       * bundles a local-response DT payload before the ACK in the same
-       * 1024-byte SPI frame. */
       uint8_t ack_response[256] = {0};
       status = wan_comm_request_data(g_wan_handle, ack_response,
                                      sizeof(ack_response));
 
       if (status == WAN_COMM_OK) {
-        /* Scan the full 256-byte response for the ACK pattern */
+        /* Path 1: scan for explicit ACK. Preferred when present, since it
+         * carries the slave's current internet status. */
         for (int i = 0; i <= (int)sizeof(ack_response) - 3; i++) {
           if (ack_response[i] == 0x02 &&
               ack_response[i + 1] == ACK_TYPE_RECEIVED_OK) {
 
             *ack_out = (ack_type_t)ack_response[i + 2];
-            /* STM32 may return boolean 0x01/0x00 instead of enum 0x12/0x13 —
-             * normalise: any non-zero internet byte = INTERNET_OK */
             if (*ack_out != ACK_TYPE_INTERNET_OK && *ack_out != ACK_TYPE_NO_INTERNET) {
               *ack_out = (ack_response[i + 2] != 0) ? ACK_TYPE_INTERNET_OK
                                                      : ACK_TYPE_NO_INTERNET;
@@ -740,10 +747,18 @@ static esp_err_t send_data_to_wan(const uint8_t *data, uint16_t length,
         }
       }
 
-      /* Tight-poll for the first UPLINK_ACK_TIGHT_POLLS iterations — this
-       * covers the ~400 µs WAN ACK preparation window without yielding to
-       * WiFi/system tasks.  After that, yield once per batch so the scheduler
-       * can service higher-priority tasks between poll groups.              */
+      /* Path 2: framing-layer cumulative ACK already covers our seq → done. */
+      if (wan_comm_was_seq_acked(g_wan_handle, my_seq)) {
+#if !BENCH_QUIET_LOG
+        ESP_LOGD(TAG, "Cumulative ACK seq=%u (last_acked=0x%04X)",
+                 my_seq, wan_comm_get_last_acked_seq(g_wan_handle));
+#endif
+        *ack_out = ACK_TYPE_INTERNET_OK;
+        return ESP_OK;
+      }
+
+      /* Tight-poll for UPLINK_ACK_TIGHT_POLLS iterations, then yield once so
+       * higher-priority tasks (WiFi/MQTT) can run between poll batches. */
       poll_streak++;
       if (poll_streak >= UPLINK_ACK_TIGHT_POLLS) {
         taskYIELD();
@@ -751,7 +766,9 @@ static esp_err_t send_data_to_wan(const uint8_t *data, uint16_t length,
       }
     }
 
-    ESP_LOGW(TAG, "ACK timeout on attempt %d", retry + 1);
+    ESP_LOGW(TAG, "ACK timeout on attempt %d (my_seq=%u, last_acked=0x%04X)",
+             retry + 1, my_seq,
+             wan_comm_get_last_acked_seq(g_wan_handle));
     vTaskDelay(pdMS_TO_TICKS(20));
   }
 

@@ -1,4 +1,5 @@
 #include "wan_comm.h"
+#include "spi_framing.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "driver/gpio.h"
@@ -24,32 +25,45 @@ typedef struct {
 struct wan_comm_handle_s {
     // Configuration
     wan_comm_config_t config;
-    
+
     // SPI master device handle
     spi_device_handle_t spi_device;
-    
+
     // Legacy DMA-aligned buffers for RX only
     uint8_t *rx_buffer;
     size_t rx_buffer_size_aligned;
-    
+
     // Persistent DMA TX buffer for DQ polling requests (avoids malloc fragmentation)
     uint8_t *tx_request_buffer;
-    
-    // DMA TX Buffer - replaces legacy tx_buffer
+
+    // DMA TX scratch — single frame is built here per call, then transmitted.
+    // Legacy "accumulation" model retired in P1.
     dma_tx_buffer_t dma_tx;
-    
+
     // Synchronization
     SemaphoreHandle_t transfer_mutex;
-    
+
     // State
     bool is_initialized;
     wan_comm_status_t last_error;
-    
+
     // Statistics
     uint32_t packets_sent;
     uint32_t dma_flushes;
     uint32_t error_count;
-    
+
+    // P1 framing
+    uint8_t  tx_seq;              /* rolling sequence used for outgoing frames  */
+    uint16_t rx_prev_seq;         /* last RX seq seen (0xFFFF = none)            */
+    spi_frame_stats_t frame_stats;
+
+    /* P3.b cumulative ACK from slave. SPI_FRAME_ACK_NONE means "no ack yet".
+     * Updated each time we parse a slave→master frame that carries a valid
+     * ack_for field. Means: every master seq up to and including this value
+     * has been received by the slave OK. Read atomically (16-bit aligned
+     * loads are atomic on Xtensa); writes only happen under transfer_mutex. */
+    volatile uint16_t last_acked_seq;
+
     // GPIO ISR
     bool gpio_isr_configured;
     wan_comm_data_ready_callback_t data_ready_callback;
@@ -65,8 +79,24 @@ static void wan_comm_report_error(wan_comm_handle_t handle, wan_comm_status_t er
 static bool is_dma_aligned(const void *ptr, size_t size);
 static size_t calculate_dma_descriptors(size_t buffer_size);
 static esp_err_t setup_data_ready_isr(wan_comm_handle_t handle, int gpio_pin);
-static esp_err_t dma_buffer_add_frame(wan_comm_handle_t handle, const uint8_t *frame, size_t len);
-static esp_err_t dma_buffer_flush(wan_comm_handle_t handle);
+
+/* P1 framing helpers --------------------------------------------------------
+ * transmit_framed_locked() expects the caller to already hold transfer_mutex.
+ * It builds a SPI frame whose payload is [inner_hdr][inner_payload], pads to
+ * 4-byte DMA alignment, and ships it via spi_device_transmit (TX-only).
+ *
+ * inner_hdr2 is the 2-byte application header (CF/DT/DQ in big-endian as on
+ * the legacy wire); pass 0 to omit it.
+ */
+static esp_err_t transmit_framed_locked(wan_comm_handle_t handle,
+                                        uint16_t inner_hdr2,
+                                        const uint8_t *inner_payload,
+                                        uint16_t inner_payload_len);
+
+/* P3.c: flushes the dma_tx batch accumulator as a single TX-only transaction.
+ * Caller must hold transfer_mutex. Defined later in this file alongside
+ * transmit_framed_locked(). */
+static esp_err_t flush_dma_locked(wan_comm_handle_t handle);
 
 // ============================================================================
 // GPIO ISR HANDLER
@@ -264,7 +294,11 @@ wan_comm_status_t wan_comm_init(const wan_comm_config_t *config, wan_comm_handle
     h->packets_sent = 0;
     h->dma_flushes = 0;
     h->error_count = 0;
-    
+    h->tx_seq = 0;
+    h->rx_prev_seq = 0xFFFFu;
+    h->last_acked_seq = SPI_FRAME_ACK_NONE;
+    memset(&h->frame_stats, 0, sizeof(h->frame_stats));
+
     *handle = h;
     
     ESP_LOGI(TAG, "============================================");
@@ -308,12 +342,12 @@ wan_comm_status_t wan_comm_deinit(wan_comm_handle_t handle) {
     
     ESP_LOGI(TAG, "Deinitializing SPI master");
     
-    // Flush any pending DMA buffer
-    if (handle->dma_tx.used > 0) {
-        ESP_LOGI(TAG, "Flushing pending DMA buffer (%zu bytes)", handle->dma_tx.used);
-        dma_buffer_flush(handle);
-    }
-    
+    /* P1: legacy accumulation buffer retired. dma_tx is scratch only and
+     * carries no pending data after the last send_*() call returned. */
+    handle->dma_tx.used = 0;
+    handle->dma_tx.frame_count = 0;
+
+
     // Remove ISR handler
     if (handle->gpio_isr_configured && handle->config.gpio_data_ready_input >= 0) {
         gpio_isr_handler_remove(handle->config.gpio_data_ready_input);
@@ -349,217 +383,195 @@ wan_comm_status_t wan_comm_deinit(wan_comm_handle_t handle) {
     return WAN_COMM_OK;
 }
 
-wan_comm_status_t wan_comm_send_command(wan_comm_handle_t handle, 
-                                         const uint8_t *command_payload, 
+wan_comm_status_t wan_comm_send_command(wan_comm_handle_t handle,
+                                         const uint8_t *command_payload,
                                          uint16_t length) {
     if (!handle || !handle->is_initialized) {
         return WAN_COMM_ERR_NOT_INITIALIZED;
     }
-    
     if (!command_payload || length == 0) {
         return WAN_COMM_ERR_INVALID_ARG;
     }
-    
+
     wan_comm_status_t status = wan_comm_validate_transaction(handle, length);
     if (status != WAN_COMM_OK) {
         return status;
     }
-    
-    // Take mutex
+
     if (xSemaphoreTake(handle->transfer_mutex, pdMS_TO_TICKS(WAN_COMM_TIMEOUT_MS)) != pdTRUE) {
         wan_comm_report_error(handle, WAN_COMM_ERR_TIMEOUT, "send_command mutex timeout");
         return WAN_COMM_ERR_TIMEOUT;
     }
-    
-    // Build frame: [CF header][payload]
-    uint8_t frame[WAN_COMM_HEADER_SIZE + length];
-    frame[0] = (WAN_COMM_HEADER_CF >> 8) & 0xFF;
-    frame[1] = WAN_COMM_HEADER_CF & 0xFF;
-    memcpy(&frame[WAN_COMM_HEADER_SIZE], command_payload, length);
-    
-    uint16_t total_length = length + WAN_COMM_HEADER_SIZE;
 
-    if (total_length > WAN_COMM_FIXED_XFER_LEN) {
-        xSemaphoreGive(handle->transfer_mutex);
-        wan_comm_report_error(handle, WAN_COMM_ERR_INVALID_ARG, "send_data length exceeds fixed transfer size");
-        return WAN_COMM_ERR_INVALID_ARG;
-    }
-
-    // Ensure DMA buffer is empty before adding a new frame
-    if (handle->dma_tx.used != 0) {
-        esp_err_t flush_ret = dma_buffer_flush(handle);
-        if (flush_ret != ESP_OK) {
-            xSemaphoreGive(handle->transfer_mutex);
-            wan_comm_report_error(handle, WAN_COMM_ERR_BUS_BUSY, "send_data pre-flush failed");
-            return WAN_COMM_ERR_BUS_BUSY;
-        }
-    }
-
-    if (total_length > WAN_COMM_FIXED_XFER_LEN) {
-        xSemaphoreGive(handle->transfer_mutex);
-        wan_comm_report_error(handle, WAN_COMM_ERR_INVALID_ARG, "send_command length exceeds fixed transfer size");
-        return WAN_COMM_ERR_INVALID_ARG;
-    }
-    
-    // Ensure DMA buffer is empty before adding a new frame
-    if (handle->dma_tx.used != 0) {
-        esp_err_t flush_ret = dma_buffer_flush(handle);
-        if (flush_ret != ESP_OK) {
-            xSemaphoreGive(handle->transfer_mutex);
-            wan_comm_report_error(handle, WAN_COMM_ERR_BUS_BUSY, "send_command pre-flush failed");
-            return WAN_COMM_ERR_BUS_BUSY;
-        }
-    }
-
-    // Add to DMA buffer
-    esp_err_t ret = dma_buffer_add_frame(handle, frame, total_length);
-    
-    if (ret != ESP_OK) {
-        xSemaphoreGive(handle->transfer_mutex);
-        wan_comm_report_error(handle, WAN_COMM_ERR_BUS_BUSY, "send_command DMA error");
-        return WAN_COMM_ERR_BUS_BUSY;
-    }
-
-    // Flush immediately to transmit a fixed-length frame
-    ret = dma_buffer_flush(handle);
+    esp_err_t ret = transmit_framed_locked(handle, WAN_COMM_HEADER_CF,
+                                            command_payload, length);
     xSemaphoreGive(handle->transfer_mutex);
 
     if (ret != ESP_OK) {
-        wan_comm_report_error(handle, WAN_COMM_ERR_BUS_BUSY, "send_command flush failed");
+        wan_comm_report_error(handle, WAN_COMM_ERR_BUS_BUSY, "send_command transmit failed");
         return WAN_COMM_ERR_BUS_BUSY;
     }
-    
+
     handle->packets_sent++;
-    ESP_LOGD(TAG, "SPI TX: CF %u bytes (total=%lu)", total_length, handle->packets_sent);
-    
+    ESP_LOGD(TAG, "SPI TX framed: CF inner=%u (total tx=%lu)",
+             length, handle->packets_sent);
     return WAN_COMM_OK;
 }
 
-wan_comm_status_t wan_comm_send_data(wan_comm_handle_t handle, 
-                                      const uint8_t *data_payload, 
+wan_comm_status_t wan_comm_send_data(wan_comm_handle_t handle,
+                                      const uint8_t *data_payload,
                                       uint16_t length) {
     if (!handle || !handle->is_initialized) {
         return WAN_COMM_ERR_NOT_INITIALIZED;
     }
-    
     if (!data_payload || length == 0) {
         return WAN_COMM_ERR_INVALID_ARG;
     }
-    
+
     wan_comm_status_t status = wan_comm_validate_transaction(handle, length);
     if (status != WAN_COMM_OK) {
         return status;
     }
-    
-    // Take mutex
+
     if (xSemaphoreTake(handle->transfer_mutex, pdMS_TO_TICKS(WAN_COMM_TIMEOUT_MS)) != pdTRUE) {
         wan_comm_report_error(handle, WAN_COMM_ERR_TIMEOUT, "send_data mutex timeout");
         return WAN_COMM_ERR_TIMEOUT;
     }
-    
-    // Build frame: [DT header][payload]
-    uint8_t frame[WAN_COMM_HEADER_SIZE + length];
-    frame[0] = (WAN_COMM_HEADER_DT >> 8) & 0xFF;
-    frame[1] = WAN_COMM_HEADER_DT & 0xFF;
-    memcpy(&frame[WAN_COMM_HEADER_SIZE], data_payload, length);
-    
-    uint16_t total_length = length + WAN_COMM_HEADER_SIZE;
-    
-    // Add to DMA buffer
-    esp_err_t ret = dma_buffer_add_frame(handle, frame, total_length);
-    
-    if (ret != ESP_OK) {
-        xSemaphoreGive(handle->transfer_mutex);
-        wan_comm_report_error(handle, WAN_COMM_ERR_BUS_BUSY, "send_data DMA error");
-        return WAN_COMM_ERR_BUS_BUSY;
-    }
 
-    // Flush immediately to transmit a fixed-length frame
-    ret = dma_buffer_flush(handle);
+    esp_err_t ret = transmit_framed_locked(handle, WAN_COMM_HEADER_DT,
+                                            data_payload, length);
     xSemaphoreGive(handle->transfer_mutex);
 
     if (ret != ESP_OK) {
-        wan_comm_report_error(handle, WAN_COMM_ERR_BUS_BUSY, "send_data flush failed");
+        wan_comm_report_error(handle, WAN_COMM_ERR_BUS_BUSY, "send_data transmit failed");
         return WAN_COMM_ERR_BUS_BUSY;
     }
-    
+
     handle->packets_sent++;
-    ESP_LOGD(TAG, "SPI TX: DT %u bytes (total=%lu)", total_length, handle->packets_sent);
-    
+    ESP_LOGD(TAG, "SPI TX framed: DT inner=%u (total tx=%lu)",
+             length, handle->packets_sent);
     return WAN_COMM_OK;
 }
 
-wan_comm_status_t wan_comm_request_data(wan_comm_handle_t handle, 
-                                         uint8_t *rx_buffer, 
+wan_comm_status_t wan_comm_request_data(wan_comm_handle_t handle,
+                                         uint8_t *rx_buffer,
                                          uint16_t length_to_read) {
     if (!handle || !handle->is_initialized) {
         return WAN_COMM_ERR_NOT_INITIALIZED;
     }
-    
     if (!rx_buffer || length_to_read == 0) {
         return WAN_COMM_ERR_INVALID_ARG;
     }
-    
-    // Allow short DQ polls (e.g., ACK-only) to skip the 2050-byte minimum.
-    // DMA requires 4-byte alignment; round up but never exceed the TX buffer.
-    uint16_t transfer_len;
-    if (length_to_read >= WAN_COMM_FIXED_XFER_LEN) {
-        transfer_len = length_to_read;
-    } else {
-        transfer_len = (uint16_t)((length_to_read + 3u) & ~3u);
-        if (transfer_len < 4) transfer_len = 4;
+
+    /* The slave will clock back at most (rx_buffer_size) bytes; size the
+     * full-duplex transaction to cover both the DQ frame we send and the
+     * maximum framed response we want to capture.  Honour the caller's
+     * length_to_read as the *inner payload* budget. */
+    size_t inner_budget = length_to_read;
+    size_t transfer_len = SPI_FRAME_OVERHEAD + WAN_COMM_HEADER_SIZE + inner_budget;
+    /* round up to 4-byte DMA alignment */
+    transfer_len = (transfer_len + 3u) & ~((size_t)3u);
+    if (transfer_len < SPI_FRAME_OVERHEAD + WAN_COMM_HEADER_SIZE) {
+        transfer_len = SPI_FRAME_OVERHEAD + WAN_COMM_HEADER_SIZE;
     }
-    wan_comm_status_t status = wan_comm_validate_transaction(handle, transfer_len);
-    if (status != WAN_COMM_OK) {
-        return status;
+    if (transfer_len > handle->rx_buffer_size_aligned) {
+        transfer_len = handle->rx_buffer_size_aligned;
     }
-    
-    // Take mutex
+    if (transfer_len > WAN_COMM_DMA_BUFFER_SIZE) {
+        transfer_len = WAN_COMM_DMA_BUFFER_SIZE;
+    }
+
     if (xSemaphoreTake(handle->transfer_mutex, pdMS_TO_TICKS(WAN_COMM_TIMEOUT_MS)) != pdTRUE) {
         wan_comm_report_error(handle, WAN_COMM_ERR_TIMEOUT, "request_data mutex timeout");
         return WAN_COMM_ERR_TIMEOUT;
     }
-    
-    // Use persistent TX request buffer instead of dynamic allocation
+
+    /* P3.c: flush any pending batched master→slave frames first. Otherwise
+     * the slave wouldn't have received them yet, and its ack_for response
+     * would lag our newest seq → DQ poll loop spins for nothing. */
+    {
+        esp_err_t fret = flush_dma_locked(handle);
+        if (fret != ESP_OK) {
+            xSemaphoreGive(handle->transfer_mutex);
+            wan_comm_report_error(handle, WAN_COMM_ERR_BUS_BUSY, "request_data pre-flush failed");
+            return WAN_COMM_ERR_BUS_BUSY;
+        }
+    }
+
     uint8_t *tx_buffer = handle->tx_request_buffer;
-    
-    // Build polling packet in TX buffer
     memset(tx_buffer, 0, transfer_len);
-    tx_buffer[0] = (WAN_COMM_HEADER_DQ >> 8) & 0xFF;
-    tx_buffer[1] = WAN_COMM_HEADER_DQ & 0xFF;
-    
-    // Clear RX buffer before full-duplex transaction
+
+    /* Build framed DQ request: payload = [DQ_hi][DQ_lo]. */
+    uint8_t dq_inner[WAN_COMM_HEADER_SIZE] = {
+        (uint8_t)((WAN_COMM_HEADER_DQ >> 8) & 0xFFu),
+        (uint8_t)(WAN_COMM_HEADER_DQ & 0xFFu),
+    };
+    /* DQ request: master doesn't ack the slave today, so ack_for=NONE. */
+    size_t built = spi_frame_build(tx_buffer, transfer_len,
+                                    SPI_FT_USER_BLOB, handle->tx_seq++,
+                                    SPI_FRAME_ACK_NONE,
+                                    dq_inner, sizeof(dq_inner));
+    if (built == 0) {
+        xSemaphoreGive(handle->transfer_mutex);
+        wan_comm_report_error(handle, WAN_COMM_ERR_INVALID_ARG, "request_data frame build failed");
+        return WAN_COMM_ERR_INVALID_ARG;
+    }
+    /* Bytes past the built frame are already zero; the slave will simply
+     * clock them out while we read its response in the same transaction. */
+
     memset(handle->rx_buffer, 0, transfer_len);
-    
-    // Setup full-duplex transaction
+
     spi_transaction_t trans = {0};
     trans.flags = 0;
-    trans.length = transfer_len * 8;      // Total bits to transfer
-    trans.rxlength = transfer_len * 8;    // Bits to receive
-    trans.tx_buffer = tx_buffer;          // TX: DQ header + zeros (SEPARATE buffer)
-    trans.rx_buffer = handle->rx_buffer;  // RX: Slave response (CLEANED buffer)
-    
-    // Transmit (blocking, full-duplex)
+    trans.length   = transfer_len * 8;
+    trans.rxlength = transfer_len * 8;
+    trans.tx_buffer = tx_buffer;
+    trans.rx_buffer = handle->rx_buffer;
+
     esp_err_t ret = spi_device_transmit(handle->spi_device, &trans);
-    
+
     if (ret == ESP_OK) {
-        // Copy received data to user buffer
-        uint16_t copy_len = length_to_read;
-        if (copy_len > transfer_len) {
-            copy_len = transfer_len;
+        /* Parse a single frame out of the RX buffer; if no SOF is found, fall
+         * back to a raw copy so callers using a *very* old WAN firmware still
+         * see something — but bump the resync counter so it shows up in stats.
+         */
+        spi_frame_view_t view;
+        spi_frame_status_t st;
+        size_t consumed = 0;
+        bool ok = spi_frame_find(handle->rx_buffer, transfer_len,
+                                  &view, &st, &handle->frame_stats, &consumed);
+        if (ok) {
+            spi_frame_track_seq(&handle->rx_prev_seq, view.seq, &handle->frame_stats);
+            /* P3.b: harvest piggyback ack. Slave puts its max-master-seq-seen
+             * in view.ack_for; we record it so callers can poll for ack. */
+            if (view.ack_for != SPI_FRAME_ACK_NONE) {
+                handle->last_acked_seq = view.ack_for;
+            }
+            uint16_t copy_len = (view.len < length_to_read) ? view.len : length_to_read;
+            if (copy_len > 0 && view.payload) {
+                memcpy(rx_buffer, view.payload, copy_len);
+            }
+            if (copy_len < length_to_read) {
+                memset(&rx_buffer[copy_len], 0, length_to_read - copy_len);
+            }
+            ESP_LOGD(TAG, "SPI RX framed: seq=%u type=0x%02X ack_for=0x%04X inner=%u",
+                     view.seq, view.type, view.ack_for, view.len);
+        } else {
+            /* No valid frame in the response window — common while the slave
+             * has nothing pending to send (TX buffer still all zeros).  Hand
+             * back zeros and let the application-level polling logic retry. */
+            memset(rx_buffer, 0, length_to_read);
+            ESP_LOGV(TAG, "SPI RX framed: no valid frame (status=%d)", (int)st);
         }
-        memcpy(rx_buffer, handle->rx_buffer, copy_len);
-        ESP_LOGD(TAG, "SPI RX: DQ %u bytes (xfer=%u)", copy_len, transfer_len);
     }
-    
+
     xSemaphoreGive(handle->transfer_mutex);
-    
+
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "SPI RX failed: %s", esp_err_to_name(ret));
         wan_comm_report_error(handle, WAN_COMM_ERR_BUS_BUSY, "request_data SPI error");
         return WAN_COMM_ERR_BUS_BUSY;
     }
-    
     return WAN_COMM_OK;
 }
 
@@ -621,20 +633,41 @@ wan_comm_status_t wan_comm_transceive(wan_comm_handle_t handle,
 }
 
 wan_comm_status_t wan_comm_flush_dma_buffer(wan_comm_handle_t handle) {
+    /* P3.c: actually flush. transmit_framed_locked() now appends to dma_tx
+     * and only auto-flushes at WAN_COMM_BATCH_MAX_FRAMES; callers must invoke
+     * this to push small batches out before going idle (uplink handler does
+     * so every INTER_MCU_BATCH_INTERVAL_MS). */
     if (!handle || !handle->is_initialized) {
         return WAN_COMM_ERR_NOT_INITIALIZED;
     }
-    
-    // Take mutex
     if (xSemaphoreTake(handle->transfer_mutex, pdMS_TO_TICKS(WAN_COMM_TIMEOUT_MS)) != pdTRUE) {
+        wan_comm_report_error(handle, WAN_COMM_ERR_TIMEOUT, "flush mutex timeout");
         return WAN_COMM_ERR_TIMEOUT;
     }
-    
-    esp_err_t ret = dma_buffer_flush(handle);
-    
+    esp_err_t ret = flush_dma_locked(handle);
     xSemaphoreGive(handle->transfer_mutex);
-    
-    return (ret == ESP_OK) ? WAN_COMM_OK : WAN_COMM_ERR_BUS_BUSY;
+    if (ret != ESP_OK) {
+        wan_comm_report_error(handle, WAN_COMM_ERR_BUS_BUSY, "flush failed");
+        return WAN_COMM_ERR_BUS_BUSY;
+    }
+    return WAN_COMM_OK;
+}
+
+wan_comm_status_t wan_comm_get_framing_stats(wan_comm_handle_t handle,
+                                              uint32_t *rx_frames_ok,
+                                              uint32_t *rx_hdr_crc_fail,
+                                              uint32_t *rx_payload_crc_fail,
+                                              uint32_t *rx_resync_bytes,
+                                              uint32_t *rx_seq_gap) {
+    if (!handle || !handle->is_initialized) {
+        return WAN_COMM_ERR_NOT_INITIALIZED;
+    }
+    if (rx_frames_ok)        *rx_frames_ok        = handle->frame_stats.frames_ok;
+    if (rx_hdr_crc_fail)     *rx_hdr_crc_fail     = handle->frame_stats.hdr_crc_fail;
+    if (rx_payload_crc_fail) *rx_payload_crc_fail = handle->frame_stats.payload_crc_fail;
+    if (rx_resync_bytes)     *rx_resync_bytes     = handle->frame_stats.resync_bytes;
+    if (rx_seq_gap)          *rx_seq_gap          = handle->frame_stats.seq_gap;
+    return WAN_COMM_OK;
 }
 
 wan_comm_status_t wan_comm_register_data_ready_callback(wan_comm_handle_t handle, 
@@ -680,110 +713,185 @@ wan_comm_status_t wan_comm_clear_error_count(wan_comm_handle_t handle) {
     if (!handle || !handle->is_initialized) {
         return WAN_COMM_ERR_NOT_INITIALIZED;
     }
-    
+
     handle->error_count = 0;
     ESP_LOGI(TAG, "Error count cleared");
     return WAN_COMM_OK;
 }
 
+// ============================================================================
+// P3.b — cumulative-ACK API
+// ============================================================================
+
+wan_comm_status_t wan_comm_send_data_get_seq(wan_comm_handle_t handle,
+                                              const uint8_t *data_payload,
+                                              uint16_t length,
+                                              uint8_t *out_seq) {
+    if (!handle || !handle->is_initialized) {
+        return WAN_COMM_ERR_NOT_INITIALIZED;
+    }
+    if (!data_payload || length == 0 || !out_seq) {
+        return WAN_COMM_ERR_INVALID_ARG;
+    }
+
+    wan_comm_status_t status = wan_comm_validate_transaction(handle, length);
+    if (status != WAN_COMM_OK) {
+        return status;
+    }
+
+    if (xSemaphoreTake(handle->transfer_mutex, pdMS_TO_TICKS(WAN_COMM_TIMEOUT_MS)) != pdTRUE) {
+        wan_comm_report_error(handle, WAN_COMM_ERR_TIMEOUT, "send_data_get_seq mutex timeout");
+        return WAN_COMM_ERR_TIMEOUT;
+    }
+
+    /* Snapshot the seq that transmit_framed_locked is about to consume. */
+    *out_seq = handle->tx_seq;
+    esp_err_t ret = transmit_framed_locked(handle, WAN_COMM_HEADER_DT,
+                                            data_payload, length);
+    xSemaphoreGive(handle->transfer_mutex);
+
+    if (ret != ESP_OK) {
+        wan_comm_report_error(handle, WAN_COMM_ERR_BUS_BUSY, "send_data_get_seq transmit failed");
+        return WAN_COMM_ERR_BUS_BUSY;
+    }
+    handle->packets_sent++;
+    return WAN_COMM_OK;
+}
+
+uint16_t wan_comm_get_last_acked_seq(wan_comm_handle_t handle) {
+    if (!handle || !handle->is_initialized) {
+        return SPI_FRAME_ACK_NONE;
+    }
+    return handle->last_acked_seq;   /* volatile 16-bit read is atomic on Xtensa */
+}
+
+bool wan_comm_was_seq_acked(wan_comm_handle_t handle, uint8_t seq) {
+    if (!handle || !handle->is_initialized) {
+        return false;
+    }
+    uint16_t ack = handle->last_acked_seq;
+    if (ack == SPI_FRAME_ACK_NONE) {
+        return false;
+    }
+    /* Signed 8-bit modular comparison. As long as the outstanding window
+     * stays under 128, (int8_t)(ack - seq) >= 0 iff ack covers seq. */
+    int8_t delta = (int8_t)((uint8_t)ack - seq);
+    return delta >= 0;
+}
+
+/* P3.c batching: how many frames to accumulate before forcing a flush.
+ * Larger = better throughput (amortises per-transaction ~250 µs overhead),
+ * worse first-frame latency. 8 × 2 KB payload = ~16 KB per transaction —
+ * matches WAN_COMM_DMA_BUFFER_SIZE so we essentially fill the buffer.        */
+#ifndef WAN_COMM_BATCH_MAX_FRAMES
+#define WAN_COMM_BATCH_MAX_FRAMES   8
+#endif
+
 /**
- * @brief Add frame to DMA buffer with automatic padding
- * 
- * @param handle Handle
- * @param frame Complete frame (header + payload)
- * @param len Frame length
- * @return ESP_OK on success
+ * @brief Issue the accumulated dma_tx.buffer as a single TX-only transaction
+ *        and reset the accumulator. Caller must hold transfer_mutex.
+ *        No-op when nothing is queued.
  */
-static esp_err_t dma_buffer_add_frame(wan_comm_handle_t handle, const uint8_t *frame, size_t len) {
-    // Check if frame fits in remaining buffer space
-    if (handle->dma_tx.used + len <= WAN_COMM_DMA_BUFFER_SIZE) {
-        // Add frame to buffer
-        memcpy(&handle->dma_tx.buffer[handle->dma_tx.used], frame, len);
-        handle->dma_tx.used += len;
-        handle->dma_tx.frame_count++;
-        
-        ESP_LOGD(TAG, "Frame added to DMA buffer: %zu bytes (%zu/%d used, %lu frames)",
-                 len, handle->dma_tx.used, WAN_COMM_DMA_BUFFER_SIZE, handle->dma_tx.frame_count);
-        
-        return ESP_OK;
-    } else {
-        // Buffer full - pad with 0x00 and flush
-        size_t padding = WAN_COMM_DMA_BUFFER_SIZE - handle->dma_tx.used;
-        memset(&handle->dma_tx.buffer[handle->dma_tx.used], 0x00, padding);  // Dummy bytes
-        handle->dma_tx.used = WAN_COMM_DMA_BUFFER_SIZE;
-        
-        ESP_LOGI(TAG, "DMA buffer full - flushing with %zu bytes 0x00 padding", padding);
-        
-        // Flush buffer
-        esp_err_t ret = dma_buffer_flush(handle);
-        if (ret != ESP_OK) {
-            return ret;
-        }
-        
-        // Start new buffer with current frame
-        memcpy(handle->dma_tx.buffer, frame, len);
-        handle->dma_tx.used = len;
-        handle->dma_tx.frame_count = 1;
-        
-        ESP_LOGI(TAG, "New DMA buffer started: %zu bytes", len);
-        
+static esp_err_t flush_dma_locked(wan_comm_handle_t handle) {
+    if (handle->dma_tx.used == 0) {
         return ESP_OK;
     }
+    spi_transaction_t trans = {0};
+    trans.length    = handle->dma_tx.used * 8;
+    trans.tx_buffer = handle->dma_tx.buffer;
+    trans.rx_buffer = NULL;
+    esp_err_t ret = spi_device_transmit(handle->spi_device, &trans);
+
+    /* Reset regardless of outcome — leaving stale frames queued after an
+     * error would replay them next flush. */
+    handle->dma_tx.used = 0;
+    handle->dma_tx.frame_count = 0;
+
+    if (ret == ESP_OK) {
+        handle->dma_flushes++;
+    } else {
+        ESP_LOGE(TAG, "framed transmit failed: %s", esp_err_to_name(ret));
+    }
+    return ret;
 }
 
 /**
- * @brief Flush DMA buffer to SPI hardware
- * 
- * @param handle Handle
- * @return ESP_OK on success
+ * @brief Build a SPI frame and APPEND it to the dma_tx accumulator. Flushes
+ *        first if the new frame wouldn't fit, then flushes again at the end
+ *        if WAN_COMM_BATCH_MAX_FRAMES is reached. Caller must hold
+ *        transfer_mutex.
+ *
+ *        With batching, a single spi_device_transmit() carries up to N
+ *        back-to-back framed payloads — slave's parser already walks them
+ *        via spi_frame_find()'s SOF-hunt. Amortises the per-transaction
+ *        mutex+DMA+ISR cost (~250 µs) across N frames.
  */
-static esp_err_t dma_buffer_flush(wan_comm_handle_t handle) {
-    if (handle->dma_tx.used == 0) {
-        ESP_LOGD(TAG, "DMA buffer empty, nothing to flush");
-        return ESP_OK;
+static esp_err_t transmit_framed_locked(wan_comm_handle_t handle,
+                                        uint16_t inner_hdr2,
+                                        const uint8_t *inner_payload,
+                                        uint16_t inner_payload_len) {
+    size_t inner_len = (size_t)inner_payload_len + (inner_hdr2 != 0 ? 2u : 0u);
+    if (inner_len > SPI_FRAME_MAX_PAYLOAD) {
+        return ESP_ERR_INVALID_SIZE;
     }
-    
-    ESP_LOGD(TAG, "Flushing DMA buffer: %zu bytes, %lu frames",
-             handle->dma_tx.used, handle->dma_tx.frame_count);
-    
-    // Debug: Dump DMA buffer content before flush
-    // ESP_LOG_BUFFER_HEXDUMP(TAG, handle->dma_tx.buffer, 
-    //                       handle->dma_tx.used > 64 ? 64 : handle->dma_tx.used, 
-    //                       ESP_LOG_INFO);
-    
-    // Pad to fixed transfer length and 4-byte alignment
-    size_t aligned_size = DMA_ALIGN_SIZE(handle->dma_tx.used);
-    if (aligned_size < WAN_COMM_FIXED_XFER_LEN) {
-        aligned_size = WAN_COMM_FIXED_XFER_LEN;
+    size_t frame_size = inner_len + SPI_FRAME_OVERHEAD;
+    /* round each frame up to 4-byte alignment so subsequent frames start at
+     * a DMA-friendly offset within dma_tx.buffer.                            */
+    size_t aligned = (frame_size + 3u) & ~((size_t)3u);
+    if (aligned > WAN_COMM_DMA_BUFFER_SIZE) {
+        return ESP_ERR_INVALID_SIZE;
     }
-    if (aligned_size > handle->dma_tx.used) {
-        size_t padding = aligned_size - handle->dma_tx.used;
-        memset(&handle->dma_tx.buffer[handle->dma_tx.used], 0x00, padding);
-        ESP_LOGD(TAG, "Added %zu bytes padding for DMA alignment", padding);
+
+    /* If next frame would overflow the accumulator, flush first. */
+    if (handle->dma_tx.used + aligned > WAN_COMM_DMA_BUFFER_SIZE) {
+        esp_err_t fret = flush_dma_locked(handle);
+        if (fret != ESP_OK) {
+            return fret;
+        }
     }
-    
-    // Setup SPI transaction
-    spi_transaction_t trans = {0};
-    trans.flags = 0;
-    trans.length = aligned_size * 8;  // Bits
-    trans.tx_buffer = handle->dma_tx.buffer;
-    trans.rx_buffer = NULL;  // TX-only for flushing accumulated frames
-    
-    // Execute transaction (blocking)
-    esp_err_t ret = spi_device_transmit(handle->spi_device, &trans);
-    
-    if (ret == ESP_OK) {
-        handle->dma_flushes++;
-        ESP_LOGD(TAG, "DMA buffer flushed successfully (flush #%lu)", handle->dma_flushes);
-        
-        // Reset buffer
-        handle->dma_tx.used = 0;
-        handle->dma_tx.frame_count = 0;
-    } else {
-        ESP_LOGE(TAG, "DMA buffer flush failed: %s", esp_err_to_name(ret));
+
+    uint8_t *buf = handle->dma_tx.buffer + handle->dma_tx.used;
+    /* SOF / TYPE / SEQ / ACK_FOR / LEN / HDR_CRC (per spi_framing.h v2) */
+    buf[0] = SPI_FRAME_SOF_LO;
+    buf[1] = SPI_FRAME_SOF_HI;
+    buf[2] = (uint8_t)SPI_FT_USER_BLOB;
+    buf[3] = handle->tx_seq++;
+    /* Master doesn't ack the slave today, so ack_for = NONE (0xFFFF). */
+    buf[4] = (uint8_t)(SPI_FRAME_ACK_NONE & 0xFFu);
+    buf[5] = (uint8_t)((SPI_FRAME_ACK_NONE >> 8) & 0xFFu);
+    buf[6] = (uint8_t)(inner_len & 0xFFu);
+    buf[7] = (uint8_t)((inner_len >> 8) & 0xFFu);
+    buf[8] = spi_frame_crc8(buf, 8);
+
+    /* Inner header + payload (payload starts at offset 9 = SPI_FRAME_HDR_SIZE) */
+    uint8_t *p = &buf[SPI_FRAME_HDR_SIZE];
+    if (inner_hdr2 != 0) {
+        *p++ = (uint8_t)((inner_hdr2 >> 8) & 0xFFu);
+        *p++ = (uint8_t)(inner_hdr2 & 0xFFu);
     }
-    
-    return ret;
+    if (inner_payload_len > 0 && inner_payload) {
+        memcpy(p, inner_payload, inner_payload_len);
+    }
+
+    /* CRC16 over bytes 2..8+inner_len (type..end of inner payload) */
+    uint16_t crc = spi_frame_crc16(&buf[2], 7u + inner_len);
+    buf[SPI_FRAME_HDR_SIZE + inner_len]      = (uint8_t)(crc & 0xFFu);
+    buf[SPI_FRAME_HDR_SIZE + inner_len + 1u] = (uint8_t)((crc >> 8) & 0xFFu);
+
+    /* Zero-pad to alignment so the next frame (if any) starts deterministic.
+     * Slave parser skips these as resync bytes — harmless.                   */
+    if (aligned > frame_size) {
+        memset(&buf[frame_size], 0, aligned - frame_size);
+    }
+
+    handle->dma_tx.used        += aligned;
+    handle->dma_tx.frame_count += 1;
+
+    /* Auto-flush at batch threshold. */
+    if (handle->dma_tx.frame_count >= WAN_COMM_BATCH_MAX_FRAMES) {
+        return flush_dma_locked(handle);
+    }
+    return ESP_OK;
 }
 
 // HELPER FUNCTIONS

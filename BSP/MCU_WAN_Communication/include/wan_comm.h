@@ -190,14 +190,61 @@ wan_comm_status_t wan_comm_get_last_error(wan_comm_handle_t handle);
 /**
  * @brief Get statistics
  */
-wan_comm_status_t wan_comm_get_statistics(wan_comm_handle_t handle, 
-                                           uint32_t *packets_sent, 
+wan_comm_status_t wan_comm_get_statistics(wan_comm_handle_t handle,
+                                           uint32_t *packets_sent,
                                            uint32_t *errors);
 
 /**
  * @brief Clear error counter
  */
 wan_comm_status_t wan_comm_clear_error_count(wan_comm_handle_t handle);
+
+/**
+ * @brief P1-framing stats snapshot.
+ * @return WAN_COMM_OK on success; fields not requested may be NULL.
+ */
+wan_comm_status_t wan_comm_get_framing_stats(wan_comm_handle_t handle,
+                                              uint32_t *rx_frames_ok,
+                                              uint32_t *rx_hdr_crc_fail,
+                                              uint32_t *rx_payload_crc_fail,
+                                              uint32_t *rx_resync_bytes,
+                                              uint32_t *rx_seq_gap);
+
+/* ============================================================================
+ * P3.b — cumulative-ACK API
+ *
+ * Every slave→master frame piggybacks the slave's max-master-seq-seen via the
+ * framing layer's ACK_FOR field (see spi_framing.h). The driver records that
+ * value in handle->last_acked_seq. Callers that previously waited for the
+ * slave's explicit [0x02][0x11] ACK can now poll wan_comm_was_seq_acked() to
+ * detect transparent delivery — typically 1 DQ round-trip vs. many polls.
+ * ========================================================================= */
+
+/**
+ * @brief Send a data (DT) frame and report the seq number used on the wire.
+ * Same semantics as wan_comm_send_data, plus exposes the framing seq so the
+ * caller can later poll wan_comm_was_seq_acked() on it.
+ *
+ * @param[out] out_seq seq byte assigned to this frame (rolling 0..255)
+ * @return WAN_COMM_OK on success
+ */
+wan_comm_status_t wan_comm_send_data_get_seq(wan_comm_handle_t handle,
+                                              const uint8_t *data_payload,
+                                              uint16_t length,
+                                              uint8_t *out_seq);
+
+/**
+ * @brief Return the highest master-seq the slave has acknowledged via
+ *        piggyback ACK_FOR, or SPI_FRAME_ACK_NONE (0xFFFF) if none yet.
+ */
+uint16_t wan_comm_get_last_acked_seq(wan_comm_handle_t handle);
+
+/**
+ * @brief True if @seq is covered by the slave's cumulative ACK.
+ * Uses signed 8-bit modular comparison so wraparound works correctly while
+ * the outstanding window stays under 128 frames.
+ */
+bool wan_comm_was_seq_acked(wan_comm_handle_t handle, uint8_t seq);
 
 #ifdef __cplusplus
 }
