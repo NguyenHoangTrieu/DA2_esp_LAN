@@ -68,6 +68,14 @@ bool mcu_wan_enqueue_uplink_local(handler_id_t source_id, uint8_t *data,
                                   uint16_t len);
 
 /**
+ * @brief Non-blocking enqueue (CLOUD route). Returns false immediately on
+ *        full queue. Use for high-rate producers that prefer dropping over
+ *        backpressure blocking.
+ */
+bool mcu_wan_try_enqueue_uplink(handler_id_t source_id, uint8_t *data,
+                                uint16_t len);
+
+/**
  * @brief Get current internet status (cached from WAN MCU)
  */
 internet_status_t mcu_wan_handler_get_internet_status(void);

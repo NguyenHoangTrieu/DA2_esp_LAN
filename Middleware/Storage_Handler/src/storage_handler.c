@@ -39,6 +39,10 @@ static TimerHandle_t g_flush_timer = NULL; // Timer for 500ms flush
 static int64_t g_last_write_us = 0;        // Track last write timestamp
 static bool g_timeout_flush_pending = false; // Flag: timeout condition met, ready to flush
 
+/* Cached SD file count for O(1) has_data(). Updated on save/delete events.
+ * Read lock-free (32-bit aligned writes are atomic on Xtensa). */
+static volatile uint32_t g_cached_file_count = 0;
+
 /* Retry State */
 static FILE *g_retry_file = NULL;
 static char g_retry_path[64] = {0};
@@ -118,6 +122,11 @@ esp_err_t storage_handler_init(void) {
   /* Initialize batch buffer */
   memset(g_batch_buffer, 0, sizeof(batch_buffer_t));
   g_last_write_us = esp_timer_get_time(); // Initialize timestamp
+
+  /* Seed cached file count once. */
+  g_cached_file_count = sd_card_get_file_count();
+  ESP_LOGI(TAG, "Cached SD file count initialized: %lu",
+           (unsigned long)g_cached_file_count);
 
   /* Create flush timer - check every 10ms for responsive batching */
   g_flush_timer = xTimerCreate("sd_flush",
@@ -386,8 +395,9 @@ esp_err_t storage_handler_delete_oldest(void) {
   /* Delete oldest file from SD card */
   esp_err_t ret = sd_card_delete_oldest();
   if (ret == ESP_OK) {
+    if (g_cached_file_count > 0) g_cached_file_count--;
     ESP_LOGI(TAG, "Deleted oldest data from SD card, remaining files: %lu",
-             sd_card_get_file_count());
+             (unsigned long)g_cached_file_count);
   } else if (ret == ESP_ERR_NOT_FOUND) {
     ESP_LOGD(TAG, "No data files to delete");
   } else {
@@ -402,21 +412,11 @@ bool storage_handler_has_data(void) {
   if (!g_storage_initialized) {
     return false;
   }
-
-  /* Check both batch buffer and SD card */
+  /* O(1): check batch buffer + cached SD file count. No FAT scan. */
   if (g_batch_buffer->write_pos > 0) {
-    return true; // Data in buffer
+    return true;
   }
-
-  /* Check SD card with mutex protection */
-  if (xSemaphoreTake(g_storage_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
-    ESP_LOGW(TAG, "Failed to acquire storage mutex for has_data check");
-    return false;
-  }
-
-  bool has_data = sd_card_has_data();
-  xSemaphoreGive(g_storage_mutex);
-  return has_data;
+  return g_cached_file_count > 0;
 }
 
 uint32_t storage_handler_get_file_count(void) {
@@ -460,9 +460,10 @@ static esp_err_t flush_batch_buffer(void) {
   esp_err_t ret = sd_card_save(g_batch_buffer->buffer, g_batch_buffer->write_pos);
 
   if (ret == ESP_OK) {
+    g_cached_file_count++;
     ESP_LOGI(TAG,
              "Batch buffer flushed successfully (%u bytes), total SD files: %lu",
-             g_batch_buffer->write_pos, sd_card_get_file_count());
+             g_batch_buffer->write_pos, (unsigned long)g_cached_file_count);
     /* Reset batch buffer */
     g_batch_buffer->write_pos = 0;
     g_batch_buffer->packet_count = 0;
@@ -585,7 +586,9 @@ void storage_handler_finish_retry(bool success) {
 
     if (success && strlen(g_retry_path) > 0) {
       ESP_LOGI(TAG, "Retry successful, deleting file: %s", g_retry_path);
-      unlink(g_retry_path);
+      if (unlink(g_retry_path) == 0) {
+        if (g_cached_file_count > 0) g_cached_file_count--;
+      }
     } else {
       ESP_LOGW(TAG, "Retry aborted or failed, keeping file: %s", g_retry_path);
     }

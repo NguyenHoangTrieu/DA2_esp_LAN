@@ -1,21 +1,7 @@
 /**
  * @file bench_throughput.c
  * @brief Inter-MCU SPI throughput benchmark — LAN side (SPI Master).
- *
- * LAN→WAN direction  : bench_tp_sender floods mcu_wan_enqueue_uplink() with
- *                       max-size BNC frames as fast as the queue accepts them.
- * WAN→LAN direction  : the WAN side calls mcu_lan_enqueue_downlink(BNC,...),
- *                       which arrives here via the normal GPIO-ISR → DQ → DT
- *                       path; mcu_wan_handler_downlink calls
- *                       bench_throughput_count_rx() for each frame.
- *
- * Every BENCH_TP_REPORT_INTERVAL_MS a snapshot is taken and printed:
- *
- *   [BENCH_TP 2000ms]
- *     TX (LAN→WAN): pkt=N  bytes=N  kbps=XXX.X  drop=N
- *     RX (WAN→LAN): pkt=N  bytes=N  kbps=XXX.X
- *
- * Compile-time gate: BENCH_THROUGHPUT_ENABLE (bench_throughput.h).
+ *        Sender + reporter; counters protected by portMUX.
  */
 
 #include "bench_throughput.h"
@@ -28,12 +14,7 @@
 #include "wan_comm.h"
 #include <string.h>
 
-/* Mode selector: derived from BENCH_THROUGHPUT_ENABLE (see header).
- *   Mode 1 (DRIVER)    — direct wan_comm_send_data, bypass uplink queue.
- *                        Counter increments in this file's sender task.
- *   Mode 2 (PROD_REAL) — mcu_wan_enqueue_uplink + ACK-gated dispatcher.
- *                        Counter increments inside the uplink_handler_task's
- *                        HANDLER_BENCH branch (see bench_throughput_count_tx). */
+/* Mode 1: counter in this task. Mode 2: counter in dispatcher. */
 #define BENCH_TP_DIRECT_SEND BENCH_TP_MODE_DRIVER
 
 extern wan_comm_handle_t g_wan_handle;
@@ -45,7 +26,7 @@ static const char *TAG = "BENCH_TP";
 
 /* ---------- Configuration ---------- */
 #define BENCH_TP_TASK_STACK_WORDS (4096 / sizeof(StackType_t))
-#define BENCH_TP_TASK_PRIORITY    4   /* raised from 2; below uplink(5) so it doesn't starve it */
+#define BENCH_TP_TASK_PRIORITY    4   /* below uplink(5) to avoid starving it */
 #define BENCH_TP_PAYLOAD_LEN      INTER_MCU_PAYLOAD_MAX_LEN /* 2048 bytes */
 
 /* ---------- Shared state (portMUX protected) ---------- */
@@ -63,8 +44,7 @@ static volatile bool s_running = false;
 static uint8_t *s_tx_buf = NULL;
 
 #if BENCH_TP_DIRECT_SEND
-/* Inner payload for direct-send mode. Layout the slave expects inside the
- * DT frame: [BNC handler 3B][data_length 2B BE][rtc 19B][payload N]. */
+/* DT inner: [BNC 3B][len 2B BE][rtc 19B][payload N]. */
 #define BENCH_TP_INNER_LEN (3u + 2u + 19u + BENCH_TP_PAYLOAD_LEN)
 static uint8_t *s_inner_buf = NULL;
 #endif
@@ -78,11 +58,7 @@ void bench_throughput_count_rx(uint32_t bytes) {
     portEXIT_CRITICAL(&s_mux);
 }
 
-/* Mode 2 only: invoked by uplink_handler_task's HANDLER_BENCH branch AFTER
- * send_data_to_wan() returns OK (i.e. ACK received). This is the truthful
- * end-to-end TX count — increments only when the slave acknowledged the
- * frame, not when it was enqueued. Mode 1's counter increments earlier
- * (right after wan_comm_send_data returns), see bench_tp_sender_task. */
+/* Mode 2: called by uplink dispatcher on send OK. */
 void bench_throughput_count_tx(uint32_t bytes) {
     portENTER_CRITICAL(&s_mux);
     s_tx_pkt++;
@@ -96,15 +72,8 @@ void bench_throughput_count_tx_drop(void) {
     portEXIT_CRITICAL(&s_mux);
 }
 
-/* P3.d: parses WAN→LAN frames captured by wan_comm's full-duplex flush.
- * Inner payload format (mirror of LAN→WAN side, see s_inner_buf below):
- *   [0..1]   "DT"            inserted by slave-side load_tx_data wrapper
- *   [2..4]   "BNC"
- *   [5..6]   data_length BE  (= 19 rtc + N payload)
- *   [7..25]  rtc string
- *   [26..]   payload (0xAA × N)
- * Counted bytes = payload only (data_length − 19), matching the slave-side
- * convention in bench_throughput_wan_count_rx().                            */
+/* Parse WAN→LAN BNC frames captured by wan_comm full-duplex flush.
+ * Inner: [DT][BNC][len 2B BE][rtc 19B][payload]. Count payload bytes. */
 static void bench_tp_rx_cb(const spi_frame_view_t *view, void *user) {
     (void)user;
     if (view == NULL || view->payload == NULL || view->len < 7) return;
@@ -123,9 +92,7 @@ static void bench_tp_sender_task(void *arg) {
     ESP_LOGI(TAG, "Sender task started (payload=%u bytes, prio=%d, direct=%d)",
              BENCH_TP_PAYLOAD_LEN, BENCH_TP_TASK_PRIORITY, BENCH_TP_DIRECT_SEND);
 
-    /* Wait for SPI handshake to complete before flooding. Otherwise the
-     * slave's perform_handshake_slave() never catches the master's CF in its
-     * 500ms RX window because every captured frame is a bench DT. */
+    /* Wait for handshake before flooding (slave's CF capture window). */
     while (s_running && !g_handshake_done) {
         vTaskDelay(pdMS_TO_TICKS(50));
     }
@@ -137,9 +104,7 @@ static void bench_tp_sender_task(void *arg) {
 
     while (s_running) {
 #if BENCH_TP_MODE_DRIVER
-        /* Mode 1: bypass the handler queue, hit the SPI transport directly.
-         * Counter += payload immediately on OK — frames may still be sitting
-         * in dma_tx accumulator, not yet on the wire. */
+        /* Mode 1: direct call, no queue. Counter increments on OK. */
         if (g_wan_handle == NULL) {
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
@@ -159,25 +124,18 @@ static void bench_tp_sender_task(void *arg) {
             taskYIELD();
         }
 #elif BENCH_TP_MODE_PROD_REAL
-        /* Mode 2: post raw payload to the real uplink queue. The dispatcher
-         * (mcu_wan_handler_uplink.c) sees HANDLER_BENCH and — because
-         * BENCH_THROUGHPUT_ENABLE==2 — routes through send_data_to_wan with
-         * the ACK gate. TX counter increments INSIDE the dispatcher on ACK
-         * success (bench_throughput_count_tx), not here. We only count drops
-         * (queue-full) and yield. */
-        bool ok = mcu_wan_enqueue_uplink(HANDLER_BENCH,
-                                         s_tx_buf,
-                                         (uint16_t)BENCH_TP_PAYLOAD_LEN);
+        /* Mode 2: post via the real uplink queue. TX counter increments
+         * inside the dispatcher's HANDLER_BENCH branch on send OK. Use the
+         * non-blocking try_enqueue so a tight-loop sender does not stall on
+         * a full queue. */
+        bool ok = mcu_wan_try_enqueue_uplink(HANDLER_BENCH,
+                                             s_tx_buf,
+                                             (uint16_t)BENCH_TP_PAYLOAD_LEN);
         if (!ok) {
             portENTER_CRITICAL(&s_mux);
             s_tx_drop++;
             portEXIT_CRITICAL(&s_mux);
-            /* Queue is small (~32); back off so we don't burn the CPU
-             * faster than the dispatcher can drain. */
-            vTaskDelay(pdMS_TO_TICKS(2));
         }
-        /* Always yield once per iteration in Mode 2 — the dispatcher needs
-         * the CPU to actually pull items off the queue. */
         taskYIELD();
 #else
 #  error "BENCH_THROUGHPUT_ENABLE must be 0, 1, or 2"
@@ -229,8 +187,7 @@ static void bench_tp_reporter_task(void *arg) {
                  (unsigned long)rx_pkt, (unsigned long)rx_b,
                  rx_pps, rx_kbps);
 
-        /* P1 framing diagnostics — cumulative since boot. Useful for spotting
-         * CRC/sync issues introduced by clock or layout changes. */
+        /* Framing diagnostics — cumulative since boot. */
         if (g_wan_handle) {
             uint32_t fok = 0, hcrc = 0, pcrc = 0, resync = 0, gap = 0;
             wan_comm_get_framing_stats(g_wan_handle, &fok, &hcrc, &pcrc,
@@ -265,14 +222,7 @@ esp_err_t bench_throughput_start(void) {
     memset(s_tx_buf, 0xAA, BENCH_TP_PAYLOAD_LEN);
 
 #if BENCH_TP_DIRECT_SEND
-    /* Pre-build the inner DT payload once. Slave decodes:
-     *   [0]      'B'                       handler ID (HANDLER_BENCH = "BNC")
-     *   [1]      'N'
-     *   [2]      'C'
-     *   [3..4]   data_length BE             = 19 + 2048 = 2067
-     *   [5..23]  rtc timestamp (19 bytes)
-     *   [24..]   payload (0xAA × 2048)
-     */
+    /* Pre-build inner DT: [BNC][len BE][rtc 19B][payload]. */
     s_inner_buf = (uint8_t *)heap_caps_malloc(BENCH_TP_INNER_LEN,
                                               MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!s_inner_buf) {
@@ -293,10 +243,7 @@ esp_err_t bench_throughput_start(void) {
 
     s_running = true;
 
-    /* P3.d: hook into wan_comm's full-duplex flush so any WAN→LAN frame
-     * present in the slave's tx_buffer (loaded once by bench_throughput_wan
-     * at start) gets counted via bench_throughput_count_rx(). g_wan_handle
-     * must already be initialised by mcu_wan_handler_start. */
+    /* Hook into full-duplex flush for WAN→LAN BNC frame counting. */
     if (g_wan_handle != NULL) {
         wan_comm_register_rx_frame_callback(g_wan_handle, bench_tp_rx_cb, NULL);
     }
@@ -371,7 +318,6 @@ esp_err_t bench_throughput_start(void) {
 void bench_throughput_stop(void) {
     if (!s_running) return;
     s_running = false;
-    /* Unregister P3.d callback so flush_dma_locked stops counting. */
     if (g_wan_handle != NULL) {
         wan_comm_register_rx_frame_callback(g_wan_handle, NULL, NULL);
     }

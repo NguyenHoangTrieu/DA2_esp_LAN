@@ -211,15 +211,8 @@ wan_comm_status_t wan_comm_get_framing_stats(wan_comm_handle_t handle,
                                               uint32_t *rx_resync_bytes,
                                               uint32_t *rx_seq_gap);
 
-/* ============================================================================
- * P3.b — cumulative-ACK API
- *
- * Every slave→master frame piggybacks the slave's max-master-seq-seen via the
- * framing layer's ACK_FOR field (see spi_framing.h). The driver records that
- * value in handle->last_acked_seq. Callers that previously waited for the
- * slave's explicit [0x02][0x11] ACK can now poll wan_comm_was_seq_acked() to
- * detect transparent delivery — typically 1 DQ round-trip vs. many polls.
- * ========================================================================= */
+/* Cumulative-ACK API. Slave piggybacks its max-master-seq-seen via the
+ * framing ACK_FOR field; recorded in handle->last_acked_seq. */
 
 /**
  * @brief Send a data (DT) frame and report the seq number used on the wire.
@@ -247,17 +240,9 @@ uint16_t wan_comm_get_last_acked_seq(wan_comm_handle_t handle);
  */
 bool wan_comm_was_seq_acked(wan_comm_handle_t handle, uint8_t seq);
 
-/* ============================================================================
- * P3.d — bidirectional bench / full-duplex RX dispatch
- *
- * Every master flush is now full-duplex: the slave's tx_buffer content is
- * clocked back into a 16 KB scratch RX buffer. After the transaction
- * completes, the parser walks that buffer with spi_frame_parse_stream() and
- * dispatches each valid frame to a caller-registered callback.
- *
- * Used by the bidirectional bench to count WAN→LAN BNC frames, and as a
- * side-effect updates handle->last_acked_seq from any piggyback ack found.
- * ========================================================================= */
+/* Full-duplex RX dispatch. Each master flush clocks slave tx_buffer back
+ * into a scratch RX buffer; the parser fires the registered callback per
+ * frame and updates handle->last_acked_seq. */
 
 /**
  * @brief Callback fired once per slave-to-master frame parsed out of the

@@ -9,19 +9,11 @@
 
 static const char *TAG = "WAN_COMM_MASTER";
 
-/* Cumulative-ACK staleness gate. If last_acked_seq hasn't moved in this
- * many ms, wan_comm_was_seq_acked returns false even when the modular
- * compare would say "covered". Prevents false positives when slave's
- * tx_buffer is frozen (bench static template, or any path that doesn't
- * refresh ack_for promptly). 200 ms is comfortably longer than two
- * normal slave→master frame intervals and short enough that legitimate
- * traffic isn't gated. */
+/* If last_acked_seq has not advanced in this many ms, treat cumulative
+ * ACK as stale (prevents false positives when slave tx_buffer is frozen). */
 #define WAN_COMM_ACK_STALE_TIMEOUT_MS 200
 
-/**
- * @brief DMA TX Buffer Structure
- * Accumulates multiple frames before transmission
- */
+/* DMA TX accumulator. */
 typedef struct {
     uint8_t buffer[WAN_COMM_DMA_BUFFER_SIZE];  // 4096 bytes
     size_t used;                                // Current write position
@@ -61,57 +53,26 @@ struct wan_comm_handle_s {
     uint32_t dma_flushes;
     uint32_t error_count;
 
-    // P1 framing
+    // framing state
     uint8_t  tx_seq;              /* rolling sequence used for outgoing frames  */
     uint16_t rx_prev_seq;         /* last RX seq seen (0xFFFF = none)            */
     spi_frame_stats_t frame_stats;
 
-    /* P3.b cumulative ACK from slave. SPI_FRAME_ACK_NONE means "no ack yet".
-     * Updated each time we parse a slave→master frame that carries a valid
-     * ack_for field. Means: every master seq up to and including this value
-     * has been received by the slave OK. Read atomically (16-bit aligned
-     * loads are atomic on Xtensa); writes only happen under transfer_mutex. */
+    /* Cumulative ACK: largest slave-acked seq. Written under transfer_mutex,
+     * read lock-free. */
     volatile uint16_t last_acked_seq;
 
-    /* Staleness gate for wan_comm_was_seq_acked.
-     *
-     * Background: ack_for is an 8-bit field. wan_comm_was_seq_acked uses a
-     * signed 8-bit modular compare ((int8_t)(ack - seq) >= 0), which gives
-     * the *intended* "covers seq" answer only while the outstanding window
-     * stays under 128 frames. If last_acked_seq is *stuck* (e.g. slave's
-     * tx_buffer holds a static template that never refreshes ack_for — as
-     * happens during the throughput bench), the master keeps advancing
-     * my_seq across the 256-frame ring and roughly half of all queries
-     * land in the false-positive half-plane of the modular compare. That
-     * marks frames as ACKed that the slave never confirmed and the TX
-     * counter goes up dishonestly.
-     *
-     * Fix: track when last_acked_seq actually *changed*. If the slave hasn't
-     * delivered a new ack in WAN_COMM_ACK_STALE_TIMEOUT_MS, treat the
-     * cumulative ack as stale and refuse to report any seq as covered. The
-     * caller falls back to its explicit-ACK path (or times out cleanly).
-     * Same write discipline as last_acked_seq itself: written under
-     * transfer_mutex in wan_comm_rx_stream_cb; readable lock-free. */
+    /* Tick when last_acked_seq last advanced. wan_comm_was_seq_acked uses
+     * this to invalidate stale cumulative ACK (slave's tx_buffer may hold
+     * a static template that never updates ack_for). Written under
+     * transfer_mutex; read lock-free. */
     volatile uint32_t last_ack_change_tick;
 
-    /* P3.d: full-duplex flush RX scratch. flush_dma_locked() captures the
-     * slave's MISO content here and walks it with spi_frame_parse_stream() to
-     * dispatch each parsed frame to rx_frame_cb. Allocated DMA-capable.
-     *
-     * Plan C (pipelining): this buffer is now the IN-FLIGHT RX buffer paired
-     * with inflight_tx below. While a transaction is in-flight the DMA engine
-     * is writing into flush_rx_buffer; we MUST NOT parse it until
-     * spi_device_get_trans_result() returns. transmit_framed_locked keeps
-     * appending into dma_tx (untouched by DMA), and only flush_dma_locked
-     * copies dma_tx -> inflight_tx + submits the transaction. */
+    /* Pipelined SPI: dma_tx -> memcpy -> inflight_tx, then queue_trans.
+     * flush_rx_buffer is the in-flight RX scratch; DO NOT parse it until
+     * spi_device_get_trans_result returns. All DMA-capable. */
     uint8_t                *flush_rx_buffer;
-    /* Plan C: TX scratch handed to the SPI driver for the in-flight transaction.
-     * Separate from dma_tx so the CPU can keep appending the next batch into
-     * dma_tx while the previous batch is on the wire. Allocated DMA-capable. */
     uint8_t                *inflight_tx;
-    /* Plan C: state for the pipelined transaction. pending_trans is what we
-     * submit to spi_device_queue_trans; pending_used is its byte length (so we
-     * know how much of flush_rx_buffer to parse on harvest). */
     bool                    pending_in_flight;
     spi_transaction_t       pending_trans;
     size_t                  pending_used;
@@ -134,26 +95,18 @@ static bool is_dma_aligned(const void *ptr, size_t size);
 static size_t calculate_dma_descriptors(size_t buffer_size);
 static esp_err_t setup_data_ready_isr(wan_comm_handle_t handle, int gpio_pin);
 
-/* P1 framing helpers --------------------------------------------------------
- * transmit_framed_locked() expects the caller to already hold transfer_mutex.
- * It builds a SPI frame whose payload is [inner_hdr][inner_payload], pads to
- * 4-byte DMA alignment, and ships it via spi_device_transmit (TX-only).
- *
- * inner_hdr2 is the 2-byte application header (CF/DT/DQ in big-endian as on
- * the legacy wire); pass 0 to omit it.
- */
+/* Build a SPI frame and append it to dma_tx. Caller holds transfer_mutex.
+ * inner_hdr2 = 2-byte app header (CF/DT/DQ big-endian), 0 to omit. */
 static esp_err_t transmit_framed_locked(wan_comm_handle_t handle,
                                         uint16_t inner_hdr2,
                                         const uint8_t *inner_payload,
                                         uint16_t inner_payload_len);
 
-/* Plan C: harvest the in-flight pipelined transaction (if any). Defined later
- * in this file alongside flush_dma_locked. Caller must hold transfer_mutex. */
+/* Harvest in-flight pipelined trans. Caller holds transfer_mutex. */
 static void drain_pending_locked(wan_comm_handle_t handle);
 
-/* P3.c: flushes the dma_tx batch accumulator as a single TX-only transaction.
- * Caller must hold transfer_mutex. Defined later in this file alongside
- * transmit_framed_locked(). */
+/* Flush dma_tx accumulator (pipelined queue_trans). Caller holds
+ * transfer_mutex. */
 static esp_err_t flush_dma_locked(wan_comm_handle_t handle);
 
 // ============================================================================
@@ -264,7 +217,7 @@ wan_comm_status_t wan_comm_init(const wan_comm_config_t *config, wan_comm_handle
         return WAN_COMM_ERR_NOMEM;
     }
 
-    /* P3.d: full-duplex flush scratch (DMA-capable). */
+    /* Full-duplex flush RX scratch (DMA-capable). */
     h->flush_rx_buffer = (uint8_t*)heap_caps_aligned_alloc(DMA_ALIGNMENT,
                                                             WAN_COMM_DMA_BUFFER_SIZE,
                                                             MALLOC_CAP_DMA);
@@ -275,9 +228,7 @@ wan_comm_status_t wan_comm_init(const wan_comm_config_t *config, wan_comm_handle
         free(h);
         return WAN_COMM_ERR_NOMEM;
     }
-    /* Plan C: in-flight TX scratch (DMA-capable). Filled by memcpy from dma_tx
-     * each flush, then handed to spi_device_queue_trans. dma_tx stays free for
-     * the next batch while this is on the wire. */
+    /* In-flight TX scratch (DMA-capable). */
     h->inflight_tx = (uint8_t*)heap_caps_aligned_alloc(DMA_ALIGNMENT,
                                                        WAN_COMM_DMA_BUFFER_SIZE,
                                                        MALLOC_CAP_DMA);
@@ -438,9 +389,7 @@ wan_comm_status_t wan_comm_deinit(wan_comm_handle_t handle) {
     handle->dma_tx.used = 0;
     handle->dma_tx.frame_count = 0;
 
-    /* Plan C: drain any in-flight pipelined transaction before tearing down
-     * the SPI device. spi_bus_remove_device on a queue with pending items is
-     * undefined behaviour. */
+    /* Drain in-flight before tearing down SPI device. */
     if (handle->pending_in_flight) {
         spi_transaction_t *done = NULL;
         (void)spi_device_get_trans_result(handle->spi_device, &done, portMAX_DELAY);
@@ -594,9 +543,8 @@ wan_comm_status_t wan_comm_request_data(wan_comm_handle_t handle,
         return WAN_COMM_ERR_TIMEOUT;
     }
 
-    /* P3.c: flush any pending batched master→slave frames first. Otherwise
-     * the slave wouldn't have received them yet, and its ack_for response
-     * would lag our newest seq → DQ poll loop spins for nothing. */
+    /* Flush pending master→slave frames, then drain so spi_device_transmit
+     * below does not race the pipelined queue_trans. */
     {
         esp_err_t fret = flush_dma_locked(handle);
         if (fret != ESP_OK) {
@@ -604,6 +552,7 @@ wan_comm_status_t wan_comm_request_data(wan_comm_handle_t handle,
             wan_comm_report_error(handle, WAN_COMM_ERR_BUS_BUSY, "request_data pre-flush failed");
             return WAN_COMM_ERR_BUS_BUSY;
         }
+        drain_pending_locked(handle);
     }
 
     uint8_t *tx_buffer = handle->tx_request_buffer;
@@ -650,11 +599,8 @@ wan_comm_status_t wan_comm_request_data(wan_comm_handle_t handle,
                                   &view, &st, &handle->frame_stats, &consumed);
         if (ok) {
             spi_frame_track_seq(&handle->rx_prev_seq, view.seq, &handle->frame_stats);
-            /* P3.b: harvest piggyback ack. Slave puts its max-master-seq-seen
-             * in view.ack_for; we record it so callers can poll for ack.
-             * Only stamp last_ack_change_tick when the value actually
-             * advances — a slave stuck repeating the same ack_for (e.g. bench
-             * static template) must not refresh the staleness gate. */
+            /* Harvest piggyback ack. Only stamp tick on value change so a
+             * stuck ack_for (e.g. bench template) does not refresh the gate. */
             if (view.ack_for != SPI_FRAME_ACK_NONE) {
                 if (view.ack_for != handle->last_acked_seq) {
                     handle->last_acked_seq = view.ack_for;
@@ -671,9 +617,7 @@ wan_comm_status_t wan_comm_request_data(wan_comm_handle_t handle,
             ESP_LOGD(TAG, "SPI RX framed: seq=%u type=0x%02X ack_for=0x%04X inner=%u",
                      view.seq, view.type, view.ack_for, view.len);
         } else {
-            /* No valid frame in the response window — common while the slave
-             * has nothing pending to send (TX buffer still all zeros).  Hand
-             * back zeros and let the application-level polling logic retry. */
+            /* No valid frame — slave has nothing pending. */
             memset(rx_buffer, 0, length_to_read);
             ESP_LOGV(TAG, "SPI RX framed: no valid frame (status=%d)", (int)st);
         }
@@ -714,8 +658,7 @@ wan_comm_status_t wan_comm_transceive(wan_comm_handle_t handle,
         return WAN_COMM_ERR_TIMEOUT;
     }
 
-    /* Plan C: must not race spi_device_transmit against a pipelined
-     * queue_trans submitted by flush_dma_locked. Drain any in-flight first. */
+    /* Drain any pipelined trans before sync spi_device_transmit. */
     drain_pending_locked(handle);
 
     // Copy TX data to internal buffer (reuse RX buffer for TX)
@@ -751,10 +694,7 @@ wan_comm_status_t wan_comm_transceive(wan_comm_handle_t handle,
 }
 
 wan_comm_status_t wan_comm_flush_dma_buffer(wan_comm_handle_t handle) {
-    /* P3.c: actually flush. transmit_framed_locked() now appends to dma_tx
-     * and only auto-flushes at WAN_COMM_BATCH_MAX_FRAMES; callers must invoke
-     * this to push small batches out before going idle (uplink handler does
-     * so every INTER_MCU_BATCH_INTERVAL_MS). */
+    /* Force-flush accumulated frames (called periodically by the dispatcher). */
     if (!handle || !handle->is_initialized) {
         return WAN_COMM_ERR_NOT_INITIALIZED;
     }
@@ -838,7 +778,7 @@ wan_comm_status_t wan_comm_clear_error_count(wan_comm_handle_t handle) {
 }
 
 // ============================================================================
-// P3.b — cumulative-ACK API
+// Cumulative-ACK API
 // ============================================================================
 
 wan_comm_status_t wan_comm_send_data_get_seq(wan_comm_handle_t handle,
@@ -891,22 +831,14 @@ bool wan_comm_was_seq_acked(wan_comm_handle_t handle, uint8_t seq) {
     if (ack == SPI_FRAME_ACK_NONE) {
         return false;
     }
-    /* Staleness gate. If the slave hasn't delivered an *advancing* ack_for
-     * in WAN_COMM_ACK_STALE_TIMEOUT_MS, the cumulative ack is unreliable
-     * (e.g. slave's tx_buffer holds a static template that froze ack_for at
-     * some old value). Returning true here would mark roughly half the
-     * 256-frame seq ring as falsely covered, depending on where my_seq
-     * happens to be in the modular compare's half-plane. Caller falls back
-     * to its explicit-ACK path or times out cleanly. */
+    /* Reject if ack_for has not advanced recently (stale = unreliable). */
     uint32_t now = (uint32_t)xTaskGetTickCount();
     uint32_t since = now - handle->last_ack_change_tick;
     if (handle->last_ack_change_tick == 0 ||
         since > pdMS_TO_TICKS(WAN_COMM_ACK_STALE_TIMEOUT_MS)) {
         return false;
     }
-    /* Signed 8-bit modular comparison. With the staleness gate above the
-     * outstanding window is bounded in time, so the historical "under 128"
-     * window assumption holds. */
+    /* Signed 8-bit modular comparison (outstanding window < 128). */
     int8_t delta = (int8_t)((uint8_t)ack - seq);
     return delta >= 0;
 }
@@ -927,53 +859,29 @@ wan_comm_status_t wan_comm_register_rx_frame_callback(wan_comm_handle_t handle,
     return WAN_COMM_OK;
 }
 
-/* P3.d: stream callback that bridges spi_frame_parse_stream() into the
- * handle's per-frame user callback, and also harvests piggyback ack_for. */
+/* Bridge spi_frame_parse_stream into the user RX callback and harvest
+ * piggyback ack_for. */
 static void wan_comm_rx_stream_cb(const spi_frame_view_t *view, void *user) {
     wan_comm_handle_t handle = (wan_comm_handle_t)user;
     if (!handle) return;
-    /* Update last_acked_seq from every parsed slave→master frame. Tick the
-     * staleness gate only when the value actually advances (see the
-     * commentary on last_ack_change_tick in the handle struct). */
     if (view->ack_for != SPI_FRAME_ACK_NONE) {
         if (view->ack_for != handle->last_acked_seq) {
             handle->last_acked_seq = view->ack_for;
             handle->last_ack_change_tick = (uint32_t)xTaskGetTickCount();
         }
     }
-    /* Track seq for stats. */
     spi_frame_track_seq(&handle->rx_prev_seq, view->seq, &handle->frame_stats);
-    /* Fire the registered user callback. */
     if (handle->rx_frame_cb) {
         handle->rx_frame_cb(view, handle->rx_frame_cb_user);
     }
 }
 
-/* P3.c batching: how many frames to accumulate before forcing a flush.
- * Larger = better throughput (amortises per-transaction ~250 µs overhead),
- * worse first-frame latency. 8 × 2 KB payload = ~16 KB per transaction —
- * matches WAN_COMM_DMA_BUFFER_SIZE so we essentially fill the buffer.        */
+/* Auto-flush threshold (frames). 8 × ~2 KB ≈ 16 KB ≈ WAN_COMM_DMA_BUFFER_SIZE. */
 #ifndef WAN_COMM_BATCH_MAX_FRAMES
 #define WAN_COMM_BATCH_MAX_FRAMES   8
 #endif
 
-/**
- * @brief Issue the accumulated dma_tx.buffer as a single FULL-DUPLEX
- *        transaction. Capture the slave's MISO content into flush_rx_buffer,
- *        walk it with the framing parser, and dispatch each parsed frame to
- *        the registered RX callback (also updating last_acked_seq).
- *
- *        Caller must hold transfer_mutex. No-op when nothing is queued.
- *
- * P3.d note: the bench (bench_throughput.c) registers a callback that counts
- * BNC inner frames to provide the WAN→LAN throughput number. Production
- * traffic (handshake response, RTC response, etc.) is also visible to the
- * callback but bench-side filters by inner header.
- */
-/* Plan C: harvest the in-flight pipelined transaction (if any). Used by the
- * synchronous paths (DQ poll, transceive) that call spi_device_transmit
- * directly — they must not race with a queue_trans submitted by
- * flush_dma_locked. Caller holds transfer_mutex. */
+/* Harvest in-flight transaction. Caller holds transfer_mutex. */
 static void drain_pending_locked(wan_comm_handle_t handle) {
     if (!handle->pending_in_flight) {
         return;
@@ -993,14 +901,9 @@ static void drain_pending_locked(wan_comm_handle_t handle) {
 static esp_err_t flush_dma_locked(wan_comm_handle_t handle) {
     esp_err_t ret = ESP_OK;
 
-    /* Plan C step 1: harvest the previously-queued transaction (if any). While
-     * it was on the wire we kept appending to dma_tx — that overlap is the
-     * whole point of the pipeline. */
+    /* Harvest previous in-flight, then submit current batch (non-blocking). */
     drain_pending_locked(handle);
 
-    /* Plan C step 2: if there is fresh data in the accumulator, copy it into
-     * the in-flight TX scratch and submit non-blocking. Copying frees dma_tx
-     * immediately for the next batch of transmit_framed_locked appends. */
     if (handle->dma_tx.used == 0) {
         return ret;
     }
@@ -1014,16 +917,11 @@ static esp_err_t flush_dma_locked(wan_comm_handle_t handle) {
     handle->pending_trans.tx_buffer = handle->inflight_tx;
     handle->pending_trans.rx_buffer = handle->flush_rx_buffer;
 
-    /* portMAX_DELAY: if the driver's internal queue (queue_size) is full we
-     * back-pressure here. With queue_size >= 2 and a single producer
-     * (flush_dma_locked under transfer_mutex) the queue should never have
-     * more than one pending item, so this never actually blocks. */
     esp_err_t qret = spi_device_queue_trans(handle->spi_device,
                                             &handle->pending_trans,
                                             portMAX_DELAY);
 
-    /* Reset accumulator regardless of submit outcome — leaving stale frames
-     * queued would replay them next flush. */
+    /* Reset accumulator regardless of outcome. */
     handle->dma_tx.used = 0;
     handle->dma_tx.frame_count = 0;
 

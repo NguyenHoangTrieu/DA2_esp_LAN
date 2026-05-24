@@ -1,4 +1,5 @@
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "frame_types.h"
 #include "bench_counter.h"
 #include "freertos/FreeRTOS.h"
@@ -15,6 +16,10 @@
 #include <string.h>
 
 static const char *TAG = "WAN_UL";
+
+/* Set to 1 for once-per-second [UL-DBG ...] timing breakdown of the
+ * dispatcher iter (mutex / qrx / build / send / pflush / sdcheck). */
+#define WAN_UL_DBG_INSTRUMENTATION 0
 
 // CONFIGURATION
 
@@ -214,8 +219,9 @@ void mcu_wan_handler_stop_uplink_task(void) {
   }
 }
 
-static bool enqueue_uplink_internal(handler_id_t source_id, const uint8_t *data,
-                                    uint16_t len, uplink_route_t route) {
+static bool enqueue_uplink_internal_to(handler_id_t source_id, const uint8_t *data,
+                                       uint16_t len, uplink_route_t route,
+                                       TickType_t wait_ticks) {
   if (!g_uplink_queue || !data || len == 0) {
     ESP_LOGE(TAG, "Invalid uplink parameters");
     return false;
@@ -223,6 +229,12 @@ static bool enqueue_uplink_internal(handler_id_t source_id, const uint8_t *data,
 
   if (len > MAX_PAYLOAD_SIZE) {
     ESP_LOGE(TAG, "Uplink data too large: %u > %d", len, MAX_PAYLOAD_SIZE);
+    return false;
+  }
+
+  /* Non-blocking caller: skip the 2KB memcpy if queue is full. */
+  if (wait_ticks == 0 && uxQueueSpacesAvailable(g_uplink_queue) == 0) {
+    g_uplink_queue_drop_count++;
     return false;
   }
 
@@ -242,7 +254,7 @@ static bool enqueue_uplink_internal(handler_id_t source_id, const uint8_t *data,
     xSemaphoreGive(g_rtc_mutex);
   }
 
-  if (xQueueSend(g_uplink_queue, &item, pdMS_TO_TICKS(UPLINK_QUEUE_SEND_WAIT_MS)) != pdTRUE) {
+  if (xQueueSend(g_uplink_queue, &item, wait_ticks) != pdTRUE) {
     g_uplink_queue_drop_count++;
 #if !BENCH_QUIET_LOG
     ESP_LOGW(TAG, "Uplink queue full");
@@ -267,12 +279,21 @@ static bool enqueue_uplink_internal(handler_id_t source_id, const uint8_t *data,
 
 bool mcu_wan_enqueue_uplink(handler_id_t source_id, uint8_t *data,
                             uint16_t len) {
-  return enqueue_uplink_internal(source_id, data, len, UPLINK_ROUTE_CLOUD);
+  return enqueue_uplink_internal_to(source_id, data, len, UPLINK_ROUTE_CLOUD,
+                                    pdMS_TO_TICKS(UPLINK_QUEUE_SEND_WAIT_MS));
 }
 
 bool mcu_wan_enqueue_uplink_local(handler_id_t source_id, uint8_t *data,
                                   uint16_t len) {
-  return enqueue_uplink_internal(source_id, data, len, UPLINK_ROUTE_LOCAL);
+  return enqueue_uplink_internal_to(source_id, data, len, UPLINK_ROUTE_LOCAL,
+                                    pdMS_TO_TICKS(UPLINK_QUEUE_SEND_WAIT_MS));
+}
+
+/* Non-blocking variant: returns immediately on full queue. */
+bool mcu_wan_try_enqueue_uplink(handler_id_t source_id, uint8_t *data,
+                                uint16_t len) {
+  return enqueue_uplink_internal_to(source_id, data, len, UPLINK_ROUTE_CLOUD,
+                                    0 /* no wait */);
 }
 
 internet_status_t mcu_wan_handler_get_internet_status(void) {
@@ -347,22 +368,62 @@ static void uplink_handler_task(void *pvParameters) {
   TickType_t last_flush = xTaskGetTickCount();
   TickType_t last_sd_retry_attempt = 0;  // Track last SD retry to avoid spam
   uint8_t consecutive_sd_failures = 0;   // Track consecutive failures for same file
+
+#if WAN_UL_DBG_INSTRUMENTATION
+  /* Per-second timing breakdown sums. Divide by iters/items at report. */
+  uint64_t dbg_iters         = 0;  /* total dispatcher iterations              */
+  uint64_t dbg_iter_us_total = 0;  /* wall time inside iter (excluding delay) */
+  uint64_t dbg_bursts        = 0;  /* iters that drained >=1 item              */
+  uint64_t dbg_items         = 0;  /* items dispatched (bench + production)    */
+  uint64_t dbg_mutex_wait_us = 0;  /* total wait on initial g_qspi_mutex take */
+  uint64_t dbg_send_us_total = 0;  /* total wall time inside wan_comm_send_data */
+  uint64_t dbg_pflush_count  = 0;  /* how many periodic flushes fired          */
+  uint64_t dbg_pflush_us     = 0;  /* total wall time inside periodic flush    */
+  uint64_t dbg_retake_fail   = 0;  /* bench re-take of g_qspi_mutex failed     */
+  uint64_t dbg_qrx_us_total  = 0;  /* total time inside xQueueReceive          */
+  uint64_t dbg_qrx_count     = 0;  /* number of xQueueReceive calls            */
+  uint64_t dbg_build_us_total= 0;  /* total time inside build_data_packet      */
+  uint64_t dbg_gap_us_total  = 0;  /* time between bench retake and next item  */
+  uint64_t dbg_postburst_us  = 0;  /* time from burst end to mutex give        */
+  uint64_t dbg_sdcheck_us    = 0;  /* time inside storage_handler_has_data + SD block */
+  int64_t  dbg_report_t0     = esp_timer_get_time();
+  int64_t  dbg_last_unaccounted_t = 0;  /* for tracking gaps between events */
+#endif
   uplink_item_t uplink_item;
   bool had_work = false;  /* set each iteration for adaptive vTaskDelay */
 
   while (g_handler_running) {
 
     TickType_t now = xTaskGetTickCount();
+#if WAN_UL_DBG_INSTRUMENTATION
+    int64_t  dbg_iter_start = esp_timer_get_time();
+    uint32_t dbg_items_this_iter = 0;
+    dbg_iters++;
+#endif
 
     // Try to acquire SPI mutex (non-blocking / short timeout)
     // If downlink task has it, we'll skip and try next iteration
+#if WAN_UL_DBG_INSTRUMENTATION
+    int64_t dbg_mwait_t0 = esp_timer_get_time();
+#endif
     if (xSemaphoreTake(g_qspi_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) ==
         pdTRUE) {
+#if WAN_UL_DBG_INSTRUMENTATION
+      dbg_mutex_wait_us += (uint64_t)(esp_timer_get_time() - dbg_mwait_t0);
+#endif
 
       // A) Check Uplink Queue — burst up to UPLINK_BURST_COUNT items
       int burst_count = 0;
-      while (burst_count < UPLINK_BURST_COUNT &&
-             xQueueReceive(g_uplink_queue, &uplink_item, 0) == pdTRUE) {
+      while (burst_count < UPLINK_BURST_COUNT) {
+#if WAN_UL_DBG_INSTRUMENTATION
+        int64_t dbg_qrx_t0 = esp_timer_get_time();
+#endif
+        bool dbg_qrx_ok = (xQueueReceive(g_uplink_queue, &uplink_item, 0) == pdTRUE);
+#if WAN_UL_DBG_INSTRUMENTATION
+        dbg_qrx_us_total += (uint64_t)(esp_timer_get_time() - dbg_qrx_t0);
+        dbg_qrx_count++;
+#endif
+        if (!dbg_qrx_ok) break;
 
 #if !BENCH_QUIET_LOG
         ESP_LOGI(TAG, "Processing uplink from handler %s: %u bytes",
@@ -372,7 +433,13 @@ static void uplink_handler_task(void *pvParameters) {
 
         uint8_t packet[MAX_PAYLOAD_SIZE + DATA_PACKET_HEADER_SIZE + 20];
         uint16_t packet_len = 0;
+#if WAN_UL_DBG_INSTRUMENTATION
+        int64_t dbg_build_t0 = esp_timer_get_time();
+#endif
         build_data_packet(&uplink_item, packet, &packet_len);
+#if WAN_UL_DBG_INSTRUMENTATION
+        dbg_build_us_total += (uint64_t)(esp_timer_get_time() - dbg_build_t0);
+#endif
 
         // Routing policy (3 paths):
         //  1. HANDLER_BENCH      : throughput test, fire-and-forget, no SD.
@@ -386,59 +453,14 @@ static void uplink_handler_task(void *pvParameters) {
         //  3. UPLINK_ROUTE_CLOUD : node telemetry. Online → send + ACK gate.
         //                          Offline → SD backup, replay when online.
         if (uplink_item.source_id == HANDLER_BENCH) {
-          /* Plan-C-followup diagnostic (mutex contention with downlink):
-           *
-           * The burst loop runs under g_qspi_mutex to serialize SD/RTC state
-           * against the downlink DQ-poll task. HANDLER_BENCH touches neither —
-           * it is a fire-and-forget throughput probe, and wan_comm_send_data
-           * has its own internal transfer_mutex that already protects the SPI
-           * bus. Holding g_qspi_mutex across the bench send means uplink and
-           * downlink starve each other: in Mode 2 the slave's static template
-           * keeps the data-ready GPIO asserted, downlink loops on DQ polls
-           * for up to DQ_RETRY_COUNT × DQ_RETRY_INTERVAL_MS = 500 ms holding
-           * the mutex, and uplink times out on the 50 ms MUTEX_TIMEOUT_MS
-           * almost every iteration.
-           *
-           * Workaround for the bench path only: release g_qspi_mutex around
-           * the SPI send so the downlink task can interleave. Re-take after.
-           * If we cannot re-take, bail out of the burst cleanly without
-           * trying to do SD/RTC work that needs the mutex.
-           *
-           * Production routes (LOCAL / CLOUD) keep the original behaviour. */
+          /* Bench bypass: release g_qspi_mutex around the send so downlink
+           * can interleave; wan_comm_send_data has its own transfer_mutex. */
           xSemaphoreGive(g_qspi_mutex);
 
+#if WAN_UL_DBG_INSTRUMENTATION
+          int64_t dbg_send_t0 = esp_timer_get_time();
+#endif
 #if BENCH_TP_MODE_PROD_REAL
-          /* Mode 2 (PRODUCTION-REAL): walk the real handler pipeline (queue
-           * dwell, build_data_packet memcpy + RTC stamping, SPI transport),
-           * but DO NOT take the ACK gate.
-           *
-           * Why no ACK gate here? send_data_to_wan polls for either an
-           * explicit [0x02][0x11] ACK frame from the slave's downlink path
-           * OR a cumulative ACK via the framing layer's ack_for field. With
-           * the slave's tx_buffer holding the bench static template
-           * forever (architectural — see SPI_BENCH_METHODOLOGY.md), neither
-           * source advances: the slave's process_data_from_lan
-           * HANDLER_BENCH branch deliberately skips downlink_send_ack_to_lan
-           * to avoid clobbering the template, and ack_for is frozen at
-           * whatever value the template captured when first loaded. The
-           * staleness gate added to wan_comm_was_seq_acked (200 ms) now
-           * correctly refuses to false-positive the cumulative ack, so
-           * send_data_to_wan would *always* burn ACK_TIMEOUT_MS × MAX_RETRY
-           * = 6 s per call and report ESP_FAIL. Using it here would make
-           * the bench measure the ACK timeout, not throughput.
-           *
-           * Fire-and-forget is honest: Mode 2 still differs from Mode 1's
-           * direct-send because traffic walks the full uplink dispatcher
-           * (queue + mutex + build_data_packet + RTC stamp + dispatch). The
-           * difference between Mode 1 and Mode 2 numbers is exactly the
-           * cost of that pipeline — which is the production overhead we
-           * want to characterise. ACK round-trip cost is *not* measurable
-           * with the current slave architecture; the bench documents that
-           * limit rather than papering over it.
-           *
-           * Delivery correctness is still cross-checked via:
-           *   - master.s_tx_pkt vs slave.s_rx_pkt parity per window.
-           *   - CRC8/CRC16 framing stats (must be zero on both sides). */
           wan_comm_status_t st = wan_comm_send_data(g_wan_handle,
                                                      packet, packet_len);
           if (st == WAN_COMM_OK) {
@@ -447,21 +469,32 @@ static void uplink_handler_task(void *pvParameters) {
             bench_throughput_count_tx_drop();
           }
 #else
-          /* Mode 1 (DRIVER) fast path: fire-and-forget framed DT, no ACK.
-           * Used when measuring SPI transport ceiling in isolation. */
           (void)wan_comm_send_data(g_wan_handle, packet, packet_len);
 #endif
 
-          /* Re-take g_qspi_mutex for the next iteration's queue probe and
-           * the SD/RTC blocks below. If downlink is mid-poll we fail fast
-           * and bail out of the burst entirely — no mutex held, so we must
-           * skip the SD/RTC blocks and the trailing xSemaphoreGive. */
+#if WAN_UL_DBG_INSTRUMENTATION
+          dbg_send_us_total += (uint64_t)(esp_timer_get_time() - dbg_send_t0);
+          dbg_items++;
+          dbg_items_this_iter++;
+#endif
+
+          /* Re-take. If contended, bail out without holding the mutex. */
           burst_count++;
+#if WAN_UL_DBG_INSTRUMENTATION
+          int64_t dbg_retake_t0 = esp_timer_get_time();
+#endif
           if (xSemaphoreTake(g_qspi_mutex,
                              pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) {
+#if WAN_UL_DBG_INSTRUMENTATION
+            dbg_mutex_wait_us += (uint64_t)(esp_timer_get_time() - dbg_retake_t0);
+            dbg_retake_fail++;
+#endif
             had_work = true;
             goto bench_bailout_no_mutex;
           }
+#if WAN_UL_DBG_INSTRUMENTATION
+          dbg_mutex_wait_us += (uint64_t)(esp_timer_get_time() - dbg_retake_t0);
+#endif
           continue;
         } else if (uplink_item.route == UPLINK_ROUTE_LOCAL) {
           ack_type_t ack_result;
@@ -515,6 +548,10 @@ static void uplink_handler_task(void *pvParameters) {
       }  /* end burst while */
       had_work = (burst_count > 0);
 
+#if WAN_UL_DBG_INSTRUMENTATION
+      int64_t dbg_postburst_t0 = esp_timer_get_time();
+#endif
+
       {
         UBaseType_t q_now = uxQueueMessagesWaiting(g_uplink_queue);
         if ((uint32_t)q_now > g_uplink_queue_max_depth) {
@@ -522,10 +559,16 @@ static void uplink_handler_task(void *pvParameters) {
         }
       }
 
-      // B) Check SD Card Backup Retry (if internet online)
+      // B) SD Card Backup Retry. has_data() is O(1) (cached counter).
+#if WAN_UL_DBG_INSTRUMENTATION
+      int64_t dbg_sdcheck_t0 = esp_timer_get_time();
+#endif
+      bool dbg_sd_has = storage_handler_has_data();
+#if WAN_UL_DBG_INSTRUMENTATION
+      dbg_sdcheck_us += (uint64_t)(esp_timer_get_time() - dbg_sdcheck_t0);
+#endif
 
-      if (storage_handler_has_data() &&
-          g_internet_status == INTERNET_STATUS_ONLINE) {
+      if (dbg_sd_has && g_internet_status == INTERNET_STATUS_ONLINE) {
 
         // Rate limiting: Only retry every SD_RETRY_DELAY_MS
         if ((now - last_sd_retry_attempt) < pdMS_TO_TICKS(SD_RETRY_DELAY_MS)) {
@@ -542,7 +585,7 @@ static void uplink_handler_task(void *pvParameters) {
                    (unsigned long)((now - g_last_cf_dispatch_tick) * portTICK_PERIOD_MS));
           goto skip_sd_retry;
         }
-        
+
         last_sd_retry_attempt = now;
 
         // Prepare retry session (open oldest file)
@@ -620,28 +663,77 @@ skip_sd_retry:
         last_rtc_request = now;
       }
 
+#if WAN_UL_DBG_INSTRUMENTATION
+      dbg_postburst_us += (uint64_t)(esp_timer_get_time() - dbg_postburst_t0);
+#endif
+
       // Release SPI mutex
       xSemaphoreGive(g_qspi_mutex);
     }
 
 bench_bailout_no_mutex:
-    /* Bench bypass exited the burst without re-acquiring g_qspi_mutex.
-     * SD/RTC blocks were skipped intentionally — they need the mutex and
-     * will get serviced on a future iteration. We still want the periodic
-     * flush below since it touches its own internal mutex. */
-
-    // D) Periodic Flush (matches unified timeout batching, outside SPI mutex)
-    // This handles timeout flushes set by storage handler timer callback
+    // D) Periodic Flush (outside SPI mutex)
 
     if ((now - last_flush) >= pdMS_TO_TICKS(INTER_MCU_BATCH_INTERVAL_MS)) {
+#if WAN_UL_DBG_INSTRUMENTATION
+      int64_t dbg_pf_t0 = esp_timer_get_time();
+#endif
       storage_handler_flush();
       wan_comm_flush_dma_buffer(g_wan_handle);
       last_flush = now;
+#if WAN_UL_DBG_INSTRUMENTATION
+      dbg_pflush_count++;
+      dbg_pflush_us += (uint64_t)(esp_timer_get_time() - dbg_pf_t0);
+#endif
     }
 
-    // Adaptive delay: yield when queue was active (avoid tick-rate rounding of
-    // vTaskDelay(1ms) → 10ms at CONFIG_FREERTOS_HZ=100), 10 ms when idle.
-    // Plan A diagnostic: test if tick granularity is the ~95ms/iter hidden latency.
+#if WAN_UL_DBG_INSTRUMENTATION
+    /* Account iter wall time and emit a once-per-second breakdown. */
+    if (dbg_items_this_iter > 0) {
+      dbg_bursts++;
+    }
+    dbg_iter_us_total += (uint64_t)(esp_timer_get_time() - dbg_iter_start);
+
+    int64_t dbg_now_us = esp_timer_get_time();
+    if (dbg_now_us - dbg_report_t0 >= 1000000) {
+      uint64_t window_us = (uint64_t)(dbg_now_us - dbg_report_t0);
+      uint64_t accounted_us = dbg_send_us_total + dbg_qrx_us_total +
+                              dbg_build_us_total + dbg_mutex_wait_us +
+                              dbg_pflush_us + dbg_postburst_us;
+      ESP_LOGI(TAG,
+        "[UL-DBG %llums] iters=%llu items=%llu items/s=%.1f "
+        "iter_avg=%lluus | qrx_avg=%lluus(n=%llu) build_avg=%lluus "
+        "send_avg=%lluus mutex_avg=%lluus pflush_avg=%lluus(n=%llu) "
+        "postburst_avg=%lluus sdcheck_avg=%lluus "
+        "| accounted=%lluus/iter unaccounted=%lluus/iter retake_fail=%llu",
+        (unsigned long long)(window_us / 1000ull),
+        (unsigned long long)dbg_iters,
+        (unsigned long long)dbg_items,
+        (double)dbg_items * 1e6 / (double)window_us,
+        (unsigned long long)(dbg_iters ? dbg_iter_us_total / dbg_iters : 0),
+        (unsigned long long)(dbg_qrx_count ? dbg_qrx_us_total / dbg_qrx_count : 0),
+        (unsigned long long)dbg_qrx_count,
+        (unsigned long long)(dbg_items ? dbg_build_us_total / dbg_items : 0),
+        (unsigned long long)(dbg_items ? dbg_send_us_total / dbg_items : 0),
+        (unsigned long long)(dbg_iters ? dbg_mutex_wait_us / dbg_iters : 0),
+        (unsigned long long)(dbg_pflush_count ? dbg_pflush_us / dbg_pflush_count : 0),
+        (unsigned long long)dbg_pflush_count,
+        (unsigned long long)(dbg_iters ? dbg_postburst_us / dbg_iters : 0),
+        (unsigned long long)(dbg_iters ? dbg_sdcheck_us / dbg_iters : 0),
+        (unsigned long long)(dbg_iters ? accounted_us / dbg_iters : 0),
+        (unsigned long long)(dbg_iters ? (dbg_iter_us_total - accounted_us) / dbg_iters : 0),
+        (unsigned long long)dbg_retake_fail);
+      dbg_iters = dbg_iter_us_total = dbg_bursts = dbg_items = 0;
+      dbg_mutex_wait_us = dbg_send_us_total = 0;
+      dbg_pflush_count = dbg_pflush_us = 0;
+      dbg_retake_fail = 0;
+      dbg_qrx_us_total = dbg_qrx_count = dbg_build_us_total = dbg_gap_us_total = 0;
+      dbg_postburst_us = dbg_sdcheck_us = 0;
+      dbg_report_t0 = dbg_now_us;
+    }
+#endif /* WAN_UL_DBG_INSTRUMENTATION */
+
+    // Yield when queue active, 10ms sleep when idle (tick-rate granularity).
     if (had_work) {
       taskYIELD();
     } else {
@@ -773,92 +865,22 @@ static esp_err_t request_rtc_and_status(void) {
  */
 static esp_err_t send_data_to_wan(const uint8_t *data, uint16_t length,
                                   ack_type_t *ack_out, uint32_t ack_timeout_ms) {
+  (void)ack_timeout_ms;  /* fire-and-forget: no ACK wait */
+
   if (!data || length == 0 || !ack_out) {
     return ESP_ERR_INVALID_ARG;
   }
 
-  for (int retry = 0; retry < MAX_RETRY_COUNT; retry++) {
-
-#if !BENCH_QUIET_LOG
-    ESP_LOGI(TAG, "Transmit attempt %d/%d", retry + 1, MAX_RETRY_COUNT);
-#endif
-
-    uint8_t my_seq = 0;
-    wan_comm_status_t status =
-        wan_comm_send_data_get_seq(g_wan_handle, data, length, &my_seq);
-    if (status != WAN_COMM_OK) {
-      vTaskDelay(pdMS_TO_TICKS(20));
-      continue;
-    }
-
-    /* Poll ACK within ack_timeout_ms. Two paths can signal success:
-     *  1. Explicit [0x02][0x11][internet_flag] ACK payload from slave's
-     *     downlink_send_ack_to_lan(). Carries internet status.
-     *  2. P3.b cumulative ACK: any slave→master frame piggybacks
-     *     handle->last_acked_seq via the framing layer. If that covers my_seq
-     *     we know the DT arrived even if the slave hasn't loaded the explicit
-     *     ACK frame yet — exit early and assume INTERNET_OK (the periodic
-     *     RTC poll keeps g_internet_status fresh independently). */
-    const TickType_t start = xTaskGetTickCount();
-    const TickType_t timeout_ticks = pdMS_TO_TICKS(ack_timeout_ms);
-
-    uint32_t poll_streak = 0;
-    while ((xTaskGetTickCount() - start) < timeout_ticks) {
-
-      uint8_t ack_response[256] = {0};
-      status = wan_comm_request_data(g_wan_handle, ack_response,
-                                     sizeof(ack_response));
-
-      if (status == WAN_COMM_OK) {
-        /* Path 1: scan for explicit ACK. Preferred when present, since it
-         * carries the slave's current internet status. */
-        for (int i = 0; i <= (int)sizeof(ack_response) - 3; i++) {
-          if (ack_response[i] == 0x02 &&
-              ack_response[i + 1] == ACK_TYPE_RECEIVED_OK) {
-
-            *ack_out = (ack_type_t)ack_response[i + 2];
-            if (*ack_out != ACK_TYPE_INTERNET_OK && *ack_out != ACK_TYPE_NO_INTERNET) {
-              *ack_out = (ack_response[i + 2] != 0) ? ACK_TYPE_INTERNET_OK
-                                                     : ACK_TYPE_NO_INTERNET;
-            }
-#if !BENCH_QUIET_LOG
-            ESP_LOGI(TAG, "ACK received: %s (ack=0x%02X internet=0x%02X)",
-                     (*ack_out == ACK_TYPE_INTERNET_OK) ? "INTERNET_OK" : "NO_INTERNET",
-                     ack_response[i + 1], ack_response[i + 2]);
-#endif
-            return ESP_OK;
-          }
-        }
-      }
-
-      /* Path 2: framing-layer cumulative ACK already covers our seq → done. */
-      if (wan_comm_was_seq_acked(g_wan_handle, my_seq)) {
-#if !BENCH_QUIET_LOG
-        ESP_LOGD(TAG, "Cumulative ACK seq=%u (last_acked=0x%04X)",
-                 my_seq, wan_comm_get_last_acked_seq(g_wan_handle));
-#endif
-        *ack_out = ACK_TYPE_INTERNET_OK;
-        return ESP_OK;
-      }
-
-      /* Tight-poll for UPLINK_ACK_TIGHT_POLLS iterations, then yield once so
-       * higher-priority tasks (WiFi/MQTT) can run between poll batches. */
-      poll_streak++;
-      if (poll_streak >= UPLINK_ACK_TIGHT_POLLS) {
-        taskYIELD();
-        poll_streak = 0;
-      }
-    }
-
-    ESP_LOGW(TAG, "ACK timeout on attempt %d (my_seq=%u, last_acked=0x%04X)",
-             retry + 1, my_seq,
-             wan_comm_get_last_acked_seq(g_wan_handle));
-    vTaskDelay(pdMS_TO_TICKS(20));
+  /* Fire-and-forget. Framing CRC8+CRC16 guards delivery integrity;
+   * g_internet_status (refreshed by request_rtc_and_status, 1s cadence)
+   * decides SD persistence at the call site. */
+  wan_comm_status_t status = wan_comm_send_data(g_wan_handle, data, length);
+  if (status != WAN_COMM_OK) {
+    *ack_out = ACK_TYPE_TIMEOUT;
+    return ESP_FAIL;
   }
-
-  ESP_LOGW(TAG, "Max retries reached");
-  *ack_out = ACK_TYPE_TIMEOUT;
-  return ESP_FAIL;
+  *ack_out = ACK_TYPE_INTERNET_OK;
+  return ESP_OK;
 }
 
 /**
