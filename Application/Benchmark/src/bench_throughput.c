@@ -28,12 +28,13 @@
 #include "wan_comm.h"
 #include <string.h>
 
-/* P2b: sender bypasses the uplink queue and calls wan_comm directly to
- * isolate the SPI driver from the rest of the handler pipeline (mutex,
- * RTC polling, storage flush, etc). The slave side still parses BNC DT
- * frames through process_data_from_lan(), so the inner payload must
- * match the legacy [handler 3B][len 2B][rtc 19B][data] layout. */
-#define BENCH_TP_DIRECT_SEND 1
+/* Mode selector: derived from BENCH_THROUGHPUT_ENABLE (see header).
+ *   Mode 1 (DRIVER)    — direct wan_comm_send_data, bypass uplink queue.
+ *                        Counter increments in this file's sender task.
+ *   Mode 2 (PROD_REAL) — mcu_wan_enqueue_uplink + ACK-gated dispatcher.
+ *                        Counter increments inside the uplink_handler_task's
+ *                        HANDLER_BENCH branch (see bench_throughput_count_tx). */
+#define BENCH_TP_DIRECT_SEND BENCH_TP_MODE_DRIVER
 
 extern wan_comm_handle_t g_wan_handle;
 extern volatile bool g_handshake_done;
@@ -74,6 +75,18 @@ void bench_throughput_count_rx(uint32_t bytes) {
     portENTER_CRITICAL(&s_mux);
     s_rx_pkt++;
     s_rx_b += bytes;
+    portEXIT_CRITICAL(&s_mux);
+}
+
+/* Mode 2 only: invoked by uplink_handler_task's HANDLER_BENCH branch AFTER
+ * send_data_to_wan() returns OK (i.e. ACK received). This is the truthful
+ * end-to-end TX count — increments only when the slave acknowledged the
+ * frame, not when it was enqueued. Mode 1's counter increments earlier
+ * (right after wan_comm_send_data returns), see bench_tp_sender_task. */
+void bench_throughput_count_tx(uint32_t bytes) {
+    portENTER_CRITICAL(&s_mux);
+    s_tx_pkt++;
+    s_tx_b += bytes;
     portEXIT_CRITICAL(&s_mux);
 }
 
@@ -123,7 +136,10 @@ static void bench_tp_sender_task(void *arg) {
     ESP_LOGI(TAG, "Handshake done — sender entering flood loop");
 
     while (s_running) {
-#if BENCH_TP_DIRECT_SEND
+#if BENCH_TP_MODE_DRIVER
+        /* Mode 1: bypass the handler queue, hit the SPI transport directly.
+         * Counter += payload immediately on OK — frames may still be sitting
+         * in dma_tx accumulator, not yet on the wire. */
         if (g_wan_handle == NULL) {
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
@@ -131,11 +147,6 @@ static void bench_tp_sender_task(void *arg) {
         wan_comm_status_t st = wan_comm_send_data(g_wan_handle, s_inner_buf,
                                                    (uint16_t)BENCH_TP_INNER_LEN);
         bool ok = (st == WAN_COMM_OK);
-#else
-        bool ok = mcu_wan_enqueue_uplink(HANDLER_BENCH,
-                                         s_tx_buf,
-                                         (uint16_t)BENCH_TP_PAYLOAD_LEN);
-#endif
         if (ok) {
             portENTER_CRITICAL(&s_mux);
             s_tx_pkt++;
@@ -145,9 +156,32 @@ static void bench_tp_sender_task(void *arg) {
             portENTER_CRITICAL(&s_mux);
             s_tx_drop++;
             portEXIT_CRITICAL(&s_mux);
-            /* Yield briefly when queue/SPI busy to avoid busy-spinning */
             taskYIELD();
         }
+#elif BENCH_TP_MODE_PROD_REAL
+        /* Mode 2: post raw payload to the real uplink queue. The dispatcher
+         * (mcu_wan_handler_uplink.c) sees HANDLER_BENCH and — because
+         * BENCH_THROUGHPUT_ENABLE==2 — routes through send_data_to_wan with
+         * the ACK gate. TX counter increments INSIDE the dispatcher on ACK
+         * success (bench_throughput_count_tx), not here. We only count drops
+         * (queue-full) and yield. */
+        bool ok = mcu_wan_enqueue_uplink(HANDLER_BENCH,
+                                         s_tx_buf,
+                                         (uint16_t)BENCH_TP_PAYLOAD_LEN);
+        if (!ok) {
+            portENTER_CRITICAL(&s_mux);
+            s_tx_drop++;
+            portEXIT_CRITICAL(&s_mux);
+            /* Queue is small (~32); back off so we don't burn the CPU
+             * faster than the dispatcher can drain. */
+            vTaskDelay(pdMS_TO_TICKS(2));
+        }
+        /* Always yield once per iteration in Mode 2 — the dispatcher needs
+         * the CPU to actually pull items off the queue. */
+        taskYIELD();
+#else
+#  error "BENCH_THROUGHPUT_ENABLE must be 0, 1, or 2"
+#endif
     }
 
     ESP_LOGI(TAG, "Sender task stopped");
@@ -348,6 +382,7 @@ void bench_throughput_stop(void) {
 #else /* BENCH_THROUGHPUT_ENABLE == 0 */
 
 void bench_throughput_count_rx(uint32_t bytes)  { (void)bytes; }
+void bench_throughput_count_tx(uint32_t bytes)  { (void)bytes; }
 void bench_throughput_count_tx_drop(void)        {}
 
 esp_err_t bench_throughput_start(void) {

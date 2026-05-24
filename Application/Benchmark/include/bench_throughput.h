@@ -38,10 +38,37 @@ extern "C" {
 
 /**
  * @brief Master on/off switch for the inter-MCU throughput benchmark.
- *        1 = compile real sender + reporter tasks.
- *        0 = all functions compiled as no-ops (zero production overhead).
+ *
+ *   0 = OFF. All public functions are no-ops, zero production overhead.
+ *
+ *   1 = DRIVER mode (formerly BENCH_TP_DIRECT_SEND=1).
+ *       Sender bypasses mcu_wan_enqueue_uplink/uplink_processor_task and
+ *       calls wan_comm_send_data() directly. Slave loads a static template
+ *       into tx_buffer once (no refresh). Measures the *ceiling* of the
+ *       SPI transport/framing layer in isolation; **not** representative of
+ *       what real handler traffic achieves.
+ *
+ *   2 = PRODUCTION-REAL mode.
+ *       Sender posts via mcu_wan_enqueue_uplink(HANDLER_BENCH, ...) — the
+ *       same queue real handlers use. The HANDLER_BENCH branch in
+ *       uplink_handler_task is forced to take the ACK-gated send_data_to_wan
+ *       path (instead of the fire-and-forget fast path). WAN side runs a
+ *       refresh task that periodically calls mcu_lan_enqueue_downlink so the
+ *       slave exercises queue + memcpy + downlink_handler_task +
+ *       lan_comm_load_tx_data on every frame. Measures sustained
+ *       application-layer throughput under the real production code path.
+ *
+ * Modes 1 and 2 cannot be combined (a single run measures one or the other).
+ * Mode 2 yields a smaller number than Mode 1 — that gap is the cost of the
+ * handler pipeline (queue, mutex, ACK round-trip), which is exactly what we
+ * want to characterise.
  */
-#define BENCH_THROUGHPUT_ENABLE 0
+#define BENCH_THROUGHPUT_ENABLE 2
+
+/* Derived flags — do NOT edit, computed from BENCH_THROUGHPUT_ENABLE. */
+#define BENCH_TP_MODE_OFF        (BENCH_THROUGHPUT_ENABLE == 0)
+#define BENCH_TP_MODE_DRIVER     (BENCH_THROUGHPUT_ENABLE == 1)
+#define BENCH_TP_MODE_PROD_REAL  (BENCH_THROUGHPUT_ENABLE == 2)
 
 /** Reporting interval in milliseconds. */
 #define BENCH_TP_REPORT_INTERVAL_MS 2000
@@ -64,6 +91,18 @@ void bench_throughput_stop(void);
  * @param bytes Number of payload bytes in the received frame.
  */
 void bench_throughput_count_rx(uint32_t bytes);
+
+/**
+ * @brief Increment the TX byte counter — Mode 2 (PROD_REAL) only.
+ *
+ * Called by uplink_handler_task's HANDLER_BENCH branch AFTER the slave has
+ * acknowledged the frame via send_data_to_wan(). This produces an honest
+ * end-to-end TX number (post-ACK), unlike Mode 1 where the sender task
+ * counts at wan_comm_send_data() return time (pre-wire).
+ *
+ * @param bytes Inner payload size (typically BENCH_TP_PAYLOAD_LEN).
+ */
+void bench_throughput_count_tx(uint32_t bytes);
 
 /**
  * @brief Increment TX drop counter (uplink queue was full).

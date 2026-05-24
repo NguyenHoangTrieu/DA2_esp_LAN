@@ -10,6 +10,7 @@
 #include "stack_handler.h"
 #include "storage_handler.h"
 #include "wan_comm.h"
+#include "bench_throughput.h"
 #include "esp_heap_caps.h"
 #include <string.h>
 
@@ -385,12 +386,83 @@ static void uplink_handler_task(void *pvParameters) {
         //  3. UPLINK_ROUTE_CLOUD : node telemetry. Online → send + ACK gate.
         //                          Offline → SD backup, replay when online.
         if (uplink_item.source_id == HANDLER_BENCH) {
-          /* P2 fast path: BNC is pure SPI-layer throughput measurement.
-           * Skip the DQ-ACK ping-pong (each ACK poll costs a full transaction
-           * and the slave can take >10 ms to refresh its TX buffer under
-           * WiFi/MQTT load), and instead fire-and-forget the framed DT.
-           * Production traffic still uses send_data_to_wan with ACKs. */
+          /* Plan-C-followup diagnostic (mutex contention with downlink):
+           *
+           * The burst loop runs under g_qspi_mutex to serialize SD/RTC state
+           * against the downlink DQ-poll task. HANDLER_BENCH touches neither —
+           * it is a fire-and-forget throughput probe, and wan_comm_send_data
+           * has its own internal transfer_mutex that already protects the SPI
+           * bus. Holding g_qspi_mutex across the bench send means uplink and
+           * downlink starve each other: in Mode 2 the slave's static template
+           * keeps the data-ready GPIO asserted, downlink loops on DQ polls
+           * for up to DQ_RETRY_COUNT × DQ_RETRY_INTERVAL_MS = 500 ms holding
+           * the mutex, and uplink times out on the 50 ms MUTEX_TIMEOUT_MS
+           * almost every iteration.
+           *
+           * Workaround for the bench path only: release g_qspi_mutex around
+           * the SPI send so the downlink task can interleave. Re-take after.
+           * If we cannot re-take, bail out of the burst cleanly without
+           * trying to do SD/RTC work that needs the mutex.
+           *
+           * Production routes (LOCAL / CLOUD) keep the original behaviour. */
+          xSemaphoreGive(g_qspi_mutex);
+
+#if BENCH_TP_MODE_PROD_REAL
+          /* Mode 2 (PRODUCTION-REAL): walk the real handler pipeline (queue
+           * dwell, build_data_packet memcpy + RTC stamping, SPI transport),
+           * but DO NOT take the ACK gate.
+           *
+           * Why no ACK gate here? send_data_to_wan polls for either an
+           * explicit [0x02][0x11] ACK frame from the slave's downlink path
+           * OR a cumulative ACK via the framing layer's ack_for field. With
+           * the slave's tx_buffer holding the bench static template
+           * forever (architectural — see SPI_BENCH_METHODOLOGY.md), neither
+           * source advances: the slave's process_data_from_lan
+           * HANDLER_BENCH branch deliberately skips downlink_send_ack_to_lan
+           * to avoid clobbering the template, and ack_for is frozen at
+           * whatever value the template captured when first loaded. The
+           * staleness gate added to wan_comm_was_seq_acked (200 ms) now
+           * correctly refuses to false-positive the cumulative ack, so
+           * send_data_to_wan would *always* burn ACK_TIMEOUT_MS × MAX_RETRY
+           * = 6 s per call and report ESP_FAIL. Using it here would make
+           * the bench measure the ACK timeout, not throughput.
+           *
+           * Fire-and-forget is honest: Mode 2 still differs from Mode 1's
+           * direct-send because traffic walks the full uplink dispatcher
+           * (queue + mutex + build_data_packet + RTC stamp + dispatch). The
+           * difference between Mode 1 and Mode 2 numbers is exactly the
+           * cost of that pipeline — which is the production overhead we
+           * want to characterise. ACK round-trip cost is *not* measurable
+           * with the current slave architecture; the bench documents that
+           * limit rather than papering over it.
+           *
+           * Delivery correctness is still cross-checked via:
+           *   - master.s_tx_pkt vs slave.s_rx_pkt parity per window.
+           *   - CRC8/CRC16 framing stats (must be zero on both sides). */
+          wan_comm_status_t st = wan_comm_send_data(g_wan_handle,
+                                                     packet, packet_len);
+          if (st == WAN_COMM_OK) {
+            bench_throughput_count_tx((uint32_t)uplink_item.length);
+          } else {
+            bench_throughput_count_tx_drop();
+          }
+#else
+          /* Mode 1 (DRIVER) fast path: fire-and-forget framed DT, no ACK.
+           * Used when measuring SPI transport ceiling in isolation. */
           (void)wan_comm_send_data(g_wan_handle, packet, packet_len);
+#endif
+
+          /* Re-take g_qspi_mutex for the next iteration's queue probe and
+           * the SD/RTC blocks below. If downlink is mid-poll we fail fast
+           * and bail out of the burst entirely — no mutex held, so we must
+           * skip the SD/RTC blocks and the trailing xSemaphoreGive. */
+          burst_count++;
+          if (xSemaphoreTake(g_qspi_mutex,
+                             pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) {
+            had_work = true;
+            goto bench_bailout_no_mutex;
+          }
+          continue;
         } else if (uplink_item.route == UPLINK_ROUTE_LOCAL) {
           ack_type_t ack_result;
           esp_err_t send_result =
@@ -552,6 +624,12 @@ skip_sd_retry:
       xSemaphoreGive(g_qspi_mutex);
     }
 
+bench_bailout_no_mutex:
+    /* Bench bypass exited the burst without re-acquiring g_qspi_mutex.
+     * SD/RTC blocks were skipped intentionally — they need the mutex and
+     * will get serviced on a future iteration. We still want the periodic
+     * flush below since it touches its own internal mutex. */
+
     // D) Periodic Flush (matches unified timeout batching, outside SPI mutex)
     // This handles timeout flushes set by storage handler timer callback
 
@@ -561,8 +639,14 @@ skip_sd_retry:
       last_flush = now;
     }
 
-    // Adaptive delay: 1 ms when queue was active, 10 ms when idle
-    vTaskDelay(pdMS_TO_TICKS(had_work ? 1 : 10));
+    // Adaptive delay: yield when queue was active (avoid tick-rate rounding of
+    // vTaskDelay(1ms) → 10ms at CONFIG_FREERTOS_HZ=100), 10 ms when idle.
+    // Plan A diagnostic: test if tick granularity is the ~95ms/iter hidden latency.
+    if (had_work) {
+      taskYIELD();
+    } else {
+      vTaskDelay(pdMS_TO_TICKS(10));
+    }
   }
 
   ESP_LOGI(TAG, "Uplink Handler Task exiting");
