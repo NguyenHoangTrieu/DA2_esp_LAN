@@ -4,8 +4,10 @@
  */
 
 #include "rs485_handler.h"
+#include "bench_e2e.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include "frame_types.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -256,14 +258,33 @@ static void rs485_handler_task(void *arg) {
                                       to_read, &actual_read, 100);
 
       if (ret == ESP_OK && actual_read > 0) {
+#if BENCH_E2E_LAN_ENABLE
+        /* Capture absolute LAN µs right after read completes. */
+        int64_t rx_us = esp_timer_get_time();
+#else
+        int64_t rx_us = 0;
+#endif
+
         g_rs485_ctx.stats.rx_ok++;
         ESP_LOGI(TAG, "Received RS485 data: %u bytes", actual_read);
         ESP_LOG_BUFFER_HEX(TAG, rx_buffer, actual_read);
 
-        // Forward to WAN uplink
-        if (mcu_wan_enqueue_uplink(HANDLER_RS485, rx_buffer, actual_read)) {
+        // Forward to WAN uplink — use the timestamped API so the WAN MCU
+        // can include this segment in the unified [E2E_TOTAL] log.
+        bool ok = (rx_us != 0)
+                    ? mcu_wan_enqueue_uplink_with_ts(HANDLER_RS485, rx_buffer,
+                                                     actual_read, rx_us)
+                    : mcu_wan_enqueue_uplink(HANDLER_RS485, rx_buffer,
+                                             actual_read);
+        if (ok) {
           g_rs485_ctx.stats.uplink_forwarded++;
           ESP_LOGI(TAG, "Forwarded to WAN uplink: %u bytes", actual_read);
+
+#if BENCH_E2E_LAN_ENABLE
+          int64_t lan_internal_us = esp_timer_get_time() - rx_us;
+          BENCH_E2E_LAN_LOG("handler=RS485 lan_internal_us=%lld payload_len=%u",
+                            (long long)lan_internal_us, (unsigned)actual_read);
+#endif
         } else {
           g_rs485_ctx.stats.uplink_queue_full++;
           ESP_LOGW(TAG, "WAN uplink queue full");

@@ -76,6 +76,16 @@ bool mcu_wan_try_enqueue_uplink(handler_id_t source_id, uint8_t *data,
                                 uint16_t len);
 
 /**
+ * @brief Variant tagging the uplink item with the absolute LAN
+ *        `esp_timer_get_time()` value captured the moment the wireless module
+ *        first received the data. Carried verbatim inside the SPI DT frame
+ *        so the WAN MCU can convert via `bench_time_sync_from_peer_us()` and
+ *        compute the unified `[E2E_TOTAL]` latency. Pass 0 if not measured.
+ */
+bool mcu_wan_enqueue_uplink_with_ts(handler_id_t source_id, uint8_t *data,
+                                    uint16_t len, int64_t lan_rx_us);
+
+/**
  * @brief Get current internet status (cached from WAN MCU)
  */
 internet_status_t mcu_wan_handler_get_internet_status(void);

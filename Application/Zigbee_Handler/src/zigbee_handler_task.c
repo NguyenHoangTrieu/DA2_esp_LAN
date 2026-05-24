@@ -12,8 +12,10 @@
 
 #include "zigbee_handler_task.h"
 #include "bench_counter.h"
+#include "bench_e2e.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "frame_types.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -77,7 +79,8 @@ static inline bool valid_stack(uint8_t sid) {
   return (sid < ZIGBEE_MAX_STACKS);
 }
 
-static bool zigbee_enqueue_evt_chunks(uint8_t sid, const char *payload) {
+static bool zigbee_enqueue_evt_chunks_ts(uint8_t sid, const char *payload,
+                                          int64_t rx_us) {
   char packet[ZIGBEE_WAN_UPLINK_MAX];
   size_t payload_len = strlen(payload);
   int one_shot_hdr = snprintf(packet, sizeof(packet), "CFZB:%d:EVT:", sid);
@@ -87,10 +90,13 @@ static bool zigbee_enqueue_evt_chunks(uint8_t sid, const char *payload) {
   if ((size_t)one_shot_hdr + payload_len < sizeof(packet)) {
     int pkt_len =
         snprintf(packet, sizeof(packet), "CFZB:%d:EVT:%s", sid, payload);
-    return (pkt_len > 0)
-               ? mcu_wan_enqueue_uplink(HANDLER_ZIGBEE, (uint8_t *)packet,
-                                        (uint16_t)pkt_len)
-               : false;
+    if (pkt_len <= 0) return false;
+    return (rx_us != 0)
+               ? mcu_wan_enqueue_uplink_with_ts(HANDLER_ZIGBEE,
+                                                (uint8_t *)packet,
+                                                (uint16_t)pkt_len, rx_us)
+               : mcu_wan_enqueue_uplink(HANDLER_ZIGBEE, (uint8_t *)packet,
+                                        (uint16_t)pkt_len);
   }
 
   size_t max_chunk = sizeof(packet) - (size_t)one_shot_hdr - 24;
@@ -107,12 +113,20 @@ static bool zigbee_enqueue_evt_chunks(uint8_t sid, const char *payload) {
                            (int)chunk_len, payload + offset);
     if (pkt_len <= 0 || pkt_len >= (int)sizeof(packet))
       return false;
-    if (!mcu_wan_enqueue_uplink(HANDLER_ZIGBEE, (uint8_t *)packet,
-                                (uint16_t)pkt_len)) {
-      return false;
-    }
+    bool ok = (rx_us != 0)
+                  ? mcu_wan_enqueue_uplink_with_ts(HANDLER_ZIGBEE,
+                                                   (uint8_t *)packet,
+                                                   (uint16_t)pkt_len, rx_us)
+                  : mcu_wan_enqueue_uplink(HANDLER_ZIGBEE, (uint8_t *)packet,
+                                           (uint16_t)pkt_len);
+    if (!ok) return false;
   }
   return true;
+}
+
+/* Backward-compat shim — non-bench callers (chunkers without rx_us). */
+static bool zigbee_enqueue_evt_chunks(uint8_t sid, const char *payload) {
+  return zigbee_enqueue_evt_chunks_ts(sid, payload, 0);
 }
 
 /**
@@ -204,9 +218,18 @@ static void zigbee_uplink_task(void *pv) {
         uint8_t packet[1 + ZIGBEE_UPLINK_PAYLOAD_MAX_LEN];
         packet[0] = sid;
         memcpy(&packet[1], batch[i].payload, batch[i].payload_len);
+
         if (!mcu_wan_enqueue_uplink(HANDLER_ZIGBEE, packet,
                                     1 + batch[i].payload_len)) {
           ESP_LOGW(TAG, "[Stack %d] Uplink enqueue failed", sid);
+        } else {
+#if BENCH_E2E_LAN_ENABLE
+          uint32_t now_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+          uint32_t lan_internal_ms = now_ms - batch[i].timestamp_ms;
+          BENCH_E2E_LAN_LOG("handler=ZIGBEE stack=%u lan_internal_ms=%lu payload_len=%u",
+                            sid, (unsigned long)lan_internal_ms,
+                            (unsigned)batch[i].payload_len);
+#endif
         }
       }
       batch_cnt = 0;
@@ -354,6 +377,12 @@ static void zigbee_listener_task(void *pv) {
                                           ZIGBEE_LISTEN_BUFFER_SIZE, &recv_len);
 
     if (ret == ESP_OK && recv_len > 0) {
+#if BENCH_E2E_LAN_ENABLE
+      /* [E2E_LAN] capture absolute LAN µs the moment data arrives. */
+      int64_t rx_us = esp_timer_get_time();
+#else
+      int64_t rx_us = 0;
+#endif
       /* Determine the string to forward — HEX-encode binary frames,
        * null-terminate ASCII frames. No content filtering: everything
        * the module sends is transparently forwarded to the WAN MCU.
@@ -380,13 +409,19 @@ static void zigbee_listener_task(void *pv) {
 
       /* Count all received data, then forward unconditionally */
       bench_count_zb_rx((uint16_t)recv_len);
-      if (!zigbee_enqueue_evt_chunks(sid, fwd_str)) {
+      if (!zigbee_enqueue_evt_chunks_ts(sid, fwd_str, rx_us)) {
 #if !BENCH_QUIET_LOG
         ESP_LOGW(TAG, "[Stack %d] EVT enqueue failed", sid);
 #endif
         bench_count_zb_drop();
       } else {
         bench_count_zb_fwd((uint16_t)recv_len);
+#if BENCH_E2E_LAN_ENABLE
+        int64_t lan_internal_us = esp_timer_get_time() - rx_us;
+        BENCH_E2E_LAN_LOG("handler=ZIGBEE stack=%u lan_internal_us=%lld payload_len=%u",
+                          sid, (long long)lan_internal_us,
+                          (unsigned)recv_len);
+#endif
       }
     } else if (ret == ESP_ERR_TIMEOUT) {
       vTaskDelay(pdMS_TO_TICKS(20));
@@ -696,7 +731,12 @@ bool zigbee_handler_task_enqueue_uplink(uint8_t stack_id, const uint8_t *data,
 
   zigbee_uplink_packet_t pkt = {0};
   pkt.stack_id = stack_id;
+#if BENCH_E2E_LAN_ENABLE
+  /* capture RX wall-time so uplink task can log internal latency */
+  pkt.timestamp_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+#else
   pkt.timestamp_ms = 0;
+#endif
   uint16_t copy = (len <= ZIGBEE_UPLINK_PAYLOAD_MAX_LEN)
                       ? len
                       : ZIGBEE_UPLINK_PAYLOAD_MAX_LEN;

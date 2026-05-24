@@ -44,8 +44,10 @@ static volatile bool s_running = false;
 static uint8_t *s_tx_buf = NULL;
 
 #if BENCH_TP_DIRECT_SEND
-/* DT inner: [BNC 3B][len 2B BE][rtc 19B][payload N]. */
-#define BENCH_TP_INNER_LEN (3u + 2u + 19u + BENCH_TP_PAYLOAD_LEN)
+/* DT inner: [BNC 3B][len 2B BE][lan_rx_us(8 LE)][rtc 19B][payload N].
+ * The bench bypasses build_data_packet so it must mirror the new wire
+ * format manually. lan_rx_us is hard-zero for bench traffic. */
+#define BENCH_TP_INNER_LEN (3u + 2u + 8u + 19u + BENCH_TP_PAYLOAD_LEN)
 static uint8_t *s_inner_buf = NULL;
 #endif
 
@@ -234,11 +236,13 @@ esp_err_t bench_throughput_start(void) {
     s_inner_buf[0] = 'B';
     s_inner_buf[1] = 'N';
     s_inner_buf[2] = 'C';
-    uint16_t data_len = 19u + BENCH_TP_PAYLOAD_LEN;
+    uint16_t data_len = 19u + BENCH_TP_PAYLOAD_LEN;  /* lan_rx_us is OUTSIDE data_length */
     s_inner_buf[3] = (uint8_t)((data_len >> 8) & 0xFFu);
     s_inner_buf[4] = (uint8_t)(data_len & 0xFFu);
-    memcpy(&s_inner_buf[5],  "00/00/0000-00:00:00", 19);
-    memset(&s_inner_buf[24], 0xAA, BENCH_TP_PAYLOAD_LEN);
+    /* lan_rx_us = 0 (bench, no module RX) */
+    memset(&s_inner_buf[5], 0, 8);
+    memcpy(&s_inner_buf[13], "00/00/0000-00:00:00", 19);
+    memset(&s_inner_buf[32], 0xAA, BENCH_TP_PAYLOAD_LEN);
 #endif
 
     s_running = true;

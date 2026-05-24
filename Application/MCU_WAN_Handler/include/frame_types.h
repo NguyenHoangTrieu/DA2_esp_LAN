@@ -47,7 +47,9 @@ typedef enum {
   FRAME_TYPE_DATA = 0x05,        // "DT" prefix
   FRAME_TYPE_FOTA = 0x06,        // CFFW - Firmware Update
   FRAME_TYPE_QUERY = 0x07,       // "DQ" - Data Query
-  FRAME_TYPE_CONFIG_QUERY = 0x08 // "CQ" - Config Query
+  FRAME_TYPE_CONFIG_QUERY = 0x08,// "CQ" - Config Query
+  FRAME_TYPE_TSYNC_REQ = 0x09,   // CF + time-sync request (LAN → WAN)
+  FRAME_TYPE_TSYNC_RSP = 0x0A    // ACK + time-sync response (WAN → LAN)
 } frame_type_t;
 
 // ===== ACK Types =====
@@ -58,7 +60,8 @@ typedef enum {
   ACK_TYPE_NO_INTERNET = 0x13,
   ACK_TYPE_OK = 0x14,
   ACK_TYPE_TIMEOUT = 0x15,
-  ACK_TYPE_ERROR = 0x16
+  ACK_TYPE_ERROR = 0x16,
+  ACK_TYPE_TSYNC_RSP = 0x1A   // Time-sync response carries WAN t2/t3
 } ack_type_t;
 
 // ===== Handler ID Enum =====
@@ -138,12 +141,18 @@ typedef struct __attribute__((packed)) {
 
 /**
  * @brief Data Packet
- * Format: [DT][handler_type(3)][data_length(2)][data_payload]
+ * Format: [DT][handler_type(3)][data_length(2)][lan_rx_us(8 LE)][data_payload]
+ *
+ * `lan_rx_us` is the *absolute* LAN-MCU `esp_timer_get_time()` reading the
+ * moment the wireless module callback received the data. The WAN MCU
+ * converts via `bench_time_sync_from_peer_us()` and computes total internal
+ * E2E as `(wan_now_us − converted_lan_rx_us)`. Zero = not measured.
  */
 typedef struct __attribute__((packed)) {
   uint16_t header;         // 0x4454 (DT)
   uint8_t handler_type[3]; // "CAN", "LOR", "ZIG", "RS4"
   uint16_t data_length;    // Length of data payload
+  uint64_t lan_rx_us;      // LE — absolute LAN esp_timer_get_time() at RX
   uint8_t data_payload[];  // Flexible array for payload
 } data_packet_t;
 
@@ -167,6 +176,34 @@ typedef struct __attribute__((packed)) {
 } config_query_request_t;
 
 /**
+ * @brief Time-Sync Request (LAN master → WAN slave)
+ * Format: [CF][0x09][lan_t1_us(8 LE)]
+ *
+ * LAN captures `lan_t1_us = esp_timer_get_time()` immediately before this
+ * frame is handed to the SPI framer. The WAN side captures `wan_t2_us`
+ * on RX and `wan_t3_us` right before loading the response.
+ */
+typedef struct __attribute__((packed)) {
+  uint16_t header;    // 0x4346 (CF)
+  uint8_t  cmd;       // FRAME_TYPE_TSYNC_REQ = 0x09
+  uint64_t lan_t1_us; // LAN esp_timer_get_time() at frame dispatch
+} tsync_request_t;
+
+/**
+ * @brief Time-Sync Response (WAN slave → LAN master)
+ * Format: [ACK][0x1A][lan_t1_us(8)][wan_t2_us(8)][wan_t3_us(8)]
+ *
+ * LAN captures T4 on receipt. Offset = ((T2 − T1) + (T3 − T4)) / 2.
+ */
+typedef struct __attribute__((packed)) {
+  uint8_t  ack_prefix; // 0x02
+  uint8_t  ack_type;   // ACK_TYPE_TSYNC_RSP = 0x1A
+  uint64_t lan_t1_us;  // echoed back from request
+  uint64_t wan_t2_us;  // WAN esp_timer_get_time() on RX
+  uint64_t wan_t3_us;  // WAN esp_timer_get_time() right before reply load
+} tsync_response_t;
+
+/**
  * @brief Config Query Response
  * Format: [CQ][length(2)][key=value|key=value|...]
  */
@@ -181,7 +218,7 @@ typedef struct __attribute__((packed)) {
 #define HANDSHAKE_RESPONSE_SIZE sizeof(handshake_response_t)
 #define RTC_RESPONSE_SIZE sizeof(rtc_config_response_t)
 #define DATA_PACKET_HEADER_SIZE                                                \
-  (2 + 3 + 2)                      // header + handler_type + data_length
+  (2 + 3 + 2 + 8)                  // header + handler_type + data_length + lan_rx_us
 #define CONFIG_HEADER_SIZE (2 + 2) // header + config_length
 #define ACK_PACKET_MIN_SIZE 2      // ack_prefix + ack_type
 

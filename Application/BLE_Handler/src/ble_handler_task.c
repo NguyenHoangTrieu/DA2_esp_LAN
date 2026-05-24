@@ -5,6 +5,7 @@
 
 #include "ble_handler_task.h"
 #include "ble_handler.h"
+#include "bench_e2e.h"
 #include "frame_types.h"
 #include "mcu_wan_handler.h"
 #include "freertos/FreeRTOS.h"
@@ -13,6 +14,7 @@
 #include "freertos/semphr.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -178,6 +180,15 @@ static void ble_uplink_task(void *pvParameters) {
 
                 if (!mcu_wan_enqueue_uplink(HANDLER_BLE, packet, 1 + batch[i].payload_len)) {
                     ESP_LOGW(TAG, "[Stack %d] Uplink enqueue failed", stack_id);
+                } else {
+#if BENCH_E2E_LAN_ENABLE
+                    /* internal latency: module RX callback → SPI uplink dispatch */
+                    uint32_t now_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+                    uint32_t lan_internal_ms = now_ms - batch[i].timestamp_ms;
+                    BENCH_E2E_LAN_LOG("handler=BLE stack=%u lan_internal_ms=%lu payload_len=%u",
+                                      stack_id, (unsigned long)lan_internal_ms,
+                                      (unsigned)batch[i].payload_len);
+#endif
                 }
             }
 
@@ -390,6 +401,12 @@ static void ble_listener_task(void *pvParameters) {
                                            BLE_LISTEN_BUFFER_SIZE - 1, &recv_len);
 
         if (ret == ESP_OK && recv_len > 0) {
+#if BENCH_E2E_LAN_ENABLE
+            /* [E2E_LAN] capture absolute LAN µs the moment the module callback returned data */
+            int64_t rx_us = esp_timer_get_time();
+#else
+            int64_t rx_us = 0;
+#endif
             int pkt_len;
             if (hex_mode) {
                 ble_bytes_to_hex_str((const uint8_t *)listen_buf, recv_len,
@@ -422,12 +439,24 @@ static void ble_listener_task(void *pvParameters) {
                     : 0;
             }
             if (pkt_len > 0) {
-                if (!mcu_wan_enqueue_uplink(HANDLER_BLE,
-                                           (uint8_t *)evt_packet,
-                                           (uint16_t)pkt_len)) {
+                bool ok = (rx_us != 0)
+                            ? mcu_wan_enqueue_uplink_with_ts(HANDLER_BLE,
+                                                             (uint8_t *)evt_packet,
+                                                             (uint16_t)pkt_len,
+                                                             rx_us)
+                            : mcu_wan_enqueue_uplink(HANDLER_BLE,
+                                                     (uint8_t *)evt_packet,
+                                                     (uint16_t)pkt_len);
+                if (!ok) {
                     ESP_LOGW(TAG, "[Stack %d] Failed to enqueue EVT to WAN", stack_id);
                 } else {
                     ESP_LOGD(TAG, "[Stack %d] EVT forwarded: %s", stack_id, evt_packet);
+#if BENCH_E2E_LAN_ENABLE
+                    int64_t lan_internal_us = esp_timer_get_time() - rx_us;
+                    BENCH_E2E_LAN_LOG("handler=BLE stack=%u lan_internal_us=%lld payload_len=%u",
+                                      stack_id, (long long)lan_internal_us,
+                                      (unsigned)pkt_len);
+#endif
                 }
             }
         } else if (ret == ESP_ERR_TIMEOUT) {

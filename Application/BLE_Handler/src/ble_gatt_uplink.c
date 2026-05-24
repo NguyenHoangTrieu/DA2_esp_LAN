@@ -4,23 +4,26 @@
  */
 
 #include "ble_gatt_uplink.h"
-#include "frame_types.h"
-#include "mcu_wan_handler.h"
 #include "bench_counter.h"
-#include "esp_log.h"
+#include "bench_e2e.h"
 #include "esp_heap_caps.h"
+#include "esp_log.h"
+#include "esp_timer.h"
+#include "frame_types.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 #include "freertos/queue.h"
-#include <string.h>
-#include <stdlib.h>
+#include "freertos/task.h"
+#include "mcu_wan_handler.h"
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 static const char *TAG = "ble_gatt_up";
 
 typedef struct {
     char    *msg;   /* heap-allocated from PSRAM, freed after dispatch */
     uint16_t len;
+    int64_t  rx_us; /* [E2E_LAN] absolute LAN µs when send_ok/raw was called; 0 = not measured */
 } uplink_item_t;
 
 static QueueHandle_t s_uplink_queue = NULL;
@@ -39,9 +42,14 @@ static void uplink_task(void *arg) {
 
     while (s_task_running) {
         if (xQueueReceive(s_uplink_queue, &item, pdMS_TO_TICKS(100)) == pdTRUE) {
-            bool sent = mcu_wan_enqueue_uplink(HANDLER_BLE_GATT,
-                                               (uint8_t *)item->msg,
-                                               item->len);
+            bool sent = (item->rx_us != 0)
+                          ? mcu_wan_enqueue_uplink_with_ts(HANDLER_BLE_GATT,
+                                                           (uint8_t *)item->msg,
+                                                           item->len,
+                                                           item->rx_us)
+                          : mcu_wan_enqueue_uplink(HANDLER_BLE_GATT,
+                                                   (uint8_t *)item->msg,
+                                                   item->len);
             if (!sent) {
 #if !BENCH_QUIET_LOG
                 ESP_LOGW(TAG, "WAN uplink queue full, dropped: %.*s",
@@ -50,6 +58,14 @@ static void uplink_task(void *arg) {
             } else {
                 ESP_LOGD(TAG, "Uplink sent (%u B): %.*s",
                          item->len, (int)item->len, item->msg);
+#if BENCH_E2E_LAN_ENABLE
+                if (item->rx_us != 0) {
+                    int64_t lan_internal_us = esp_timer_get_time() - item->rx_us;
+                    BENCH_E2E_LAN_LOG("handler=BLE_GATT lan_internal_us=%lld payload_len=%u",
+                                      (long long)lan_internal_us,
+                                      (unsigned)item->len);
+                }
+#endif
             }
             free(item->msg);
             free(item);
@@ -129,6 +145,11 @@ esp_err_t ble_gatt_uplink_send_ok(uint8_t stack_id, const char *payload) {
 
     uplink_item_t *item = alloc_uplink_item(BLE_GATT_UPLINK_MSG_MAX);
     if (!item) return ESP_ERR_NO_MEM;
+#if BENCH_E2E_LAN_ENABLE
+    item->rx_us = esp_timer_get_time();
+#else
+    item->rx_us = 0;
+#endif
 
     int n = snprintf(item->msg, BLE_GATT_UPLINK_MSG_MAX, "CFBG:OK:%s", payload);
     if (n <= 0 || n >= BLE_GATT_UPLINK_MSG_MAX) n = BLE_GATT_UPLINK_MSG_MAX - 1;
@@ -155,6 +176,11 @@ esp_err_t ble_gatt_uplink_send_fail(uint8_t stack_id, const char *reason) {
 
     uplink_item_t *item = alloc_uplink_item(BLE_GATT_UPLINK_MSG_MAX);
     if (!item) return ESP_ERR_NO_MEM;
+#if BENCH_E2E_LAN_ENABLE
+    item->rx_us = esp_timer_get_time();
+#else
+    item->rx_us = 0;
+#endif
 
     int n = snprintf(item->msg, BLE_GATT_UPLINK_MSG_MAX, "CFBG:FAIL:%s", reason);
     if (n <= 0 || n >= BLE_GATT_UPLINK_MSG_MAX) n = BLE_GATT_UPLINK_MSG_MAX - 1;
@@ -181,6 +207,11 @@ esp_err_t ble_gatt_uplink_send_raw(const char *msg, uint16_t msg_len) {
     memcpy(item->msg, msg, msg_len);
     item->msg[msg_len] = '\0';
     item->len = msg_len;
+#if BENCH_E2E_LAN_ENABLE
+    item->rx_us = esp_timer_get_time();
+#else
+    item->rx_us = 0;
+#endif
 
     if (xQueueSend(s_uplink_queue, &item, pdMS_TO_TICKS(50)) != pdTRUE) {
 #if !BENCH_QUIET_LOG

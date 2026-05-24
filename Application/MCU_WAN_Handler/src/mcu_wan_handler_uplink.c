@@ -12,6 +12,7 @@
 #include "storage_handler.h"
 #include "wan_comm.h"
 #include "bench_throughput.h"
+#include "bench_time_sync.h"
 #include "esp_heap_caps.h"
 #include <string.h>
 
@@ -53,6 +54,11 @@ typedef struct {
   uint16_t length;
   char rtc_timestamp[20];
   uplink_route_t route;
+  /* Absolute LAN `esp_timer_get_time()` (µs) captured by the wireless module
+   * listener the moment data arrived. Zero ⇒ not measured. Carried verbatim
+   * inside the SPI DT frame so the WAN MCU can convert via its sync offset
+   * and compute the unified [E2E_TOTAL] in a single subtraction. */
+  int64_t lan_rx_us;
 } uplink_item_t;
 
 typedef struct {
@@ -221,7 +227,8 @@ void mcu_wan_handler_stop_uplink_task(void) {
 
 static bool enqueue_uplink_internal_to(handler_id_t source_id, const uint8_t *data,
                                        uint16_t len, uplink_route_t route,
-                                       TickType_t wait_ticks) {
+                                       TickType_t wait_ticks,
+                                       int64_t lan_rx_us) {
   if (!g_uplink_queue || !data || len == 0) {
     ESP_LOGE(TAG, "Invalid uplink parameters");
     return false;
@@ -242,6 +249,7 @@ static bool enqueue_uplink_internal_to(handler_id_t source_id, const uint8_t *da
   item.source_id = source_id;
   item.length = len;
   item.route = route;
+  item.lan_rx_us = lan_rx_us;
   memcpy(item.data, data, len);
 
   // Attach current RTC timestamp
@@ -280,20 +288,34 @@ static bool enqueue_uplink_internal_to(handler_id_t source_id, const uint8_t *da
 bool mcu_wan_enqueue_uplink(handler_id_t source_id, uint8_t *data,
                             uint16_t len) {
   return enqueue_uplink_internal_to(source_id, data, len, UPLINK_ROUTE_CLOUD,
-                                    pdMS_TO_TICKS(UPLINK_QUEUE_SEND_WAIT_MS));
+                                    pdMS_TO_TICKS(UPLINK_QUEUE_SEND_WAIT_MS),
+                                    0 /* lan_rx_us unknown */);
 }
 
 bool mcu_wan_enqueue_uplink_local(handler_id_t source_id, uint8_t *data,
                                   uint16_t len) {
   return enqueue_uplink_internal_to(source_id, data, len, UPLINK_ROUTE_LOCAL,
-                                    pdMS_TO_TICKS(UPLINK_QUEUE_SEND_WAIT_MS));
+                                    pdMS_TO_TICKS(UPLINK_QUEUE_SEND_WAIT_MS),
+                                    0);
 }
 
 /* Non-blocking variant: returns immediately on full queue. */
 bool mcu_wan_try_enqueue_uplink(handler_id_t source_id, uint8_t *data,
                                 uint16_t len) {
   return enqueue_uplink_internal_to(source_id, data, len, UPLINK_ROUTE_CLOUD,
-                                    0 /* no wait */);
+                                    0 /* no wait */, 0);
+}
+
+/* Same as mcu_wan_enqueue_uplink but tags the item with the absolute LAN
+ * `esp_timer_get_time()` value captured the moment the module first received
+ * data. The dispatcher embeds this verbatim inside the SPI DT frame so the
+ * WAN MCU can convert it via its sync offset and compute the unified
+ * `[E2E_TOTAL]` latency. Pass 0 if not measured. */
+bool mcu_wan_enqueue_uplink_with_ts(handler_id_t source_id, uint8_t *data,
+                                    uint16_t len, int64_t lan_rx_us) {
+  return enqueue_uplink_internal_to(source_id, data, len, UPLINK_ROUTE_CLOUD,
+                                    pdMS_TO_TICKS(UPLINK_QUEUE_SEND_WAIT_MS),
+                                    lan_rx_us);
 }
 
 internet_status_t mcu_wan_handler_get_internet_status(void) {
@@ -884,7 +906,12 @@ static esp_err_t send_data_to_wan(const uint8_t *data, uint16_t length,
 }
 
 /**
- * @brief Build data payload: [handler_type(3)][length(2)][rtc(19)][data]
+ * @brief Build data payload (inner, before SPI framer adds DT prefix):
+ *        [handler_type(3)][length(2)][lan_rx_us(8 LE)][rtc(19)][data]
+ *
+ * `lan_rx_us` is the absolute LAN `esp_timer_get_time()` captured at module
+ * RX. WAN converts via `bench_time_sync_from_peer_us()` and subtracts from
+ * its current time for the unified [E2E_TOTAL] log. Zero = not measured.
  */
 static void build_data_packet(const uplink_item_t *item, uint8_t *packet,
                               uint16_t *packet_len) {
@@ -895,10 +922,33 @@ static void build_data_packet(const uplink_item_t *item, uint8_t *packet,
   memcpy(p, type_str, 3);
   p += 3;
 
-  // Total data length (RTC + payload)
+  // data_length covers only RTC + payload (lan_rx_us sits in the header)
   uint16_t total_data_len = 19 + item->length;
   *p++ = (total_data_len >> 8) & 0xFF;
   *p++ = total_data_len & 0xFF;
+
+  /* RX timestamp embedded in DT frame is **pre-converted** to the WAN clock
+   * domain using bench_time_sync_to_peer_us(). This pushes all sync logic
+   * onto the master (LAN) side — the WAN slave never needs the offset and
+   * just subtracts `wan_publish_us - lan_rx_us` directly.
+   * When sync has not yet converged on LAN, we embed 0 so WAN logs SYNCING. */
+  int64_t embed_us = 0;
+  if (item->lan_rx_us != 0) {
+    bench_time_sync_state_t ts_state;
+    bench_time_sync_get_state(&ts_state);
+    if (ts_state.synced) {
+      embed_us = bench_time_sync_to_peer_us(item->lan_rx_us);
+    }
+  }
+  uint64_t rx_us = (uint64_t)embed_us;
+  *p++ = (uint8_t)( rx_us        & 0xFF);
+  *p++ = (uint8_t)((rx_us >>  8) & 0xFF);
+  *p++ = (uint8_t)((rx_us >> 16) & 0xFF);
+  *p++ = (uint8_t)((rx_us >> 24) & 0xFF);
+  *p++ = (uint8_t)((rx_us >> 32) & 0xFF);
+  *p++ = (uint8_t)((rx_us >> 40) & 0xFF);
+  *p++ = (uint8_t)((rx_us >> 48) & 0xFF);
+  *p++ = (uint8_t)((rx_us >> 56) & 0xFF);
 
   // RTC timestamp (19 bytes)
   memcpy(p, item->rtc_timestamp, 19);
@@ -907,7 +957,104 @@ static void build_data_packet(const uplink_item_t *item, uint8_t *packet,
   // Payload
   memcpy(p, item->data, item->length);
 
-  *packet_len = 3 + 2 + 19 + item->length;
+  *packet_len = 3 + 2 + 8 + 19 + item->length;
+}
+
+/* ===== bench_time_sync SPI roundtrip ============================================
+ * Issues a TSYNC_REQ over the existing wan_comm CF channel, captures T1 right
+ * before flush, tight-polls for the ACK_TSYNC_RSP response, captures T4 the
+ * moment a valid frame is received. Parses T2/T3 carried in the response.
+ *
+ * Wire format (after CF header is added by framer):
+ *   request : [CF][0x09][T1_LE 8]
+ *   response: [ACK 0x02][0x1A][T1_LE 8][T2_LE 8][T3_LE 8]
+ *
+ * Caller MUST NOT hold g_qspi_mutex — this function takes/gives it itself.
+ * Returns ESP_OK on a complete round, ESP_FAIL otherwise. Out args are only
+ * written on success.
+ */
+esp_err_t bench_tsync_spi_roundtrip(int64_t *out_t1_us, int64_t *out_t2_us,
+                                    int64_t *out_t3_us, int64_t *out_t4_us) {
+  if (!out_t1_us || !out_t2_us || !out_t3_us || !out_t4_us) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  if (g_wan_handle == NULL) return ESP_ERR_INVALID_STATE;
+
+  /* Build request body: [cmd(1)][T1 LE 8]. The wan_comm framer prepends [CF]. */
+  uint8_t req_body[1 + 8];
+  req_body[0] = (uint8_t)FRAME_TYPE_TSYNC_REQ;
+
+  if (xSemaphoreTake(g_qspi_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+    return ESP_ERR_TIMEOUT;
+  }
+
+  /* T1 captured as close to wire as possible: right before send_command. */
+  int64_t t1 = esp_timer_get_time();
+  req_body[1] = (uint8_t)( (uint64_t)t1        & 0xFF);
+  req_body[2] = (uint8_t)(((uint64_t)t1 >>  8) & 0xFF);
+  req_body[3] = (uint8_t)(((uint64_t)t1 >> 16) & 0xFF);
+  req_body[4] = (uint8_t)(((uint64_t)t1 >> 24) & 0xFF);
+  req_body[5] = (uint8_t)(((uint64_t)t1 >> 32) & 0xFF);
+  req_body[6] = (uint8_t)(((uint64_t)t1 >> 40) & 0xFF);
+  req_body[7] = (uint8_t)(((uint64_t)t1 >> 48) & 0xFF);
+  req_body[8] = (uint8_t)(((uint64_t)t1 >> 56) & 0xFF);
+
+  wan_comm_status_t st = wan_comm_send_command(g_wan_handle, req_body,
+                                                sizeof(req_body));
+  if (st != WAN_COMM_OK) {
+    xSemaphoreGive(g_qspi_mutex);
+    return ESP_FAIL;
+  }
+  if (wan_comm_flush_dma_buffer(g_wan_handle) != WAN_COMM_OK) {
+    xSemaphoreGive(g_qspi_mutex);
+    return ESP_FAIL;
+  }
+
+  /* Tight poll for the response. Each iteration is one SPI transaction.
+   * No vTaskDelay between iterations — keeps "slave loaded → wire2" gap
+   * minimal so T3 captured by slave is close to wire2 moment. */
+  uint8_t resp[64] = {0};
+  bool got_resp = false;
+  for (int retry = 0; retry < 6 && !got_resp; retry++) {
+    st = wan_comm_request_data(g_wan_handle, resp, sizeof(resp));
+    if (st == WAN_COMM_OK && resp[0] == 0x02 &&
+        resp[1] == (uint8_t)ACK_TYPE_TSYNC_RSP) {
+      got_resp = true;
+      break;
+    }
+    /* Yield briefly to allow slave a few µs to finish loading. */
+    taskYIELD();
+  }
+  /* T4 captured the moment the valid response was received. */
+  int64_t t4 = esp_timer_get_time();
+
+  xSemaphoreGive(g_qspi_mutex);
+
+  if (!got_resp) return ESP_FAIL;
+
+  /* Parse response. Layout (little-endian throughout):
+   *   [0]   ack_prefix (0x02)
+   *   [1]   ack_type   (0x1A)
+   *   [2-9] lan_t1_us (echo)
+   *   [10-17] wan_t2_us
+   *   [18-25] wan_t3_us */
+  uint64_t echo_t1 = 0, raw_t2 = 0, raw_t3 = 0;
+  for (int i = 0; i < 8; i++) {
+    echo_t1 |= ((uint64_t)resp[2  + i]) << (i * 8);
+    raw_t2  |= ((uint64_t)resp[10 + i]) << (i * 8);
+    raw_t3  |= ((uint64_t)resp[18 + i]) << (i * 8);
+  }
+  if (echo_t1 != (uint64_t)t1) {
+    /* Stale or mis-routed response. */
+    ESP_LOGW(TAG, "TSYNC echo mismatch: sent=%llu got=%llu",
+             (unsigned long long)t1, (unsigned long long)echo_t1);
+    return ESP_FAIL;
+  }
+  *out_t1_us = t1;
+  *out_t2_us = (int64_t)raw_t2;
+  *out_t3_us = (int64_t)raw_t3;
+  *out_t4_us = t4;
+  return ESP_OK;
 }
 
 // ===== GLOBAL VARIABLES (shared with downlink) =====

@@ -13,12 +13,14 @@
 #include "frame_types.h"
 #include "mcu_wan_handler.h"
 #include "bench_counter.h"
+#include "bench_e2e.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -75,7 +77,12 @@ static inline bool lora_is_valid_stack(uint8_t stack_id) {
     return (stack_id < LORA_MAX_STACKS);
 }
 
-static bool lora_enqueue_evt_chunks(uint8_t stack_id, const char *payload) {
+/* Forward each EVT chunk to the WAN MCU, optionally tagging the listener's
+ * absolute RX timestamp (µs, `esp_timer_get_time()`) so the WAN can convert
+ * via its sync offset and report unified [E2E_TOTAL]. Pass `rx_us = 0` to
+ * disable measurement. */
+static bool lora_enqueue_evt_chunks_ts(uint8_t stack_id, const char *payload,
+                                        int64_t rx_us) {
     char packet[LORA_WAN_UPLINK_MAX];
     size_t payload_len = strlen(payload);
     int one_shot_hdr = snprintf(packet, sizeof(packet), "CFLR:%d:EVT:", stack_id);
@@ -83,9 +90,11 @@ static bool lora_enqueue_evt_chunks(uint8_t stack_id, const char *payload) {
 
     if ((size_t)one_shot_hdr + payload_len < sizeof(packet)) {
         int pkt_len = snprintf(packet, sizeof(packet), "CFLR:%d:EVT:%s", stack_id, payload);
-        return (pkt_len > 0)
-            ? mcu_wan_enqueue_uplink(HANDLER_LORA, (uint8_t *)packet, (uint16_t)pkt_len)
-            : false;
+        if (pkt_len <= 0) return false;
+        return (rx_us != 0)
+            ? mcu_wan_enqueue_uplink_with_ts(HANDLER_LORA, (uint8_t *)packet,
+                                             (uint16_t)pkt_len, rx_us)
+            : mcu_wan_enqueue_uplink(HANDLER_LORA, (uint8_t *)packet, (uint16_t)pkt_len);
     }
 
     size_t max_chunk = sizeof(packet) - (size_t)one_shot_hdr - 24;
@@ -103,11 +112,18 @@ static bool lora_enqueue_evt_chunks(uint8_t stack_id, const char *payload) {
                                (int)chunk_len,
                                payload + offset);
         if (pkt_len <= 0 || pkt_len >= (int)sizeof(packet)) return false;
-        if (!mcu_wan_enqueue_uplink(HANDLER_LORA, (uint8_t *)packet, (uint16_t)pkt_len)) {
-            return false;
-        }
+        bool ok = (rx_us != 0)
+            ? mcu_wan_enqueue_uplink_with_ts(HANDLER_LORA, (uint8_t *)packet,
+                                             (uint16_t)pkt_len, rx_us)
+            : mcu_wan_enqueue_uplink(HANDLER_LORA, (uint8_t *)packet, (uint16_t)pkt_len);
+        if (!ok) return false;
     }
     return true;
+}
+
+/* Backward-compat shim — used by chunkers that don't have a rx_us. */
+static bool lora_enqueue_evt_chunks(uint8_t stack_id, const char *payload) {
+    return lora_enqueue_evt_chunks_ts(stack_id, payload, 0);
 }
 
 bool lora_handler_is_running(uint8_t stack_id) {
@@ -220,6 +236,9 @@ static void lora_uplink_task(void *pvParameters) {
                 packet[0] = stack_id;
                 memcpy(&packet[1], batch[i].payload, batch[i].payload_len);
 
+                /* NOTE: this batch path is currently dead — no producer
+                 * pushes into g_lora_task.uplink_queue. The real LoRa RX
+                 * flow goes through lora_listener_task → lora_enqueue_evt_chunks. */
                 if (!mcu_wan_enqueue_uplink(HANDLER_LORA, packet,
                                              1 + batch[i].payload_len)) {
                     ESP_LOGW(TAG, "[Stack %d] Uplink enqueue failed", stack_id);
@@ -413,6 +432,13 @@ static void lora_listener_task(void *pvParameters) {
                                              LORA_LISTEN_BUFFER_SIZE - 1, &recv_len);
 
         if (ret == ESP_OK && recv_len > 0) {
+#if BENCH_E2E_LAN_ENABLE
+            /* [E2E_LAN] capture absolute LAN µs the moment data arrives from
+             * the Wio-E5 module. Carried verbatim through SPI. */
+            int64_t rx_us = esp_timer_get_time();
+#else
+            int64_t rx_us = 0;
+#endif
             const char *fwd_str;
             int fwd_len;
 
@@ -450,13 +476,19 @@ static void lora_listener_task(void *pvParameters) {
 
             if (fwd_len > 0) {
                 bench_count_lr_rx((uint16_t)recv_len);
-                if (!lora_enqueue_evt_chunks(stack_id, fwd_str)) {
+                if (!lora_enqueue_evt_chunks_ts(stack_id, fwd_str, rx_us)) {
 #if !BENCH_QUIET_LOG
                     ESP_LOGW(TAG, "[Stack %d] Failed to enqueue EVT to WAN", stack_id);
 #endif
                     bench_count_lr_drop();
                 } else {
                     bench_count_lr_fwd((uint16_t)recv_len);
+#if BENCH_E2E_LAN_ENABLE
+                    int64_t lan_internal_us = esp_timer_get_time() - rx_us;
+                    BENCH_E2E_LAN_LOG("handler=LORA stack=%u lan_internal_us=%lld payload_len=%u",
+                                      stack_id, (long long)lan_internal_us,
+                                      (unsigned)fwd_len);
+#endif
                 }
             }
         } else if (ret == ESP_ERR_TIMEOUT) {

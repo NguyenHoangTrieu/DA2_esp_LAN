@@ -8,6 +8,7 @@
 #include "module_config_controller.h"
 #include "bench_counter.h"
 #include "bench_throughput.h"
+#include "bench_time_sync.h"
 #include <esp_pm.h>
 
 static const char *TAG = "MAIN APP";
@@ -91,6 +92,13 @@ void app_main(void) {
     ESP_LOGW(TAG, "MCU throughput benchmark start failed (non-fatal)");
   }
   ESP_LOGI(TAG, "MCU throughput benchmark started");
+
+  /* Inter-MCU µs-level time sync (no-op when BENCH_TIME_SYNC_ENABLE = 0) */
+  if (bench_time_sync_init() != ESP_OK) {
+    ESP_LOGW(TAG, "Bench time-sync init failed (non-fatal)");
+  } else {
+    ESP_LOGI(TAG, "Bench time-sync init OK");
+  }
 
   /* Start benchmark counter task after WAN handler so uplink queue exists */
   if (bench_task_start() != ESP_OK) {
