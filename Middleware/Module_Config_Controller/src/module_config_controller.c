@@ -4,6 +4,7 @@
  */
 
 #include "module_config_controller.h"
+#include "bench_lane_ingress.h"
 #include "esp_log.h"
 #include "module_i2c_comm.h"
 #include "module_spi_comm.h"
@@ -379,24 +380,36 @@ esp_err_t module_bus_read(uint8_t stack_id, comm_port_type_t port_type,
            port_type, timeout_ms);
 
   switch (port_type) {
-  case COMM_PORT_UART:
+  case COMM_PORT_UART: {
     if (!g_stack_handles[stack_id].uart_initialized) {
       ESP_LOGE(TAG, "UART not initialized for stack %d", stack_id);
       return ESP_ERR_INVALID_STATE;
     }
-    return module_uart_comm_receive(g_stack_handles[stack_id].uart, buffer,
-                                    max_len, received_len, timeout_ms);
+    esp_err_t r = module_uart_comm_receive(g_stack_handles[stack_id].uart, buffer,
+                                           max_len, received_len, timeout_ms);
+    if (r == ESP_OK && *received_len > 0)
+      bench_lane_count_rx(stack_id, BENCH_LANE_UART, (uint32_t)*received_len);
+    else
+      bench_lane_count_miss(stack_id, BENCH_LANE_UART);
+    return r;
+  }
 
-  case COMM_PORT_SPI:
+  case COMM_PORT_SPI: {
     if (!g_stack_handles[stack_id].spi_initialized) {
       ESP_LOGE(TAG, "SPI not initialized for stack %d", stack_id);
       return ESP_ERR_INVALID_STATE;
     }
     *received_len = max_len;
-    return module_spi_comm_transfer(g_stack_handles[stack_id].spi, NULL, buffer,
-                                    max_len);
+    esp_err_t r = module_spi_comm_transfer(g_stack_handles[stack_id].spi, NULL, buffer,
+                                           max_len);
+    if (r == ESP_OK && *received_len > 0)
+      bench_lane_count_rx(stack_id, BENCH_LANE_SPI, (uint32_t)*received_len);
+    else
+      bench_lane_count_miss(stack_id, BENCH_LANE_SPI);
+    return r;
+  }
 
-  case COMM_PORT_I2C:
+  case COMM_PORT_I2C: {
     if (!g_stack_handles[stack_id].i2c_initialized) {
       ESP_LOGE(TAG, "I2C not initialized for stack %d", stack_id);
       return ESP_ERR_INVALID_STATE;
@@ -405,18 +418,27 @@ esp_err_t module_bus_read(uint8_t stack_id, comm_port_type_t port_type,
                                          max_len, timeout_ms);
     if (ret == ESP_OK) {
       *received_len = max_len;
+      bench_lane_count_rx(stack_id, BENCH_LANE_I2C, (uint32_t)*received_len);
     } else {
       *received_len = 0;
+      bench_lane_count_miss(stack_id, BENCH_LANE_I2C);
     }
     return ret;
+  }
 
-  case COMM_PORT_USB:
+  case COMM_PORT_USB: {
     if (!g_stack_handles[stack_id].usb_initialized) {
       ESP_LOGE(TAG, "USB not initialized for stack %d", stack_id);
       return ESP_ERR_INVALID_STATE;
     }
-    return module_usb_comm_receive(g_stack_handles[stack_id].usb, buffer,
-                                   max_len, received_len, timeout_ms);
+    esp_err_t r = module_usb_comm_receive(g_stack_handles[stack_id].usb, buffer,
+                                          max_len, received_len, timeout_ms);
+    if (r == ESP_OK && *received_len > 0)
+      bench_lane_count_rx(stack_id, BENCH_LANE_USB, (uint32_t)*received_len);
+    else
+      bench_lane_count_miss(stack_id, BENCH_LANE_USB);
+    return r;
+  }
 
   default:
     ESP_LOGE(TAG, "Unsupported port type: %d", port_type);

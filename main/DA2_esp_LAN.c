@@ -8,6 +8,7 @@
 #include "module_config_controller.h"
 #include "bench_counter.h"
 #include "bench_throughput.h"
+#include "bench_lane_ingress.h"
 #include <esp_pm.h>
 
 static const char *TAG = "MAIN APP";
@@ -97,6 +98,11 @@ void app_main(void) {
     ESP_LOGW(TAG, "Bench counter task start failed (non-fatal)");
   }
   ESP_LOGI(TAG, "Benchmark counter task started");
+
+  /* Start lane ingress benchmark — gate via BENCH_LANE_INGRESS_ENABLE */
+  if (bench_lane_ingress_start() != ESP_OK) {
+    ESP_LOGW(TAG, "Lane ingress bench start failed (non-fatal)");
+  }
 
   // Start Module Monitor Task - Module Base Setting Core
   ESP_ERROR_CHECK(module_monitor_task_start());

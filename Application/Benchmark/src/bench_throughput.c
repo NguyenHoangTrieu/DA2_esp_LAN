@@ -7,6 +7,8 @@
 #include "bench_throughput.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_rom_sys.h"
+#include "esp_timer.h"
 #include "frame_types.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -42,6 +44,32 @@ static volatile bool s_running = false;
 
 /* Reusable fill buffer — allocated once in bench_throughput_start() */
 static uint8_t *s_tx_buf = NULL;
+
+#if BENCH_TP_RAMP_ENABLE
+/* Ramp rate steps (pps). Adjust to span expected range — start low so the
+ * lossless plateau is clear, then exceed expected ceiling. */
+static const uint32_t s_ramp_steps_pps[] = {
+    200, 400, 600, 800, 1000, 1200, 1500, 2000, 2500, 3000
+};
+static const size_t s_ramp_n = sizeof(s_ramp_steps_pps) /
+                               sizeof(s_ramp_steps_pps[0]);
+static volatile uint32_t s_ramp_step       = 0;
+static volatile uint32_t s_ramp_step_start = 0; /* ms since boot           */
+static volatile uint32_t s_autostop_hits   = 0; /* consecutive over-thresh */
+static uint64_t          s_next_send_us    = 0; /* token-bucket deadline   */
+static uint32_t          s_idle_feed_cnt   = 0; /* WDT-feed cycle counter  */
+#endif
+
+uint32_t bench_throughput_current_pps(void) {
+#if BENCH_TP_RAMP_ENABLE
+    if (!s_running) return 0;
+    uint32_t idx = s_ramp_step;
+    if (idx >= s_ramp_n) idx = s_ramp_n - 1;
+    return s_ramp_steps_pps[idx];
+#else
+    return 0;
+#endif
+}
 
 #if BENCH_TP_DIRECT_SEND
 /* DT inner: [BNC 3B][len 2B BE][rtc 19B][payload N]. */
@@ -100,9 +128,58 @@ static void bench_tp_sender_task(void *arg) {
         vTaskDelete(NULL);
         return;
     }
-    ESP_LOGI(TAG, "Handshake done — sender entering flood loop");
+    ESP_LOGI(TAG, "Handshake done — sender entering %s loop",
+             BENCH_TP_RAMP_ENABLE ? "ramp" : "flood");
+
+#if BENCH_TP_RAMP_ENABLE
+    s_ramp_step_start = (uint32_t)(esp_log_timestamp());
+#endif
 
     while (s_running) {
+#if BENCH_TP_RAMP_ENABLE
+        /* Token-bucket schedule via esp_timer_get_time() (microsecond
+         * precision). vTaskDelay alone is wrong here: pdMS_TO_TICKS(5ms)
+         * collapses to 0 ticks at the default 100Hz tick rate, so any rate
+         * above ~100 pps silently degrades into a flood loop. We block-delay
+         * for the coarse part of the wait and tight-yield for the rest. */
+        const uint32_t pps = bench_throughput_current_pps();
+        if (pps > 0) {
+            uint64_t now_us = (uint64_t)esp_timer_get_time();
+            if (s_next_send_us == 0) s_next_send_us = now_us;
+
+            if (now_us < s_next_send_us) {
+                uint64_t wait_us = s_next_send_us - now_us;
+                if (wait_us >= 5000ULL) {
+                    /* ≥5 ms: vTaskDelay so other tasks aren't starved. */
+                    vTaskDelay(pdMS_TO_TICKS(wait_us / 1000ULL));
+                } else if (wait_us >= 5ULL) {
+                    /* Sub-tick: busy-wait with µs precision. taskYIELD here
+                     * is too heavy (can hand off ~10 ms) and undershoots
+                     * the requested rate at >1 kHz. esp_rom_delay_us burns
+                     * CPU for the wait but is exact. */
+                    esp_rom_delay_us((uint32_t)wait_us);
+                }
+                /* else: < 5 µs, just fall through and send now. */
+            }
+            s_next_send_us += (1000000ULL / pps);
+            /* Catch-up cap: never schedule into the past. */
+            now_us = (uint64_t)esp_timer_get_time();
+            if (s_next_send_us < now_us) s_next_send_us = now_us;
+
+            /* WDT feed: esp_rom_delay_us is a tight busy-wait so the IDLE
+             * task on the same core can't run. Without IDLE running, the
+             * task watchdog fires after 5 s. Every ~100 sends (≈ 100 ms at
+             * 1 kHz, 500 ms at 200 Hz) we force a real sleep of 1 tick to
+             * let IDLE reset the WDT. Cost: a few percent throughput. */
+            if (++s_idle_feed_cnt >= 100u) {
+                s_idle_feed_cnt = 0;
+                vTaskDelay(1);
+                /* Reset throttle baseline after the forced sleep so we
+                 * don't burst-catch-up. */
+                s_next_send_us = (uint64_t)esp_timer_get_time();
+            }
+        }
+#endif
 #if BENCH_TP_MODE_DRIVER
         /* Mode 1: direct call, no queue. Counter increments on OK. */
         if (g_wan_handle == NULL) {
@@ -177,6 +254,67 @@ static void bench_tp_reporter_task(void *arg) {
         const float rx_pps  = (interval_s > 0.0f)
             ? (float)rx_pkt / interval_s : 0.0f;
 
+#if BENCH_TP_RAMP_ENABLE
+        const uint32_t rate_pps = bench_throughput_current_pps();
+        ESP_LOGI(TAG,
+                 "[BENCH_TP %dms] rate=%lu pps step=%lu/%u "
+                 "TX(LAN->WAN): pkt=%lu b=%lu pps=%.1f kbps=%.1f drop=%lu | "
+                 "RX(WAN->LAN): pkt=%lu b=%lu pps=%.1f kbps=%.1f",
+                 BENCH_TP_REPORT_INTERVAL_MS,
+                 (unsigned long)rate_pps,
+                 (unsigned long)s_ramp_step + 1u, (unsigned)s_ramp_n,
+                 (unsigned long)tx_pkt, (unsigned long)tx_b,
+                 tx_pps, tx_kbps, (unsigned long)tx_drop,
+                 (unsigned long)rx_pkt, (unsigned long)rx_b,
+                 rx_pps, rx_kbps);
+
+#if !BENCH_TP_RAMP_LOOP
+        /* Auto-stop (one-shot mode only): producer outran dispatcher for
+         * N consecutive windows ⇒ stop ramp. Disabled in LOOP mode. */
+        const uint32_t attempts = tx_pkt + tx_drop;
+        if (attempts > 0) {
+            const float drop_pct = 100.0f * (float)tx_drop / (float)attempts;
+            if (drop_pct > BENCH_TP_RAMP_AUTOSTOP_DROP_PCT) {
+                s_autostop_hits++;
+                if (s_autostop_hits >= BENCH_TP_RAMP_AUTOSTOP_WINDOWS) {
+                    ESP_LOGW(TAG, "Auto-stop: drop_pct=%.2f for %lu windows "
+                                  "at rate=%lu pps — stopping ramp",
+                             drop_pct, (unsigned long)s_autostop_hits,
+                             (unsigned long)rate_pps);
+                    s_running = false;
+                    break;
+                }
+            } else {
+                s_autostop_hits = 0;
+            }
+        }
+#endif
+
+        /* Advance step if dwell elapsed. In LOOP mode wrap back to step 0
+         * so the ramp cycles forever; otherwise hold at top step. */
+        const uint32_t now_ms = (uint32_t)esp_log_timestamp();
+        if (now_ms - s_ramp_step_start >= BENCH_TP_RAMP_STEP_MS) {
+#if BENCH_TP_RAMP_LOOP
+            s_ramp_step = (s_ramp_step + 1u) % s_ramp_n;
+            s_ramp_step_start = now_ms;
+            s_next_send_us = 0; /* reset throttle baseline at step boundary */
+            ESP_LOGI(TAG, "Ramp step → %lu pps (loop)",
+                     (unsigned long)bench_throughput_current_pps());
+#else
+            if (s_ramp_step + 1u < s_ramp_n) {
+                s_ramp_step++;
+                s_ramp_step_start = now_ms;
+                s_next_send_us = 0;
+                ESP_LOGI(TAG, "Ramp step → %lu pps",
+                         (unsigned long)bench_throughput_current_pps());
+            } else {
+                ESP_LOGI(TAG, "Ramp reached top step (%lu pps), holding",
+                         (unsigned long)bench_throughput_current_pps());
+                s_ramp_step_start = now_ms; /* avoid log spam */
+            }
+#endif
+        }
+#else
         ESP_LOGI(TAG,
                  "[BENCH_TP %dms] "
                  "TX(LAN->WAN): pkt=%lu b=%lu pps=%.1f kbps=%.1f drop=%lu | "
@@ -186,6 +324,7 @@ static void bench_tp_reporter_task(void *arg) {
                  tx_pps, tx_kbps, (unsigned long)tx_drop,
                  (unsigned long)rx_pkt, (unsigned long)rx_b,
                  rx_pps, rx_kbps);
+#endif
 
         /* Framing diagnostics — cumulative since boot. */
         if (g_wan_handle) {
@@ -330,6 +469,7 @@ void bench_throughput_stop(void) {
 void bench_throughput_count_rx(uint32_t bytes)  { (void)bytes; }
 void bench_throughput_count_tx(uint32_t bytes)  { (void)bytes; }
 void bench_throughput_count_tx_drop(void)        {}
+uint32_t bench_throughput_current_pps(void)      { return 0; }
 
 esp_err_t bench_throughput_start(void) {
     ESP_LOGI(TAG, "Inter-MCU throughput benchmark disabled (BENCH_THROUGHPUT_ENABLE=0)");
