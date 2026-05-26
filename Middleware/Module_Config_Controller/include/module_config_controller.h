@@ -150,6 +150,17 @@ esp_err_t module_bus_read(uint8_t stack_id, comm_port_type_t port_type,
                           size_t *received_len);
 
 /**
+ * @brief Get the underlying UART handle for a stack (used by the lane
+ *        ingress bench to drain UART driver overflow events).
+ *
+ * @param stack_id Stack ID (0 or 1)
+ * @return Handle if UART is initialized for that stack, NULL otherwise.
+ */
+struct module_uart_comm_s;
+typedef struct module_uart_comm_s *module_uart_comm_handle_t;
+module_uart_comm_handle_t module_config_controller_get_uart_handle(uint8_t stack_id);
+
+/**
  * @brief Write single GPIO pin
  *
  * @param stack_id Stack ID (0 or 1)

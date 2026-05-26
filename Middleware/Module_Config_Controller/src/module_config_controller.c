@@ -32,6 +32,12 @@ typedef struct {
 
 static stack_handles_t g_stack_handles[2]; // Stack 0 and Stack 1
 
+module_uart_comm_handle_t module_config_controller_get_uart_handle(uint8_t stack_id) {
+  if (stack_id > 1) return NULL;
+  if (!g_stack_handles[stack_id].uart_initialized) return NULL;
+  return g_stack_handles[stack_id].uart;
+}
+
 /* ============================================================================
  * Public API Implementation
  * ========================================================================== */
@@ -65,8 +71,11 @@ esp_err_t module_config_controller_init_uart(uint8_t stack_id,
       .baudrate = params->baudrate,
       .parity = params->parity,
       .stop_bits = params->stopbit,
-      .rx_buffer_size = 256,
-      .tx_buffer_size = 256,
+      /* RX buffer sized for 5 Mbps line rate × ~25 ms scheduler jitter.
+       * 16 KB = ~26 ms at 625 KB/s. Production handlers use <1 KB so this
+       * is conservative for normal use too. */
+      .rx_buffer_size = 16384,
+      .tx_buffer_size = 512,
   };
 
   esp_err_t ret =

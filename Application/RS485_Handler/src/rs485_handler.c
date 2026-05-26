@@ -12,6 +12,7 @@
 #include "freertos/task.h"
 #include "mcu_wan_handler.h"
 #include "rs485_comm.h"
+#include "bench_latency_lan.h"
 #include <string.h>
 
 static const char *TAG = "RS485_HANDLER";
@@ -110,6 +111,13 @@ esp_err_t rs485_handler_start(void) {
     vQueueDelete(g_rs485_ctx.downlink_queue);
     return ESP_ERR_NO_MEM;
   }
+  /* Set is_running = true BEFORE creating the task.
+   * The new task has priority 5 vs Module Monitor priority 3, so FreeRTOS
+   * will preempt the caller immediately on xTaskCreateStaticPinnedToCore().
+   * If the flag were set after, the task would see is_running=false and exit
+   * before the caller ever resumed. */
+  g_rs485_ctx.is_running = true;
+
   g_rs485_ctx.task_handle = xTaskCreateStaticPinnedToCore(
       rs485_handler_task, "rs485_handler",
       RS485_HANDLER_TASK_STACK_SIZE / sizeof(StackType_t),
@@ -118,13 +126,13 @@ esp_err_t rs485_handler_start(void) {
 
   if (!g_rs485_ctx.task_handle) {
     ESP_LOGE(TAG, "Failed to create RS485 handler task");
+    g_rs485_ctx.is_running = false;
     heap_caps_free(g_rs485_ctx.task_stack); g_rs485_ctx.task_stack = NULL;
     heap_caps_free(g_rs485_ctx.task_tcb);   g_rs485_ctx.task_tcb   = NULL;
     vQueueDelete(g_rs485_ctx.downlink_queue);
     return ESP_ERR_NO_MEM;
   }
 
-  g_rs485_ctx.is_running = true;
   ESP_LOGI(TAG, "RS485 handler started successfully");
   return ESP_OK;
 }
@@ -260,8 +268,16 @@ static void rs485_handler_task(void *arg) {
         ESP_LOGI(TAG, "Received RS485 data: %u bytes", actual_read);
         ESP_LOG_BUFFER_HEX(TAG, rx_buffer, actual_read);
 
-        // Forward to WAN uplink
-        if (mcu_wan_enqueue_uplink(HANDLER_RS485, rx_buffer, actual_read)) {
+        // Forward to WAN uplink. When §5 latency bench is enabled, stamp T1
+        // here (LAN ingress) and ship as HANDLER_LAT so WAN can compute
+        // T2 − T1 right after socket send. Otherwise the RS485 frame goes
+        // through its normal production route.
+#if BENCH_LATENCY_LAN_ENABLE
+        bool ok = bench_latency_lan_send(rx_buffer, (uint16_t)actual_read);
+#else
+        bool ok = mcu_wan_enqueue_uplink(HANDLER_RS485, rx_buffer, actual_read);
+#endif
+        if (ok) {
           g_rs485_ctx.stats.uplink_forwarded++;
           ESP_LOGI(TAG, "Forwarded to WAN uplink: %u bytes", actual_read);
         } else {

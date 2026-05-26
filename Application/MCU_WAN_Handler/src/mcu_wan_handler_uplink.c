@@ -12,7 +12,9 @@
 #include "storage_handler.h"
 #include "wan_comm.h"
 #include "bench_throughput.h"
+#include "bench_latency_lan.h"  /* §5: BENCH_LATENCY_LAN_ENABLE gate */
 #include "esp_heap_caps.h"
+#include "clock_sync_lan.h"     /* §5: feed cross-MCU offset from RTC packet */
 #include <string.h>
 
 static const char *TAG = "WAN_UL";
@@ -513,6 +515,23 @@ static void uplink_handler_task(void *pvParameters) {
             ESP_LOGW(TAG, "Local response dropped after retries (handler=%s)",
                      handler_id_to_string(uplink_item.source_id));
           }
+#if BENCH_LATENCY_LAN_ENABLE
+        } else if (uplink_item.source_id == HANDLER_LAT) {
+          /* Bench latency (§5) bypass: always push to WAN regardless of
+           * internet status. The bench measures internal latency only —
+           * even if LTE/WiFi/Eth can't reach the server, we still want the
+           * packet to cross the SPI bridge so WAN can stamp T2 and log it.
+           * NEVER persist to SD (stale benchmark data is useless). */
+          ack_type_t ack_result;
+          esp_err_t send_result =
+              send_data_to_wan(packet, packet_len, &ack_result, ACK_TIMEOUT_MS);
+          if (send_result == ESP_OK) {
+            g_uplink_sent_count++;
+          } else {
+            g_uplink_fail_count++;
+            ESP_LOGW(TAG, "Bench LAT send failed (no SD fallback)");
+          }
+#endif /* BENCH_LATENCY_LAN_ENABLE */
         } else if (g_internet_status == INTERNET_STATUS_ONLINE) {
           ack_type_t ack_result;
           esp_err_t send_result =
@@ -815,7 +834,24 @@ static esp_err_t perform_handshake(void) {
  * Response: [R][T][dd/mm/yyyy-hh:mm:ss][status]
  */
 static esp_err_t request_rtc_and_status(void) {
-  uint8_t rtc_request[2] = {'R', 'T'};
+  /* §5 cross-MCU clock sync: each request carries a fresh 4-byte nonce.
+   * WAN echoes it back in the response; LAN rejects any response whose
+   * echo doesn't match — that's how we know the wan_us LAN just read
+   * was loaded for THIS cycle (not stale from a previous one). */
+  static uint32_t s_rtc_nonce = 0;
+  s_rtc_nonce++;
+  if (s_rtc_nonce == 0) s_rtc_nonce = 1; /* skip 0 — reserved as "no nonce" */
+
+  uint8_t rtc_request[6];
+  rtc_request[0] = 'R';
+  rtc_request[1] = 'T';
+  memcpy(&rtc_request[2], &s_rtc_nonce, sizeof(uint32_t));
+
+  /* Stamp LAN's clock right before issuing [R][T]. WAN stamps wan_us within
+   * ~1-3 ms of receiving the request, so using lan_send_us as the LAN-side
+   * reference makes the offset bias = WAN's processing time (a few ms)
+   * rather than vTaskDelay (~150 ms). */
+  uint64_t lan_send_us = (uint64_t)esp_timer_get_time();
 
   wan_comm_status_t status =
       wan_comm_send_command(g_wan_handle, rtc_request, sizeof(rtc_request));
@@ -828,25 +864,55 @@ static esp_err_t request_rtc_and_status(void) {
     return ESP_FAIL;
   }
 
-  vTaskDelay(pdMS_TO_TICKS(20));  /* reduced from 100ms; WAN reads RTC in <5ms */
+  /* Give WAN time to dispatch [R][T] → downlink_send_rtc_response and load a
+   * fresh wan_us into the SPI TX buffer. Under §5 bench load, WAN's uplink
+   * task is busy shipping HANDLER_LAT frames through WiFi (~50 ms each) so
+   * the dispatch can lag behind. 150 ms gives plenty of headroom; with the
+   * nonce check, any sample that slips through stale gets rejected. */
+  vTaskDelay(pdMS_TO_TICKS(150));
 
-  uint8_t response[32] = {0};
+  uint8_t response[40] = {0};
   status = wan_comm_request_data(g_wan_handle, response, sizeof(response));
 
   if (status == WAN_COMM_OK && response[0] == 'R' && response[1] == 'T') {
-    // Update RTC cache
+    /* === Always-fresh fields (RTC string + internet status) ===
+     * These don't depend on wan_us cycle — even a response loaded one RTC
+     * cycle ago still has the right calendar time and the right online/
+     * offline flag. Update them unconditionally so internet detection and
+     * RTC cache keep working independently of the clock-sync freshness
+     * check below. */
     if (xSemaphoreTake(g_rtc_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
       memcpy(g_rtc_cache.rtc_string, &response[2], 19);
       g_rtc_cache.rtc_string[19] = '\0';
       g_rtc_cache.valid = true;
       xSemaphoreGive(g_rtc_mutex);
     }
-
-    // Update internet status
     g_internet_status = (internet_status_t)response[22];
 
-    ESP_LOGD(TAG, "RTC: %s, Internet: %s", g_rtc_cache.rtc_string,
-             g_internet_status ? "ONLINE" : "OFFLINE");
+    /* === Freshness-gated field (wan_us → clock sync) ===
+     * Only feed clock_sync if the nonce echo matches what we just sent.
+     * A mismatch means WAN's TX buffer was loaded for a previous request
+     * — its wan_us is stale by 1+ cycles and would skew the offset by
+     * ~1 second. We silently skip the clock-sync update; the next poll
+     * usually catches a fresh sample. Internet status above stays valid. */
+    uint32_t echoed_nonce = 0;
+    memcpy(&echoed_nonce, &response[31], sizeof(uint32_t));
+    if (echoed_nonce == s_rtc_nonce) {
+      uint64_t wan_us = 0;
+      memcpy(&wan_us, &response[23], sizeof(uint64_t));
+      clock_sync_lan_update(wan_us, lan_send_us);
+      ESP_LOGD(TAG, "RTC: %s, Internet: %s, wan_us=%llu, nonce=%u (FRESH)",
+               g_rtc_cache.rtc_string,
+               g_internet_status ? "ONLINE" : "OFFLINE",
+               (unsigned long long)wan_us,
+               (unsigned)echoed_nonce);
+    } else {
+      ESP_LOGD(TAG, "RTC: %s, Internet: %s, nonce=%u expected=%u (STALE — clock skip)",
+               g_rtc_cache.rtc_string,
+               g_internet_status ? "ONLINE" : "OFFLINE",
+               (unsigned)echoed_nonce,
+               (unsigned)s_rtc_nonce);
+    }
 
     return ESP_OK;
   }

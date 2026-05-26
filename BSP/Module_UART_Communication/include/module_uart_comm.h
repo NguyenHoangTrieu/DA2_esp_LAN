@@ -122,6 +122,19 @@ size_t module_uart_comm_available(module_uart_comm_handle_t handle);
  */
 esp_err_t module_uart_comm_deinit(module_uart_comm_handle_t handle);
 
+/**
+ * @brief Drain pending UART driver events and return overflow counts.
+ *
+ * Non-blocking. Pops all uart_event_t currently sitting in the driver event
+ * queue. Returns the number of UART_BUFFER_FULL / UART_FIFO_OVF events
+ * observed. Used by the lane-ingress benchmark to detect silent overflow
+ * that uart_read_bytes() doesn't surface.
+ *
+ * @param handle UART handle
+ * @return uint32_t Count of overflow events drained, 0 if handle invalid.
+ */
+uint32_t module_uart_comm_drain_overflow_events(module_uart_comm_handle_t handle);
+
 #ifdef __cplusplus
 }
 #endif

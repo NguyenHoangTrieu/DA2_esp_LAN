@@ -254,3 +254,17 @@ esp_err_t module_uart_comm_deinit(module_uart_comm_handle_t handle) {
 
   return ESP_OK;
 }
+
+uint32_t module_uart_comm_drain_overflow_events(module_uart_comm_handle_t handle) {
+  if (!is_valid_handle(handle) || !handle->uart_queue) return 0;
+
+  uint32_t overflow_count = 0;
+  uart_event_t ev;
+  /* Non-blocking drain: pop everything currently queued. */
+  while (xQueueReceive(handle->uart_queue, &ev, 0) == pdTRUE) {
+    if (ev.type == UART_BUFFER_FULL || ev.type == UART_FIFO_OVF) {
+      overflow_count++;
+    }
+  }
+  return overflow_count;
+}

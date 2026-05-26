@@ -104,6 +104,11 @@ void app_main(void) {
     ESP_LOGW(TAG, "Lane ingress bench start failed (non-fatal)");
   }
 
+  /* §5 — End-to-end latency bench is stateless on the LAN side. Cross-MCU
+   * clock sync is fed automatically by the RTC-poll task (see
+   * mcu_wan_handler_uplink.c → request_rtc_and_status → clock_sync_lan_update).
+   * Per-packet stamping is done inline by RS485 handler when bench mode is on. */
+
   // Start Module Monitor Task - Module Base Setting Core
   ESP_ERROR_CHECK(module_monitor_task_start());
   ESP_LOGI(TAG, "Module Monitor Task started (Module Base Setting enabled)");

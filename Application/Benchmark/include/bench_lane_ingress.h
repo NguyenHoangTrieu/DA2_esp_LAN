@@ -28,7 +28,7 @@ extern "C" {
  *   0 = OFF — all public APIs no-op; zero overhead in module_bus_read.
  *   1 = ON  — raw consumer task drains the chosen lane + counter live.
  */
-#define BENCH_LANE_INGRESS_ENABLE 0
+#define BENCH_LANE_INGRESS_ENABLE 1
 
 #define BENCH_LANE_REPORT_INTERVAL_MS 2000
 
@@ -39,8 +39,10 @@ extern "C" {
 #define BENCH_LANE_RAW_STACK_ID 0
 #define BENCH_LANE_RAW_PORT     0  /* 0=UART, 1=SPI, 2=I2C, 3=USB */
 
-/** Read chunk size for raw consumer (bytes). */
-#define BENCH_LANE_RAW_READ_CHUNK 512
+/** Read chunk size for raw consumer (bytes).
+ *  Bigger chunks = less per-call overhead, more data per system call.
+ *  4 KB is a sweet spot at 5 Mbps (~8 ms of data per call). */
+#define BENCH_LANE_RAW_READ_CHUNK 4096
 
 /** Read timeout for raw consumer (ms). */
 #define BENCH_LANE_RAW_READ_TIMEOUT_MS 50
