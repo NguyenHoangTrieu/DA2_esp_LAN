@@ -27,8 +27,12 @@ extern "C" {
  * @brief Master switch.
  *   0 = OFF — all public APIs no-op; zero overhead in module_bus_read.
  *   1 = ON  — raw consumer task drains the chosen lane + counter live.
+ *
+ * MEASUREMENT COMPLETE — set back to 0 for production builds.
+ * Results: USB CDC FS = 4.05 Mbps (2000 pps × 256 B, miss=0, drop=0).
+ * See BENCHMARK_MONITOR_METHOD_AND_PLAN.md §2.5 for full results.
  */
-#define BENCH_LANE_INGRESS_ENABLE 1
+#define BENCH_LANE_INGRESS_ENABLE 0
 
 /**
  * @brief Isolation switch for the lane bench.
