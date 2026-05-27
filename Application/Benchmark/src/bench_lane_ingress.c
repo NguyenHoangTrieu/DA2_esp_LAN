@@ -17,18 +17,11 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
-#include "esp_pm.h"
 #include "module_config_controller.h"
-#include "module_uart_comm.h"
 #include "json_config_parser.h"
 #include "driver/uart.h"
 
 static const char *TAG = "bench_lane";
-
-/* Power-management lock: prevent CPU light-sleep while bench is running.
- * At 5 Mbps, UART HW FIFO (128 B) fills in 256 µs; light-sleep wake takes
- * ~100-200 µs, so silent overflow at every wake cycle. */
-static esp_pm_lock_handle_t s_pm_lock = NULL;
 
 #define BENCH_LANE_TASK_STACK_WORDS (4096 / sizeof(StackType_t))
 
@@ -101,8 +94,8 @@ void bench_lane_observe_hw_fifo(uint8_t stack_id, bench_lane_id_t lane,
 
 /* Reporter-side passive sampler: peeks each UART driver's pending bytes via
  * uart_get_buffered_data_len. Updates hw_fifo_max without touching driver code.
- * Only queries a stack whose UART driver is installed — otherwise the IDF
- * driver logs an internal error every report cycle. */
+ * Other lanes (I2C/SPI/USB) don't expose an equivalent public API in IDF — for
+ * those, drop/drv_buf_full from the lower driver layer is the only signal. */
 static void sample_uart_buffer_levels(void) {
     /* Stack 0 = UART_NUM_2 (TX=17/RX=18), Stack 1 = UART_NUM_1 (TX=8/RX=21).
      * See module_uart_comm.h STACKn_UART_PORT macros. */
@@ -110,24 +103,9 @@ static void sample_uart_buffer_levels(void) {
         UART_NUM_2, UART_NUM_1,
     };
     for (uint8_t s = 0; s < BENCH_LANE_STACK_COUNT; s++) {
-        if (module_config_controller_get_uart_handle(s) == NULL) continue;
         size_t pending = 0;
         if (uart_get_buffered_data_len(s_uart_port[s], &pending) == ESP_OK) {
             bench_lane_observe_hw_fifo(s, BENCH_LANE_UART, (uint32_t)pending);
-        }
-    }
-}
-
-/* Drain UART driver event queues for each initialised UART stack.
- * Translates UART_BUFFER_FULL / UART_FIFO_OVF events into drv_buf_full
- * counter — without this, silent driver-side overflow shows as no-loss. */
-static void drain_uart_overflow_events(void) {
-    for (uint8_t s = 0; s < BENCH_LANE_STACK_COUNT; s++) {
-        module_uart_comm_handle_t h = module_config_controller_get_uart_handle(s);
-        if (!h) continue;
-        uint32_t overflows = module_uart_comm_drain_overflow_events(h);
-        for (uint32_t i = 0; i < overflows; i++) {
-            bench_lane_count_drv_buf_full(s, BENCH_LANE_UART);
         }
     }
 }
@@ -143,9 +121,6 @@ static void bench_lane_reporter_task(void *arg) {
 
         /* Passive HW-FIFO sample BEFORE snapshot so peak survives the reset. */
         sample_uart_buffer_levels();
-        /* Drain UART driver event queue — turns BUFFER_FULL/FIFO_OVF events
-         * into drv_buf_full counter so silent overflow becomes visible. */
-        drain_uart_overflow_events();
 
         lane_counter_t snap[BENCH_LANE_STACK_COUNT][BENCH_LANE_COUNT];
 
@@ -206,10 +181,8 @@ static void bench_lane_reporter_task(void *arg) {
 static esp_err_t raw_init_lane(uint8_t stack_id, comm_port_type_t port) {
     switch (port) {
         case COMM_PORT_UART: {
-            /* 5 Mbps — ESP32-S3 UART theoretical max (APB_CLK/16 = 80 MHz/16).
-             * Requires the rig (Arduino) to also run at 5 Mbps. */
             uart_params_t p = {
-                .baudrate = 5000000,
+                .baudrate = 921600,
                 .parity   = 0,
                 .stopbit  = 1,
             };
@@ -281,15 +254,6 @@ esp_err_t bench_lane_ingress_start(void) {
         for (int l = 0; l < BENCH_LANE_COUNT; l++)
             s_ctr[s][l] = (lane_counter_t){0};
 
-    /* Acquire NO_LIGHT_SLEEP lock — at 5 Mbps UART RX, even ~100µs sleep
-     * causes HW FIFO (128 B) overflow. CPU must stay fully awake. */
-    if (esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "bench_lane", &s_pm_lock) == ESP_OK) {
-        esp_pm_lock_acquire(s_pm_lock);
-        ESP_LOGI(TAG, "PM lock acquired: light-sleep disabled while bench runs");
-    } else {
-        ESP_LOGW(TAG, "Failed to acquire PM lock — light-sleep may corrupt measurement");
-    }
-
     /* Reporter task */
     {
         StackType_t  *stack = (StackType_t *)heap_caps_malloc(
@@ -331,8 +295,7 @@ esp_err_t bench_lane_ingress_start(void) {
         TaskHandle_t h = xTaskCreateStatic(
             bench_lane_raw_consumer_task, "bench_lane_raw",
             BENCH_LANE_TASK_STACK_WORDS, NULL,
-            15, /* HIGH: must outrank WAN UL (5) and WAN DL (7) to drain UART
-                 * at 5 Mbps line rate without preemption. */
+            4, /* higher than reporter, lower than handlers */
             stack, tcb);
         if (!h) {
             heap_caps_free(stack);
@@ -347,11 +310,6 @@ esp_err_t bench_lane_ingress_start(void) {
 
 void bench_lane_ingress_stop(void) {
     s_running = false;
-    if (s_pm_lock) {
-        esp_pm_lock_release(s_pm_lock);
-        esp_pm_lock_delete(s_pm_lock);
-        s_pm_lock = NULL;
-    }
 }
 
 #endif /* BENCH_LANE_INGRESS_ENABLE */

@@ -36,13 +36,11 @@ extern "C" {
  * @brief Stack ID + lane the raw consumer drains (Mode A only).
  *        Edit before flashing for the lane under test.
  */
-#define BENCH_LANE_RAW_STACK_ID 0
-#define BENCH_LANE_RAW_PORT     0  /* 0=UART, 1=SPI, 2=I2C, 3=USB */
+#define BENCH_LANE_RAW_STACK_ID 1
+#define BENCH_LANE_RAW_PORT     2  /* 0=UART, 1=SPI, 2=I2C, 3=USB */
 
-/** Read chunk size for raw consumer (bytes).
- *  Bigger chunks = less per-call overhead, more data per system call.
- *  4 KB is a sweet spot at 5 Mbps (~8 ms of data per call). */
-#define BENCH_LANE_RAW_READ_CHUNK 4096
+/** Read chunk size for raw consumer (bytes). */
+#define BENCH_LANE_RAW_READ_CHUNK 512
 
 /** Read timeout for raw consumer (ms). */
 #define BENCH_LANE_RAW_READ_TIMEOUT_MS 50
