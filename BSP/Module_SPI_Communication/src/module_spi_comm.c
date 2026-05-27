@@ -19,6 +19,11 @@ struct module_spi_comm_s {
   uint32_t clock_speed_hz;
   uint8_t mode;
   bool initialized;
+  /* True only if THIS handle called spi_bus_initialize() — i.e. it was the
+   * first device on the bus.  Only the owner may call spi_bus_free().
+   * The second device on a shared bus must NOT free the bus on deinit,
+   * because the first device's handle is still using it. */
+  bool bus_initialized_by_us;
 };
 
 /* ===== Helper Functions ===== */
@@ -80,11 +85,19 @@ esp_err_t module_spi_comm_init(const module_spi_config_t *config,
       .max_transfer_sz = 4096,
   };
 
-  // Initialize SPI bus
-  esp_err_t ret =
-      spi_bus_initialize(host, &bus_config, SPI_DMA_CH_AUTO);
-  if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-    // ESP_ERR_INVALID_STATE means bus already initialized, which is OK
+  // Initialize SPI bus.
+  // ESP_ERR_INVALID_STATE means the bus was already initialized by another
+  // device (e.g. Stack 0 already called spi_bus_initialize for SPI3_HOST).
+  // In that case we attach our device to the existing bus without taking
+  // ownership — spi_bus_free() must NOT be called by this handle on deinit.
+  esp_err_t ret = spi_bus_initialize(host, &bus_config, SPI_DMA_CH_AUTO);
+  if (ret == ESP_OK) {
+    spi_handle->bus_initialized_by_us = true;
+  } else if (ret == ESP_ERR_INVALID_STATE) {
+    /* Bus already up — attach-only, no ownership. */
+    spi_handle->bus_initialized_by_us = false;
+    ESP_LOGI(TAG, "SPI%d bus already initialized, attaching device only", host + 1);
+  } else {
     ESP_LOGE(TAG, "Failed to initialize SPI bus: %s", esp_err_to_name(ret));
     free(spi_handle);
     return ret;
@@ -101,11 +114,16 @@ esp_err_t module_spi_comm_init(const module_spi_config_t *config,
       .post_cb = NULL,
   };
 
-  // Add device to bus
+  // Add device to bus.
+  // On failure: only free the bus if THIS handle initialized it.
+  // If we attached to an existing bus, do NOT free it — that would destroy
+  // the other stack's device that is still mounted on the bus.
   ret = spi_bus_add_device(host, &dev_config, &spi_handle->spi_device);
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "Failed to add SPI device: %s", esp_err_to_name(ret));
-    spi_bus_free(host);
+    if (spi_handle->bus_initialized_by_us) {
+      spi_bus_free(host);
+    }
     free(spi_handle);
     return ret;
   }
@@ -162,18 +180,29 @@ esp_err_t module_spi_comm_deinit(module_spi_comm_handle_t handle) {
     return ESP_ERR_INVALID_ARG;
   }
 
-  ESP_LOGI(TAG, "Deinitializing SPI%d", handle->host);
+  ESP_LOGI(TAG, "Deinitializing SPI%d (stack_id=%d, bus_owner=%d)",
+           handle->host + 1, handle->stack_id,
+           (int)handle->bus_initialized_by_us);
 
-  // Remove device
+  // Always remove our device from the bus.
   esp_err_t ret = spi_bus_remove_device(handle->spi_device);
   if (ret != ESP_OK) {
     ESP_LOGW(TAG, "Failed to remove SPI device: %s", esp_err_to_name(ret));
   }
 
-  // Free bus
-  ret = spi_bus_free(handle->host);
-  if (ret != ESP_OK) {
-    ESP_LOGW(TAG, "Failed to free SPI bus: %s", esp_err_to_name(ret));
+  // Only free the SPI bus if this handle was the one that initialized it.
+  // If another stack device is still attached to the same host, freeing the
+  // bus here would corrupt that device's subsequent transactions.
+  if (handle->bus_initialized_by_us) {
+    ret = spi_bus_free(handle->host);
+    if (ret != ESP_OK) {
+      ESP_LOGW(TAG, "Failed to free SPI bus: %s", esp_err_to_name(ret));
+    } else {
+      ESP_LOGI(TAG, "SPI%d bus freed (was bus owner)", handle->host + 1);
+    }
+  } else {
+    ESP_LOGI(TAG, "SPI%d bus NOT freed (not bus owner, other devices may remain)",
+             handle->host + 1);
   }
 
   // Mark as uninitialized

@@ -1,6 +1,13 @@
 /**
  * @file module_usb_comm.h
- * @brief Generic USB CDC Communication Driver for Modules
+ * @brief Generic USB CDC-ACM Communication Driver for Modules — HOST mode.
+ *
+ * The LAN MCU acts as the USB HOST; the plugged-in module is always the
+ * USB DEVICE (CDC-ACM). The host binds to the first CDC-ACM device that
+ * enumerates (any VID/PID), so no per-device IDs are configured here.
+ *
+ * HARDWARE: ESP32-S3 has a single USB-OTG controller -> exactly ONE USB
+ * host port (not per-stack). Only one handle may be active at a time.
  */
 
 #ifndef MODULE_USB_COMM_H
@@ -13,16 +20,6 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-/* ===== Hardware Definitions (Hardcoded) ===== */
-
-// Stack 0 USB configuration
-#define STACK0_USB_VID        0x303A  // Espressif VID
-#define STACK0_USB_PID        0x1001  // Custom PID
-
-// Stack 1 USB configuration  
-#define STACK1_USB_VID        0x303A  // Espressif VID
-#define STACK1_USB_PID        0x1002  // Custom PID
 
 /* ===== Type Definitions ===== */
 
@@ -54,18 +51,21 @@ typedef struct {
 /* ===== Public APIs ===== */
 
 /**
- * @brief Initialize USB CDC communication driver
+ * @brief Initialize the USB host (CDC-ACM) for a stack.
  *
- * Uses ESP32's built-in USB Serial/JTAG peripheral.
- * No pin configuration needed (USB D+/D- are hardwired).
+ * Installs the USB Host Library + CDC-ACM class driver and starts a
+ * background task that opens any CDC-ACM device that enumerates.
+ * D+/D- are hardwired (GPIO19/20 on ESP32-S3); no pin config needed.
+ * Receive() returns data only after a device is plugged in and opened.
  *
  * @param config Configuration structure
  * @param handle Output handle pointer
  * @return esp_err_t
  *         - ESP_OK: Success
  *         - ESP_ERR_INVALID_ARG: Invalid arguments
+ *         - ESP_ERR_INVALID_STATE: A USB host is already active (one OTG)
  *         - ESP_ERR_NO_MEM: Out of memory
- *         - ESP_FAIL: USB initialization failed
+ *         - ESP_FAIL: USB host/CDC driver install failed
  */
 esp_err_t module_usb_comm_init(const module_usb_config_t *config,
                                module_usb_comm_handle_t *handle);
@@ -98,6 +98,22 @@ esp_err_t module_usb_comm_send(module_usb_comm_handle_t handle,
 esp_err_t module_usb_comm_receive(module_usb_comm_handle_t handle,
                                   uint8_t *buffer, size_t max_len,
                                   size_t *received, uint32_t timeout_ms);
+
+/**
+ * @brief Read-and-reset the RX overflow event counter.
+ *
+ * Each event = one inbound CDC transfer whose surplus was dropped because
+ * the RX stream buffer was full (consumer too slow). This is the USB lane
+ * saturation signal, mirroring the UART overflow counter.
+ *
+ * @param handle USB handle
+ * @param rx_overflow_evt Output: events since last call (may be NULL)
+ * @return esp_err_t
+ *         - ESP_OK: Success
+ *         - ESP_ERR_INVALID_ARG: Invalid handle
+ */
+esp_err_t module_usb_comm_take_overflow(module_usb_comm_handle_t handle,
+                                        uint32_t *rx_overflow_evt);
 
 /**
  * @brief Flush USB RX buffer

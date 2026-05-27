@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2024-2025 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2024-2026 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -523,18 +523,23 @@ static void device_release(ext_hub_dev_t *ext_hub_dev)
     ext_hub_dev->single_thread.state = EXT_HUB_STATE_RELEASED;
 }
 
-static esp_err_t device_alloc_desc(ext_hub_dev_t *ext_hub_hdl, const usb_hub_descriptor_t *hub_desc)
+static esp_err_t device_alloc_desc(ext_hub_dev_t *ext_hub_dev,
+                                   const usb_hub_descriptor_t *hub_desc,
+                                   size_t hub_desc_len)
 {
-    // Allocate memory to store the configuration descriptor
-    usb_hub_descriptor_t *desc = heap_caps_malloc(hub_desc->bDescLength, MALLOC_CAP_DEFAULT);  // Buffer to copy over full configuration descriptor (wTotalLength)
+    EXT_HUB_CHECK(hub_desc_len >= sizeof(usb_hub_descriptor_t), ESP_ERR_INVALID_SIZE);
+
+    // Store only the bytes that were actually received. The driver currently consumes
+    // the fixed hub descriptor header.
+    usb_hub_descriptor_t *desc = heap_caps_malloc(hub_desc_len, MALLOC_CAP_DEFAULT);
     if (desc == NULL) {
         return ESP_ERR_NO_MEM;
     }
-    // Copy the hub descriptor
-    memcpy(desc, hub_desc, hub_desc->bDescLength);
+    memcpy(desc, hub_desc, hub_desc_len);
+    desc->bDescLength = (uint8_t)hub_desc_len;
     // Assign the hub descriptor to the device object
-    assert(ext_hub_hdl->constant.hub_desc == NULL);
-    ext_hub_hdl->constant.hub_desc = desc;
+    assert(ext_hub_dev->constant.hub_desc == NULL);
+    ext_hub_dev->constant.hub_desc = desc;
     return ESP_OK;
 }
 
@@ -848,17 +853,34 @@ static bool handle_hub_descriptor(ext_hub_dev_t *ext_hub_dev)
 {
     esp_err_t ret;
     bool pass;
+    size_t actual_desc_len = 0;
     usb_transfer_t *ctrl_xfer = &ext_hub_dev->constant.ctrl_urb->transfer;
     const usb_hub_descriptor_t *hub_desc = (const usb_hub_descriptor_t *)(ctrl_xfer->data_buffer + sizeof(usb_setup_packet_t));
 
     ESP_LOG_BUFFER_HEXDUMP(EXT_HUB_TAG, ctrl_xfer->data_buffer, ctrl_xfer->actual_num_bytes, ESP_LOG_VERBOSE);
 
-    if (hub_desc->bDescriptorType != USB_CLASS_DESCRIPTOR_TYPE_HUB) {
-        ESP_LOGE(EXT_HUB_TAG, "[%d] Hub Descriptor has wrong bDescriptorType", ext_hub_dev->constant.dev_addr);
+    if (ctrl_xfer->actual_num_bytes <
+            (int)(sizeof(usb_setup_packet_t) + sizeof(usb_hub_descriptor_t))) {
+        ESP_LOGE(EXT_HUB_TAG, "[%d] Hub Descriptor is too short (%d bytes)",
+                 ext_hub_dev->constant.dev_addr,
+                 ctrl_xfer->actual_num_bytes - (int)sizeof(usb_setup_packet_t));
         return false;
     }
 
-    ret = device_alloc_desc(ext_hub_dev, hub_desc);
+    actual_desc_len = ctrl_xfer->actual_num_bytes - sizeof(usb_setup_packet_t);
+
+    if (hub_desc->bDescLength < sizeof(usb_hub_descriptor_t)) {
+        ESP_LOGE(EXT_HUB_TAG, "[%d] Hub Descriptor has invalid bDescLength (%d)",
+                 ext_hub_dev->constant.dev_addr, hub_desc->bDescLength);
+        return false;
+    }
+
+    if (hub_desc->bDescriptorType != USB_CLASS_DESCRIPTOR_TYPE_HUB) {
+        ESP_LOGW(EXT_HUB_TAG, "[%d] Hub Descriptor has unexpected bDescriptorType (%#x), continuing",
+                 ext_hub_dev->constant.dev_addr, hub_desc->bDescriptorType);
+    }
+
+    ret = device_alloc_desc(ext_hub_dev, hub_desc, actual_desc_len);
     if (ret != ESP_OK) {
         pass = false;
         goto exit;
@@ -1296,6 +1318,18 @@ esp_err_t ext_hub_get_speed(ext_hub_handle_t ext_hub_hdl, usb_speed_t *speed)
     ESP_ERROR_CHECK(usbh_dev_get_info(ext_hub_dev->constant.dev_hdl, &dev_info));
     *speed = dev_info.speed;
     return ESP_OK;
+}
+
+hcd_port_handle_t ext_hub_get_root_port(ext_hub_handle_t ext_hub_hdl)
+{
+    EXT_HUB_CHECK(ext_hub_hdl != NULL, NULL);
+    EXT_HUB_CHECK(dev_is_in_list(ext_hub_hdl), NULL);
+    ext_hub_dev_t *ext_hub_dev = (ext_hub_dev_t *)ext_hub_hdl;
+    hcd_port_handle_t root_port_hdl = NULL;
+    if (usbh_dev_get_root_port_hdl(ext_hub_dev->constant.dev_hdl, &root_port_hdl) != ESP_OK) {
+        return NULL;
+    }
+    return root_port_hdl;
 }
 
 esp_err_t ext_hub_new_dev(uint8_t dev_addr)

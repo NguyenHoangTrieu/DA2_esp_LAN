@@ -453,6 +453,12 @@ esp_err_t module_bus_read(uint8_t stack_id, comm_port_type_t port_type,
       bench_lane_count_rx(stack_id, BENCH_LANE_USB, (uint32_t)*received_len);
     else
       bench_lane_count_miss(stack_id, BENCH_LANE_USB);
+
+    /* Surface host-side RX overflow as the USB lane saturation signal. */
+    uint32_t usb_ovf = 0;
+    module_usb_comm_take_overflow(g_stack_handles[stack_id].usb, &usb_ovf);
+    for (uint32_t i = 0; i < usb_ovf; i++)
+      bench_lane_count_drv_buf_full(stack_id, BENCH_LANE_USB);
     return r;
   }
 

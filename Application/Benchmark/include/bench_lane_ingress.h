@@ -50,19 +50,27 @@ extern "C" {
  * @brief Stack ID + lane the raw consumer drains (Mode A only).
  *        Edit before flashing for the lane under test.
  */
-#define BENCH_LANE_RAW_STACK_ID 1
-#define BENCH_LANE_RAW_PORT     1  /* 0=UART, 1=SPI, 2=I2C, 3=USB */
+#define BENCH_LANE_RAW_STACK_ID 0
+#define BENCH_LANE_RAW_PORT     3  /* 0=UART, 1=SPI, 2=I2C, 3=USB */
 
 /** Read chunk size for raw consumer (bytes). */
 #define BENCH_LANE_RAW_READ_CHUNK 512
 
-/** Read timeout for raw consumer (ms). */
+/** Read timeout for raw consumer (ms).
+ *  NOTE (SPI): timeout_ms is ignored for SPI because SPI full-duplex always
+ *  completes immediately (master clocks all bytes regardless of slave data).
+ *  The raw consumer adds vTaskDelay(1) after each transfer to prevent CPU
+ *  starvation of lower-priority tasks. */
 #define BENCH_LANE_RAW_READ_TIMEOUT_MS 50
 
 /** Lane identifiers — must stay in sync with the indexing below. */
 typedef enum {
     BENCH_LANE_UART = 0,
-    BENCH_LANE_SPI  = 1,
+    BENCH_LANE_SPI  = 1,   /* NOTE: miss counter always 0 for SPI — full-duplex
+                            * SPI clocks max_len bytes unconditionally, so
+                            * module_bus_read() always returns ESP_OK with
+                            * received_len=max_len even when slave has no data.
+                            * Use pps/kbps metrics; ignore miss for SPI lane. */
     BENCH_LANE_I2C  = 2,
     BENCH_LANE_USB  = 3,
     BENCH_LANE_COUNT
@@ -70,6 +78,20 @@ typedef enum {
 
 /** Number of stacks instrumented. Mirrors module_config_controller (0/1). */
 #define BENCH_LANE_STACK_COUNT 2
+
+/* -------------------------------------------------------------------------
+ * SPI Bus Assignment Note
+ * -------------------------------------------------------------------------
+ * WAN module (wan_comm)      uses SPI2_HOST, pins SCK=12 CS=10 IO0=11 IO1=13
+ * LAN module (module_spi_comm) uses SPI3_HOST, pins MOSI=40 MISO=42 SCLK=41
+ *                              CS=38 (Stack0) / CS=39 (Stack1)
+ *
+ * The two hosts are SEPARATE — no pin or peripheral conflict.
+ * DO NOT change either host assignment without updating both BSP drivers.
+ * module_spi_comm.c now tracks bus ownership (bus_initialized_by_us) so
+ * Stack0 and Stack1 can share SPI3_HOST without corrupting each other on
+ * deinit or add-device failure.
+ * ------------------------------------------------------------------------- */
 
 #if BENCH_LANE_INGRESS_ENABLE
 

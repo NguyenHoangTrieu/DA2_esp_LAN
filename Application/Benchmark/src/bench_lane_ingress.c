@@ -228,6 +228,17 @@ static void bench_lane_raw_consumer_task(void *arg) {
                               BENCH_LANE_RAW_READ_TIMEOUT_MS, &got);
         if (got == 0) {
             vTaskDelay(1);
+        } else if (port == COMM_PORT_SPI) {
+            /* SPI full-duplex: got is always BENCH_LANE_RAW_READ_CHUNK
+             * (spi_device_transmit clocks max_len bytes unconditionally).
+             * We MUST NOT vTaskDelay(1) here — that would cap the master
+             * to 1000/10ms = 100 pps regardless of the bench step rate.
+             * taskYIELD() gives up the CPU to equal/higher-priority tasks
+             * for one scheduler pass but lets this task re-run immediately
+             * if no other task needs the CPU.
+             * spi_device_transmit() already blocks during DMA, so this
+             * task yields naturally during every transaction. */
+            taskYIELD();
         }
     }
     ESP_LOGI(TAG, "Raw consumer stopped");

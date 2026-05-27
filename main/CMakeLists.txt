@@ -67,6 +67,7 @@ idf_component_register(SRCS "DA2_esp_LAN.c"
                                 esp_driver_spi
                                 esp_driver_twai
                                 usb
+                                usb_host_cdc_acm
                                 mbedtls
                                 esp_driver_usb_serial_jtag
                                 esp_http_client
