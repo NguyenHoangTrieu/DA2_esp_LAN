@@ -84,9 +84,18 @@ void app_main(void) {
 
   // Start WAN handler FIRST so its queue/mutexes are allocated before
   // module handlers (BLE/LoRa/etc.) consume internal RAM on NVS restore.
+  // Kept ON even in isolation builds: other tasks depend on its uplink queue,
+  // and a normal (non-flooded) bridge is part of the realistic baseline.
   mcu_wan_handler_start();
   ESP_LOGI(TAG, "MCU WAN handler started");
 
+#if BENCH_LANE_ISOLATE
+  /* Lane-ingress isolation build: skip the §1/§4 inter-MCU SPI throughput/counter
+   * benches (the artificial SPI FLOOD). The WAN handler above stays up, so the
+   * build is stable and the lane ceiling reflects a normal, non-flooded bridge.
+   * For contention cross-check only — see BENCH_LANE_ISOLATE in bench_lane_ingress.h. */
+  ESP_LOGW(TAG, "BENCH_LANE_ISOLATE=1: §1/§4 SPI flood benches SKIPPED");
+#else
   /* Start inter-MCU throughput benchmark (requires WAN handler uplink queue) */
   if (bench_throughput_start() != ESP_OK) {
     ESP_LOGW(TAG, "MCU throughput benchmark start failed (non-fatal)");
@@ -98,6 +107,7 @@ void app_main(void) {
     ESP_LOGW(TAG, "Bench counter task start failed (non-fatal)");
   }
   ESP_LOGI(TAG, "Benchmark counter task started");
+#endif
 
   /* Start lane ingress benchmark — gate via BENCH_LANE_INGRESS_ENABLE */
   if (bench_lane_ingress_start() != ESP_OK) {

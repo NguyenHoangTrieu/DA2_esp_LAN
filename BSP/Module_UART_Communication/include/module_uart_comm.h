@@ -17,6 +17,20 @@
 extern "C" {
 #endif
 
+/* ===== Lane-ingress benchmark A/B toggle ===== */
+/* 0 = Build A (production-faithful): module_uart_comm_receive() is byte-for-byte
+ *     identical to what the Zigbee/LoRa handler tasks run. The UART event queue
+ *     is left undrained — exactly as production leaves it — so ISR timing is not
+ *     perturbed. Use this build to measure the TRUE per-lane ceiling; detect
+ *     saturation by cross-checking rig sent-bytes vs LAN consumed-bytes.
+ * 1 = Build B (instrumented): receive() also drains the event queue to tally
+ *     UART_FIFO_OVF / UART_BUFFER_FULL so `drop`/`drv_buf_full` can register.
+ *     This changes ISR behaviour (observer effect) and is NOT production-faithful.
+ * Flip this define and reflash to run the A/B comparison. */
+#ifndef MODULE_UART_OVF_DETECT
+#define MODULE_UART_OVF_DETECT 0
+#endif
+
 /* ===== Hardware Pin Definitions (Hardcoded) ===== */
 #define STACK0_UART_PORT    UART_NUM_2
 #define STACK0_UART_TX_PIN  17
@@ -111,6 +125,22 @@ esp_err_t module_uart_comm_flush(module_uart_comm_handle_t handle);
  * @return size_t Number of bytes available, 0 if handle is invalid
  */
 size_t module_uart_comm_available(module_uart_comm_handle_t handle);
+
+/**
+ * @brief Read and clear the driver overflow counters since the last call.
+ *
+ * The UART driver is installed with an event queue, but production code never
+ * consumes it. module_uart_comm_receive() drains that queue and tallies HW FIFO
+ * overflows and SW ring-buffer-full events. This getter returns those tallies
+ * (delta since last call) and resets them — used by the lane-ingress benchmark
+ * to detect bus saturation. Either output pointer may be NULL.
+ *
+ * @param handle    UART handle
+ * @param fifo_ovf  Output: UART_FIFO_OVF events (HW FIFO overflow), or NULL
+ * @param buf_full  Output: UART_BUFFER_FULL events (SW ring full), or NULL
+ */
+void module_uart_comm_take_overflow(module_uart_comm_handle_t handle,
+                                    uint32_t *fifo_ovf, uint32_t *buf_full);
 
 /**
  * @brief Deinitialize UART communication driver

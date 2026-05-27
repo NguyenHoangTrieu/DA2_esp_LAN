@@ -150,6 +150,16 @@ esp_err_t module_bus_read(uint8_t stack_id, comm_port_type_t port_type,
                           size_t *received_len);
 
 /**
+ * @brief Bytes currently pending in the RX software ring buffer.
+ *
+ * UART only — other lanes expose no equivalent public API in IDF and return 0.
+ * Used by the lane-ingress benchmark to track the buffer high-water mark. Cheap
+ * (reads a driver counter); safe to call frequently. Returns 0 if not applicable
+ * or the bus is not initialized.
+ */
+size_t module_bus_rx_pending(uint8_t stack_id, comm_port_type_t port_type);
+
+/**
  * @brief Write single GPIO pin
  *
  * @param stack_id Stack ID (0 or 1)

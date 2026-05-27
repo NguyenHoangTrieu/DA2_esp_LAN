@@ -391,6 +391,19 @@ esp_err_t module_bus_read(uint8_t stack_id, comm_port_type_t port_type,
       bench_lane_count_rx(stack_id, BENCH_LANE_UART, (uint32_t)*received_len);
     else
       bench_lane_count_miss(stack_id, BENCH_LANE_UART);
+
+#if MODULE_UART_OVF_DETECT
+    /* Build B only: surface driver overflow as saturation signal. Compiled out
+     * in Build A so the read path matches the Zigbee/LoRa handlers exactly.
+     * fifo_ovf = HW FIFO overflow (hard drop); buf_full = SW ring full. */
+    uint32_t fifo_ovf = 0, buf_full = 0;
+    module_uart_comm_take_overflow(g_stack_handles[stack_id].uart, &fifo_ovf,
+                                   &buf_full);
+    for (uint32_t i = 0; i < fifo_ovf; i++)
+      bench_lane_count_drop(stack_id, BENCH_LANE_UART);
+    for (uint32_t i = 0; i < buf_full; i++)
+      bench_lane_count_drv_buf_full(stack_id, BENCH_LANE_UART);
+#endif
     return r;
   }
 
@@ -399,13 +412,16 @@ esp_err_t module_bus_read(uint8_t stack_id, comm_port_type_t port_type,
       ESP_LOGE(TAG, "SPI not initialized for stack %d", stack_id);
       return ESP_ERR_INVALID_STATE;
     }
-    *received_len = max_len;
     esp_err_t r = module_spi_comm_transfer(g_stack_handles[stack_id].spi, NULL, buffer,
                                            max_len);
-    if (r == ESP_OK && *received_len > 0)
+    if (r == ESP_OK) {
+      /* Full-duplex SPI always clocks exactly max_len bytes per transaction. */
+      *received_len = max_len;
       bench_lane_count_rx(stack_id, BENCH_LANE_SPI, (uint32_t)*received_len);
-    else
+    } else {
+      *received_len = 0;
       bench_lane_count_miss(stack_id, BENCH_LANE_SPI);
+    }
     return r;
   }
 
@@ -483,6 +499,17 @@ size_t module_bus_drain(uint8_t stack_id, comm_port_type_t port_type,
   }
   buf[total] = '\0';
   return total;
+}
+
+size_t module_bus_rx_pending(uint8_t stack_id, comm_port_type_t port_type) {
+  if (stack_id > 1)
+    return 0;
+  /* Only UART exposes a public "bytes buffered" API in IDF. */
+  if (port_type == COMM_PORT_UART &&
+      g_stack_handles[stack_id].uart_initialized) {
+    return module_uart_comm_available(g_stack_handles[stack_id].uart);
+  }
+  return 0;
 }
 
 esp_err_t module_gpio_write(uint8_t stack_id, const char *pin, bool state) {

@@ -21,6 +21,8 @@ struct module_uart_comm_s {
   size_t rx_buffer_size;
   size_t tx_buffer_size;
   bool initialized;
+  volatile uint32_t fifo_ovf; /* UART_FIFO_OVF events (HW FIFO overflow)  */
+  volatile uint32_t buf_full; /* UART_BUFFER_FULL events (SW ring full)   */
 };
 
 /* ===== Helper Functions ===== */
@@ -185,6 +187,22 @@ esp_err_t module_uart_comm_receive(module_uart_comm_handle_t handle,
   int length =
       uart_read_bytes(handle->port, buffer, max_len, pdMS_TO_TICKS(timeout_ms));
 
+#if MODULE_UART_OVF_DETECT
+  // Build B only: drain the UART event queue (installed at init but otherwise
+  // never read) and tally overflow events for the lane-ingress benchmark.
+  // NOTE: this is NOT in the production read path — Build A (=0) compiles it out
+  // so receive() stays identical to what the Zigbee/LoRa handlers execute.
+  if (handle->uart_queue) {
+    uart_event_t ev;
+    while (xQueueReceive(handle->uart_queue, &ev, 0) == pdTRUE) {
+      if (ev.type == UART_FIFO_OVF)
+        handle->fifo_ovf++;
+      else if (ev.type == UART_BUFFER_FULL)
+        handle->buf_full++;
+    }
+  }
+#endif
+
   // Unlock mutex
   xSemaphoreGive(handle->mutex);
 
@@ -226,6 +244,23 @@ size_t module_uart_comm_available(module_uart_comm_handle_t handle) {
   uart_get_buffered_data_len(handle->port, &available);
 
   return available;
+}
+
+void module_uart_comm_take_overflow(module_uart_comm_handle_t handle,
+                                    uint32_t *fifo_ovf, uint32_t *buf_full) {
+  uint32_t f = 0, b = 0;
+  if (is_valid_handle(handle) &&
+      xSemaphoreTake(handle->mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    f = handle->fifo_ovf;
+    b = handle->buf_full;
+    handle->fifo_ovf = 0;
+    handle->buf_full = 0;
+    xSemaphoreGive(handle->mutex);
+  }
+  if (fifo_ovf)
+    *fifo_ovf = f;
+  if (buf_full)
+    *buf_full = b;
 }
 
 esp_err_t module_uart_comm_deinit(module_uart_comm_handle_t handle) {

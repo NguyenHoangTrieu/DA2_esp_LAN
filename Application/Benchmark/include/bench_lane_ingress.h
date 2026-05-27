@@ -30,6 +30,20 @@ extern "C" {
  */
 #define BENCH_LANE_INGRESS_ENABLE 1
 
+/**
+ * @brief Isolation switch for the lane bench.
+ *   0 = full layout: WAN bridge + the §1/§4 inter-MCU SPI FLOOD benches both run
+ *       alongside the lane consumer (worst-case contention).
+ *   1 = no-flood: app_main keeps the WAN handler up (stable, normal bridge) but
+ *       skips the §1/§4 SPI throughput/counter benches (the artificial flood).
+ *       This isolates how much of the UART throughput drop is caused by the SPI
+ *       flood. If UART jumps toward ~720 kbps, the contention hypothesis is
+ *       confirmed. Revert to 0 afterwards.
+ */
+#ifndef BENCH_LANE_ISOLATE
+#define BENCH_LANE_ISOLATE 0
+#endif
+
 #define BENCH_LANE_REPORT_INTERVAL_MS 2000
 
 /**
@@ -37,7 +51,7 @@ extern "C" {
  *        Edit before flashing for the lane under test.
  */
 #define BENCH_LANE_RAW_STACK_ID 1
-#define BENCH_LANE_RAW_PORT     2  /* 0=UART, 1=SPI, 2=I2C, 3=USB */
+#define BENCH_LANE_RAW_PORT     1  /* 0=UART, 1=SPI, 2=I2C, 3=USB */
 
 /** Read chunk size for raw consumer (bytes). */
 #define BENCH_LANE_RAW_READ_CHUNK 512

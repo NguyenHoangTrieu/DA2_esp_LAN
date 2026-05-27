@@ -19,7 +19,6 @@
 #include "esp_heap_caps.h"
 #include "module_config_controller.h"
 #include "json_config_parser.h"
-#include "driver/uart.h"
 
 static const char *TAG = "bench_lane";
 
@@ -92,24 +91,6 @@ void bench_lane_observe_hw_fifo(uint8_t stack_id, bench_lane_id_t lane,
     portEXIT_CRITICAL(&s_mux);
 }
 
-/* Reporter-side passive sampler: peeks each UART driver's pending bytes via
- * uart_get_buffered_data_len. Updates hw_fifo_max without touching driver code.
- * Other lanes (I2C/SPI/USB) don't expose an equivalent public API in IDF — for
- * those, drop/drv_buf_full from the lower driver layer is the only signal. */
-static void sample_uart_buffer_levels(void) {
-    /* Stack 0 = UART_NUM_2 (TX=17/RX=18), Stack 1 = UART_NUM_1 (TX=8/RX=21).
-     * See module_uart_comm.h STACKn_UART_PORT macros. */
-    static const uart_port_t s_uart_port[BENCH_LANE_STACK_COUNT] = {
-        UART_NUM_2, UART_NUM_1,
-    };
-    for (uint8_t s = 0; s < BENCH_LANE_STACK_COUNT; s++) {
-        size_t pending = 0;
-        if (uart_get_buffered_data_len(s_uart_port[s], &pending) == ESP_OK) {
-            bench_lane_observe_hw_fifo(s, BENCH_LANE_UART, (uint32_t)pending);
-        }
-    }
-}
-
 static void bench_lane_reporter_task(void *arg) {
     (void)arg;
     ESP_LOGI(TAG, "Lane ingress reporter started (interval %d ms)",
@@ -118,9 +99,6 @@ static void bench_lane_reporter_task(void *arg) {
     while (s_running) {
         vTaskDelay(pdMS_TO_TICKS(BENCH_LANE_REPORT_INTERVAL_MS));
         if (!s_running) break;
-
-        /* Passive HW-FIFO sample BEFORE snapshot so peak survives the reset. */
-        sample_uart_buffer_levels();
 
         lane_counter_t snap[BENCH_LANE_STACK_COUNT][BENCH_LANE_COUNT];
 
@@ -234,6 +212,16 @@ static void bench_lane_raw_consumer_task(void *arg) {
              (unsigned)stack_id, (int)port, BENCH_LANE_RAW_READ_CHUNK);
 
     while (s_running) {
+        /* High-water sample BEFORE draining: the ring holds whatever piled up
+         * since the last read, so this catches the peak fill (e.g. when the
+         * consumer was preempted by higher-prio tasks). UART only — other lanes
+         * return 0. Frequent + cheap, and only touches the installed port, so it
+         * neither spams errors nor needs the once-per-window reporter sample. */
+        if (port == COMM_PORT_UART) {
+            bench_lane_observe_hw_fifo(
+                stack_id, BENCH_LANE_UART,
+                (uint32_t)module_bus_rx_pending(stack_id, port));
+        }
         size_t got = 0;
         (void)module_bus_read(stack_id, port, rx_buf,
                               sizeof(rx_buf),

@@ -18,18 +18,18 @@ extern "C" {
 /* ===== Hardware Pin Definitions (Hardcoded) ===== */
 
 // Stack 0 SPI pins (adjust according to hardware schematic)
-#define STACK0_SPI_HOST       SPI2_HOST
-#define STACK0_SPI_MOSI_PIN   13
-#define STACK0_SPI_MISO_PIN   12
-#define STACK0_SPI_SCLK_PIN   14
-#define STACK0_SPI_CS_PIN     15
+#define STACK0_SPI_HOST       SPI3_HOST
+#define STACK0_SPI_MOSI_PIN   40
+#define STACK0_SPI_MISO_PIN   42
+#define STACK0_SPI_SCLK_PIN   41
+#define STACK0_SPI_CS_PIN     38
 
 // Stack 1 SPI pins (adjust according to hardware schematic)
 #define STACK1_SPI_HOST       SPI3_HOST
-#define STACK1_SPI_MOSI_PIN   23
-#define STACK1_SPI_MISO_PIN   19
-#define STACK1_SPI_SCLK_PIN   18
-#define STACK1_SPI_CS_PIN     5
+#define STACK1_SPI_MOSI_PIN   40
+#define STACK1_SPI_MISO_PIN   42
+#define STACK1_SPI_SCLK_PIN   41
+#define STACK1_SPI_CS_PIN     39
 
 /* ===== Type Definitions ===== */
 
