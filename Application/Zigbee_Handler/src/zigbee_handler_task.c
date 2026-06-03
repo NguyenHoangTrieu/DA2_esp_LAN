@@ -564,8 +564,13 @@ esp_err_t zigbee_handler_task_stop(uint8_t stack_id) {
   if (!g_zb_task.running[stack_id])
     return ESP_OK;
 
+  /* Set running=false then delete the worker tasks EXTERNALLY and
+   * immediately, before yielding. Do NOT add a delay here: a delay lets the
+   * worker tasks observe running==false, exit their loops and self-delete via
+   * vTaskDelete(NULL). After that the stored handles below become dangling and
+   * the vTaskDelete() calls would be a double-delete (use-after-free) →
+   * LoadProhibited panic. This mirrors the proven lora_handler_task_stop(). */
   g_zb_task.running[stack_id] = false;
-  vTaskDelay(pdMS_TO_TICKS(200));
 
   if (g_zb_task.uplink_handle[stack_id]) {
     vTaskDelete(g_zb_task.uplink_handle[stack_id]);
