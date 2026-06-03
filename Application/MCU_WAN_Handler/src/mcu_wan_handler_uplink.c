@@ -839,6 +839,19 @@ static esp_err_t request_rtc_and_status(void) {
    * echo doesn't match — that's how we know the wan_us LAN just read
    * was loaded for THIS cycle (not stale from a previous one). */
   static uint32_t s_rtc_nonce = 0;
+
+  /* Ring of recent (nonce → lan_send_us). A stale RTC response (one whose echo
+   * is from a PREVIOUS cycle, common when the WAN is busy under §5 load) is
+   * still perfectly usable for clock sync — provided we pair its wan_us with
+   * the lan_send_us of the SAME cycle it echoes, not the latest one. Rejecting
+   * stale samples (the old behaviour) starved clock_sync down to one sample,
+   * froze the offset, and let the ~21 ppm crystal skew drift straight into the
+   * measured latency. Pairing by echoed nonce keeps the skew regression fed
+   * every second → offset re-anchors → no drift. */
+#define RTC_NONCE_HIST 16
+  static uint32_t s_nonce_hist[RTC_NONCE_HIST]   = {0};
+  static uint64_t s_lansend_hist[RTC_NONCE_HIST] = {0};
+
   s_rtc_nonce++;
   if (s_rtc_nonce == 0) s_rtc_nonce = 1; /* skip 0 — reserved as "no nonce" */
 
@@ -852,6 +865,13 @@ static esp_err_t request_rtc_and_status(void) {
    * reference makes the offset bias = WAN's processing time (a few ms)
    * rather than vTaskDelay (~150 ms). */
   uint64_t lan_send_us = (uint64_t)esp_timer_get_time();
+
+  /* Remember this cycle so a later (possibly stale) response can be paired. */
+  {
+    uint32_t hi = s_rtc_nonce % RTC_NONCE_HIST;
+    s_nonce_hist[hi]   = s_rtc_nonce;
+    s_lansend_hist[hi] = lan_send_us;
+  }
 
   wan_comm_status_t status =
       wan_comm_send_command(g_wan_handle, rtc_request, sizeof(rtc_request));
@@ -889,29 +909,30 @@ static esp_err_t request_rtc_and_status(void) {
     }
     g_internet_status = (internet_status_t)response[22];
 
-    /* === Freshness-gated field (wan_us → clock sync) ===
-     * Only feed clock_sync if the nonce echo matches what we just sent.
-     * A mismatch means WAN's TX buffer was loaded for a previous request
-     * — its wan_us is stale by 1+ cycles and would skew the offset by
-     * ~1 second. We silently skip the clock-sync update; the next poll
-     * usually catches a fresh sample. Internet status above stays valid. */
+    /* === wan_us → clock sync, paired by echoed nonce ===
+     * The WAN echoes the nonce of the request whose wan_us it loaded. Look that
+     * nonce up in our ring and pair wan_us with the lan_send_us of THAT cycle —
+     * so a response that's a few cycles stale is still a valid (lan,wan) point
+     * (its wan_us and the paired lan_send_us belong to the same instant). Only
+     * skip if the echoed nonce is unknown (older than the ring / never sent). */
     uint32_t echoed_nonce = 0;
     memcpy(&echoed_nonce, &response[31], sizeof(uint32_t));
-    if (echoed_nonce == s_rtc_nonce) {
+    uint32_t ei = echoed_nonce % RTC_NONCE_HIST;
+    if (echoed_nonce != 0 && s_nonce_hist[ei] == echoed_nonce) {
       uint64_t wan_us = 0;
       memcpy(&wan_us, &response[23], sizeof(uint64_t));
-      clock_sync_lan_update(wan_us, lan_send_us);
-      ESP_LOGD(TAG, "RTC: %s, Internet: %s, wan_us=%llu, nonce=%u (FRESH)",
+      clock_sync_lan_update(wan_us, s_lansend_hist[ei]);
+      ESP_LOGD(TAG, "RTC: %s, Internet: %s, wan_us=%llu, nonce=%u (lag=%u)",
                g_rtc_cache.rtc_string,
                g_internet_status ? "ONLINE" : "OFFLINE",
                (unsigned long long)wan_us,
-               (unsigned)echoed_nonce);
+               (unsigned)echoed_nonce,
+               (unsigned)(s_rtc_nonce - echoed_nonce));
     } else {
-      ESP_LOGD(TAG, "RTC: %s, Internet: %s, nonce=%u expected=%u (STALE — clock skip)",
+      ESP_LOGD(TAG, "RTC: %s, Internet: %s, nonce=%u unknown (clock skip)",
                g_rtc_cache.rtc_string,
                g_internet_status ? "ONLINE" : "OFFLINE",
-               (unsigned)echoed_nonce,
-               (unsigned)s_rtc_nonce);
+               (unsigned)echoed_nonce);
     }
 
     return ESP_OK;

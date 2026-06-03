@@ -9,6 +9,7 @@
 #include "bench_counter.h"
 #include "bench_throughput.h"
 #include "bench_lane_ingress.h"
+#include "bench_latency_lan.h"
 #include <esp_pm.h>
 
 static const char *TAG = "MAIN APP";
@@ -114,10 +115,14 @@ void app_main(void) {
     ESP_LOGW(TAG, "Lane ingress bench start failed (non-fatal)");
   }
 
-  /* §5 — End-to-end latency bench is stateless on the LAN side. Cross-MCU
-   * clock sync is fed automatically by the RTC-poll task (see
-   * mcu_wan_handler_uplink.c → request_rtc_and_status → clock_sync_lan_update).
-   * Per-packet stamping is done inline by RS485 handler when bench mode is on. */
+  /* §5 — End-to-end latency bench. Cross-MCU clock sync is fed automatically by
+   * the RTC-poll task (see mcu_wan_handler_uplink.c → request_rtc_and_status →
+   * clock_sync_lan_update). The ingress source is selected by
+   * BENCH_LATENCY_LAN_SRC:
+   *   - SRC_RS485: T1 stamping is done inline by the RS485 handler (no task).
+   *   - SRC_USB:   a dedicated USB-rig ingress task frames packets + stamps T1.
+   * The call below is a no-op stub unless the USB source is selected. */
+  bench_latency_usb_start();
 
   // Start Module Monitor Task - Module Base Setting Core
   ESP_ERROR_CHECK(module_monitor_task_start());

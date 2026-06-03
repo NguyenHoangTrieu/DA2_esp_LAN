@@ -268,11 +268,13 @@ static void rs485_handler_task(void *arg) {
         ESP_LOGI(TAG, "Received RS485 data: %u bytes", actual_read);
         ESP_LOG_BUFFER_HEX(TAG, rx_buffer, actual_read);
 
-        // Forward to WAN uplink. When §5 latency bench is enabled, stamp T1
-        // here (LAN ingress) and ship as HANDLER_LAT so WAN can compute
-        // T2 − T1 right after socket send. Otherwise the RS485 frame goes
-        // through its normal production route.
-#if BENCH_LATENCY_LAN_ENABLE
+        // Forward to WAN uplink. When the §5 latency bench is enabled AND the
+        // RS485 lane is the chosen ingress source, stamp T1 here (LAN ingress)
+        // and ship as HANDLER_LAT so WAN can compute T2 − T1 right after socket
+        // send. With the USB-rig source (or bench off), RS485 takes its normal
+        // production route — the §5 ingress is driven by bench_latency_usb_task.
+#if BENCH_LATENCY_LAN_ENABLE && \
+    (BENCH_LATENCY_LAN_SRC == BENCH_LATENCY_LAN_SRC_RS485)
         bool ok = bench_latency_lan_send(rx_buffer, (uint16_t)actual_read);
 #else
         bool ok = mcu_wan_enqueue_uplink(HANDLER_RS485, rx_buffer, actual_read);
