@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 1. Export ESP-IDF environment variables (ensure correct version and toolchain)
-source ~/esp-idf/export.sh
+source ~/esp/esp-idf/export.sh
 
 # 2. (Optional) remove old build directory for clean build
 # idf.py fullclean

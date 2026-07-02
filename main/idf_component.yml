@@ -19,3 +19,4 @@ dependencies:
   espressif/usb: '*'
   espressif/usb_host_cdc_acm: '*'
   espressif/cjson: ^1.7.19
+  espressif/mqtt: '*'

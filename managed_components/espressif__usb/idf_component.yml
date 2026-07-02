@@ -8,7 +8,7 @@ files:
 issues: https://github.com/espressif/esp-usb/issues
 repository: git://github.com/espressif/esp-usb.git
 repository_info:
-  commit_sha: 78c87b7a6d30add607833533612e0ff55967da6d
+  commit_sha: 8bef90d12a4f1af06309afee02e982ac12f18943
   path: host/usb
 tags:
 - usb
@@ -21,4 +21,4 @@ targets:
 - esp32h4
 - linux
 url: https://github.com/espressif/esp-usb/tree/master/host/usb
-version: 1.4.0
+version: 1.4.1
